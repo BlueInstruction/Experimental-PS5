@@ -1,0 +1,38 @@
+{
+  "buildFiles": [
+    "/app/applet/app/src/main/cpp/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/opt/android/sdk/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/app/applet/app/.cxx/Debug/5v4l4e3w/x86",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/opt/android/sdk/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/app/applet/app/.cxx/Debug/5v4l4e3w/x86",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "px5::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "x86",
+      "artifactName": "px5",
+      "output": "/app/applet/app/build/intermediates/cxx/Debug/5v4l4e3w/obj/x86/libpx5.so",
+      "runtimeFiles": []
+    }
+  },
+  "toolchains": {
+    "toolchain": {
+      "cCompilerExecutable": "/opt/android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/clang.lld",
+      "cppCompilerExecutable": "/opt/android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++.lld"
+    }
+  },
+  "cFileExtensions": [],
+  "cppFileExtensions": [
+    "cpp"
+  ]
+}

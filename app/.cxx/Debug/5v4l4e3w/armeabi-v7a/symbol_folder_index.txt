@@ -1,0 +1,1 @@
+/app/applet/app/build/intermediates/cxx/Debug/5v4l4e3w/obj/armeabi-v7a

@@ -28,12 +28,11 @@ jobs:
         packages: 'ndk;26.1.10909125 cmake;3.22.1'
 
     - name: Setup Gradle
-      uses: gradle/gradle-build-action@v3
+      uses: gradle/actions/setup-gradle@v3
       with:
-        gradle-version: '8.5'
+        gradle-version: '8.9'
 
     - name: Build Debug APK
-      # working-directory: android
       run: gradle assembleDebug --no-daemon --stacktrace --info
 
     - name: Upload APK

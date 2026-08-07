@@ -1,5 +1,12 @@
 package com.px5.emulator
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
@@ -14,11 +21,17 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.Image
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -31,6 +44,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
@@ -41,6 +56,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -53,9 +74,20 @@ import androidx.navigation.compose.rememberNavController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
+import com.px5.emulator.core.FexCoreWrapper
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        try {
+            val fexCore = FexCoreWrapper()
+            val initSuccess = fexCore.initializeFexCore()
+            android.util.Log.i("PX5_JNI", "FEXCore init status: $initSuccess - ${fexCore.stringFromJNI()}")
+        } catch (e: Exception) {
+            android.util.Log.e("PX5_JNI", "Failed to initialize FEXCore: ${e.message}")
+        }
+        
         enableEdgeToEdge()
         setContent {
             PX5Theme {
@@ -65,14 +97,8 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-data class Game(
-    val id: String,
-    val name: String,
-    val path: String,
-    val lastPlayed: String = "Never",
-    val playTime: String = "0 hours",
-    val version: String = "1.00"
-)
+
+
 
 @Composable
 fun PX5Theme(content: @Composable () -> Unit) {
@@ -88,7 +114,8 @@ fun PX5Theme(content: @Composable () -> Unit) {
 }
 
 @Composable
-fun AppNavigation() {
+fun AppNavigation(gameViewModel: GameViewModel = viewModel()) {
+    val games by gameViewModel.allGames.collectAsStateWithLifecycle()
     val navController = rememberNavController()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val coroutineScope = rememberCoroutineScope()
@@ -139,6 +166,8 @@ fun AppNavigation() {
         NavHost(navController = navController, startDestination = "home") {
             composable("home") {
                 HomeScreen(
+                    games = games,
+                    gameViewModel = gameViewModel,
                     onGameSelected = { path ->
                         navController.navigate("emulation?path=$path")
                     },
@@ -155,6 +184,8 @@ fun AppNavigation() {
             }
             composable("library") {
                 AppLibraryScreen(
+                    games = games,
+                    gameViewModel = gameViewModel,
                     onBackClick = { navController.popBackStack() },
                     onGameSelected = { path -> navController.navigate("emulation?path=$path") }
                 )
@@ -217,19 +248,30 @@ fun SettingsScreen(onBackClick: () -> Unit) {
 }
 
 @Composable
-fun AppLibraryScreen(onBackClick: () -> Unit, onGameSelected: (String) -> Unit) {
-    val games = remember {
-        listOf(
-            Game("1", "Astro's Playroom", "/data/astro"),
-            Game("2", "Demon's Souls", "/data/demons"),
-            Game("3", "Spider-Man", "/data/spidey")
-        )
-    }
+fun AppLibraryScreen(
+    games: List<GameEntity>,
+    gameViewModel: GameViewModel,
+    onBackClick: () -> Unit,
+    onGameSelected: (String) -> Unit
+) {
+    var showFavoritesOnly by remember { mutableStateOf(false) }
+    val displayedGames = if (showFavoritesOnly) games.filter { it.isFavorite } else games
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color(0xFF121212))
     ) {
+        if (displayedGames.isEmpty() && games.isEmpty()) {
+            Image(
+                painter = painterResource(id = R.drawable.empty_state_games_1786087429410),
+                contentDescription = "Background",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+                alpha = 0.5f
+            )
+        }
+
         Column(modifier = Modifier.fillMaxSize()) {
             Row(
                 modifier = Modifier
@@ -243,20 +285,49 @@ fun AppLibraryScreen(onBackClick: () -> Unit, onGameSelected: (String) -> Unit) 
                 }
                 Spacer(modifier = Modifier.width(16.dp))
                 Text("App Library", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                
+                Spacer(modifier = Modifier.weight(1f))
+                
+                FilterChip(
+                    selected = showFavoritesOnly,
+                    onClick = { showFavoritesOnly = !showFavoritesOnly },
+                    label = { Text("Favorites") },
+                    leadingIcon = if (showFavoritesOnly) {
+                        { Icon(imageVector = Icons.Default.Favorite, contentDescription = "Favorites", modifier = Modifier.size(18.dp)) }
+                    } else {
+                        { Icon(imageVector = Icons.Default.FavoriteBorder, contentDescription = "Favorites", modifier = Modifier.size(18.dp)) }
+                    }
+                )
             }
             
-            LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 160.dp),
-                contentPadding = PaddingValues(24.dp),
-                horizontalArrangement = Arrangement.spacedBy(24.dp),
-                verticalArrangement = Arrangement.spacedBy(24.dp),
-                modifier = Modifier.fillMaxSize()
-            ) {
-                items(games) { game ->
-                    PX5GameCard(
-                        game = game,
-                        onClick = { onGameSelected(game.path) }
+            if (displayedGames.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (showFavoritesOnly) "No favorite games found" else "No games found",
+                        color = Color.White,
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Light
                     )
+                }
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(minSize = 160.dp),
+                    contentPadding = PaddingValues(24.dp),
+                    horizontalArrangement = Arrangement.spacedBy(24.dp),
+                    verticalArrangement = Arrangement.spacedBy(24.dp),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    items(displayedGames) { game ->
+                        PX5GameCard(
+                            game = game,
+                            onClick = { onGameSelected(game.path) },
+                            onFavoriteClick = { gameViewModel.toggleFavorite(game.id, !game.isFavorite) },
+                            onHideClick = { gameViewModel.delete(game.id) }
+                        )
+                    }
                 }
             }
         }
@@ -265,6 +336,8 @@ fun AppLibraryScreen(onBackClick: () -> Unit, onGameSelected: (String) -> Unit) 
 
 @Composable
 fun HomeScreen(
+    games: List<GameEntity>,
+    gameViewModel: GameViewModel,
     onGameSelected: (String) -> Unit,
     onSettingsClick: () -> Unit,
     onOpenDrawer: () -> Unit,
@@ -273,8 +346,28 @@ fun HomeScreen(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     var statusText by remember { mutableStateOf("Ready — Uninitialized") }
-    var games by remember { mutableStateOf(listOf<Game>()) }
     var selectedIndex by remember { mutableStateOf(0) }
+    var batteryLevel by remember { mutableStateOf(-1) }
+    var batteryIsCharging by remember { mutableStateOf(false) }
+
+    DisposableEffect(context) {
+        val batteryReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+                val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+                if (level != -1 && scale != -1) {
+                    batteryLevel = (level * 100 / scale.toFloat()).toInt()
+                }
+                val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+                batteryIsCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                        status == BatteryManager.BATTERY_STATUS_FULL
+            }
+        }
+        context.registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        onDispose {
+            context.unregisterReceiver(batteryReceiver)
+        }
+    }
     
     val launcher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -290,11 +383,11 @@ fun HomeScreen(
                     val path = cacheFile.absolutePath
                     // Simulate loading since we mocked native
                     kotlinx.coroutines.delay(500)
-                    games = games + Game(
+                    gameViewModel.insert(GameEntity(
                         id = System.currentTimeMillis().toString(),
                         name = path.substringAfterLast("/").substringBeforeLast("."),
                         path = path
-                    )
+                    ))
                     statusText = "Game loaded"
                 } catch (e: Exception) {
                     statusText = "Error: ${e.message}"
@@ -356,11 +449,26 @@ fun HomeScreen(
                     Icon(imageVector = Icons.Default.Person, contentDescription = "Profile", tint = Color.White, modifier = Modifier.size(24.dp))
                 }
                 Spacer(modifier = Modifier.width(16.dp))
-                Text(
-                    text = "12:00",
-                    fontSize = 16.sp,
-                    color = Color.White
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (batteryLevel >= 0) {
+                        BatteryIcon(level = batteryLevel, isCharging = batteryIsCharging)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "$batteryLevel%",
+                            fontSize = 14.sp,
+                            color = Color.White,
+                            fontWeight = FontWeight.Medium
+                        )
+                    } else {
+                        Text(
+                            text = "...",
+                            fontSize = 14.sp,
+                            color = Color.White
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.width(16.dp))
+                SystemTimeDisplay()
             }
             
             // Game Row
@@ -377,6 +485,7 @@ fun HomeScreen(
                             .size(size)
                             .clip(RoundedCornerShape(16.dp))
                             .background(if (isSelected) Color.White.copy(alpha = 0.2f) else Color(0xFF2A2A2A))
+                            .onFocusChanged { if (it.isFocused) selectedIndex = 0 }
                             .clickable { if (isSelected) onLibraryClick() else selectedIndex = 0 },
                         contentAlignment = Alignment.Center
                     ) {
@@ -397,7 +506,11 @@ fun HomeScreen(
                             .size(size)
                             .clip(RoundedCornerShape(16.dp))
                             .background(if (isSelected) Color.White.copy(alpha = 0.2f) else Color(0xFF2A2A2A))
-                            .clickable { selectedIndex = actualIndex },
+                            .onFocusChanged { if (it.isFocused) selectedIndex = actualIndex }
+                            .clickable { 
+                                if (isSelected) onGameSelected(game.path)
+                                else selectedIndex = actualIndex 
+                            },
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
@@ -490,12 +603,17 @@ fun EmulationScreen(path: String) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PX5GameCard(
-    game: Game,
+    game: GameEntity,
     onClick: () -> Unit,
+    onFavoriteClick: () -> Unit = {},
+    onHideClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    var showMenu by remember { mutableStateOf(false) }
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
     val isHovered by interactionSource.collectIsHoveredAsState()
@@ -515,7 +633,12 @@ fun PX5GameCard(
                 color = if (isActive) Color.White.copy(alpha = 0.5f) else Color.Transparent,
                 shape = RoundedCornerShape(12.dp)
             )
-            .clickable(interactionSource = interactionSource, indication = null) { onClick() },
+            .combinedClickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick,
+                onLongClick = { showMenu = true }
+            ),
         contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(16.dp)) {
@@ -523,5 +646,109 @@ fun PX5GameCard(
             Spacer(modifier = Modifier.height(16.dp))
             Text(game.name, color = Color.LightGray, fontSize = 14.sp, textAlign = TextAlign.Center)
         }
+        
+        DropdownMenu(
+            expanded = showMenu,
+            onDismissRequest = { showMenu = false }
+        ) {
+            DropdownMenuItem(
+                text = { Text("View Details") },
+                onClick = {
+                    showMenu = false
+                    onClick()
+                }
+            )
+            DropdownMenuItem(
+                text = { Text(if (game.isFavorite) "Unfavorite" else "Favorite") },
+                onClick = {
+                    showMenu = false
+                    onFavoriteClick()
+                    Toast.makeText(context, if (game.isFavorite) "Removed from favorites" else "Added to favorites", Toast.LENGTH_SHORT).show()
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("Hide Game") },
+                onClick = {
+                    showMenu = false
+                    onHideClick()
+                    Toast.makeText(context, "Game hidden", Toast.LENGTH_SHORT).show()
+                }
+            )
+        }
     }
+}
+
+@Composable
+fun BatteryIcon(level: Int, isCharging: Boolean, modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier.size(24.dp, 12.dp)) {
+        val strokeWidth = 1.dp.toPx()
+        val corner = 2.dp.toPx()
+        val padding = 2.dp.toPx()
+        
+        // Draw main battery body
+        drawRoundRect(
+            color = Color.White,
+            style = Stroke(width = strokeWidth),
+            cornerRadius = CornerRadius(corner, corner),
+            size = Size(size.width - 2.dp.toPx(), size.height)
+        )
+        
+        // Draw positive terminal
+        drawRect(
+            color = Color.White,
+            topLeft = Offset(size.width - 2.dp.toPx(), size.height * 0.25f),
+            size = Size(2.dp.toPx(), size.height * 0.5f)
+        )
+        
+        // Draw fill level
+        if (level > 0) {
+            val fillWidth = (size.width - 2.dp.toPx() - padding * 2) * (level / 100f)
+            drawRoundRect(
+                color = Color.White,
+                topLeft = Offset(padding, padding),
+                size = Size(fillWidth, size.height - padding * 2),
+                cornerRadius = CornerRadius(1.dp.toPx(), 1.dp.toPx())
+            )
+        }
+        
+        // Draw charging bolt
+        if (isCharging) {
+            val path = Path().apply {
+                val cx = (size.width - 2.dp.toPx()) / 2
+                val cy = size.height / 2
+                moveTo(cx + 1.dp.toPx(), cy - 3.dp.toPx())
+                lineTo(cx - 1.dp.toPx(), cy + 0.dp.toPx())
+                lineTo(cx + 1.dp.toPx(), cy + 0.dp.toPx())
+                lineTo(cx - 1.dp.toPx(), cy + 3.dp.toPx())
+                lineTo(cx + 2.dp.toPx(), cy)
+                lineTo(cx, cy)
+                close()
+            }
+            drawPath(
+                path = path,
+                color = Color.Black
+            )
+        }
+    }
+}
+
+@Composable
+fun SystemTimeDisplay() {
+    var currentTime by remember { mutableStateOf("") }
+    
+    LaunchedEffect(Unit) {
+        while (true) {
+            val calendar = java.util.Calendar.getInstance()
+            val hour = calendar.get(java.util.Calendar.HOUR_OF_DAY)
+            val minute = calendar.get(java.util.Calendar.MINUTE)
+            currentTime = String.format(java.util.Locale.getDefault(), "%02d:%02d", hour, minute)
+            kotlinx.coroutines.delay(1000)
+        }
+    }
+    
+    Text(
+        text = currentTime,
+        fontSize = 16.sp,
+        color = Color.White
+    )
 }

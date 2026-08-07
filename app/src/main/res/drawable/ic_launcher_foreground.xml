@@ -3,6 +3,6 @@
     <item
         android:width="66dp"
         android:height="66dp"
-        android:drawable="@drawable/px5_logo_1786085187404"
+        android:drawable="@drawable/psx5_new_icon_1786087199857"
         android:gravity="center" />
 </layer-list>
