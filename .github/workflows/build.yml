@@ -1,4 +1,4 @@
-name: PX5 Build APK
+name: Build APK
 
 on:
   push:
