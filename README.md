@@ -1,11 +1,17 @@
-<div align="center">
+# PX5 Android
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+PX5 Android is a modern, Jetpack Compose-based rewrite of the PX5 emulator frontend.
 
-  <h1>Built with AI Studio</h2>
+## Features
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+- **Game Library**: Scan and add ELF/executable files to your game library.
+- **Emulation UI**: Clean, immersive UI to launch games.
+- **Modern Architecture**: Fully rewritten in Kotlin and Jetpack Compose.
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+## Build Instructions
 
-</div>
+To build the project, open it in Android Studio or use Gradle:
+
+```bash
+./gradlew assembleDebug
+```
