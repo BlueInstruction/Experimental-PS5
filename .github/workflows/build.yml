@@ -1,4 +1,4 @@
-name: Build APK
+name: PX5 Build APK
 
 on:
   push:
@@ -33,12 +33,12 @@ jobs:
         gradle-version: '8.5'
 
     - name: Build Debug APK
-      working-directory: android
+      # working-directory: android
       run: gradle assembleDebug --no-daemon --stacktrace --info
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
         name: px5-alpha-debug-apk
-        path: android/app/build/outputs/apk/debug/*.apk
+        path: app/build/outputs/apk/debug/*.apk
         retention-days: 30

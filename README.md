@@ -1,6 +1,6 @@
-# PSX5 Android
+# PX5 Android
 
-PSX5 Android is a modern, Jetpack Compose-based rewrite of the PSX5 emulator frontend.
+PX5 Android is a modern, Jetpack Compose-based rewrite of the PX5 emulator frontend.
 
 ## Features
 

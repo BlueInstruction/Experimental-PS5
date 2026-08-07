@@ -1,6 +1,6 @@
 {
-  "name": "PX5",
-  "description": "A modern Jetpack Compose rewrite of the PX5 emulator frontend.",
+  "name": "PSX5",
+  "description": "A modern Jetpack Compose rewrite of the PSX5 emulator frontend.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
