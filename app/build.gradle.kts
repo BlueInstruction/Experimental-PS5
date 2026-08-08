@@ -8,6 +8,7 @@ plugins {
 android {
     namespace = "com.px5.emulator"
     compileSdk = 35
+    ndkVersion = "26.1.10909125"
 
     defaultConfig {
         applicationId = "com.px5.emulator"
