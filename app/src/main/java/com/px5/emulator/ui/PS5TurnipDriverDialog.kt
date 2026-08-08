@@ -1,5 +1,6 @@
 package com.px5.emulator.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -347,7 +348,7 @@ fun PS5TurnipDriverSheet(
                     },
                     shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = PS5TextPrimary),
-                    border = ButtonDefaults.outlinedButtonBorder.copy(brush = androidx.compose.ui.graphics.SolidColor(Color.White.copy(alpha = 0.3f))),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.3f)),
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(imageVector = Icons.Default.Refresh, contentDescription = "Import", modifier = Modifier.size(16.dp))
