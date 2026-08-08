@@ -4,6 +4,10 @@
 #include <sstream>
 #include <android/log.h>
 
+#include "kernel_hle.h"
+#include "gnm_vulkan_renderer.h"
+#include "audio_input_native.h"
+
 #define LOG_TAG "PX5_FEXCore_Turnip"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -16,7 +20,7 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_stringFromJNI(
         JNIEnv* env,
         jobject /* this */) {
-    std::string hello = "FEXCore CPU Emulator + Turnip Driver Layer (C++ JNI) initialized.";
+    std::string hello = "PX5 Core Engine: FEXCore (x86-64 -> ARM64) + Vulkan 1.3 GNM Renderer";
     LOGI("FexCoreWrapper initialized.");
     return env->NewStringUTF(hello.c_str());
 }
@@ -26,6 +30,9 @@ Java_com_px5_emulator_core_FexCoreWrapper_initializeFexCore(
         JNIEnv* env,
         jobject /* this */) {
     LOGI("Initializing FEXCore execution engine & Bionic translation table...");
+    PS5KernelHLE::getInstance().initializeKernel();
+    GnmVulkanRenderer::getInstance().initVulkanRenderer();
+    AudioInputNative::getInstance().initAAudioStream();
     return JNI_TRUE;
 }
 
@@ -39,6 +46,7 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeInstallPkg(
     const char* destPath = env->GetStringUTFChars(destPathStr, nullptr);
 
     LOGI("Parsing PS5 PKG header from: %s -> Destination: %s", pkgPath, destPath);
+    PS5KernelHLE::getInstance().loadSelfPackage(pkgPath);
     
     env->ReleaseStringUTFChars(pkgPathStr, pkgPath);
     env->ReleaseStringUTFChars(destPathStr, destPath);
@@ -54,6 +62,8 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadElfPackage(
     const char* elfPath = env->GetStringUTFChars(elfPathStr, nullptr);
     LOGI("FEXCore: Loading x86_64 ELF/SELF executable: %s", elfPath);
 
+    PS5KernelHLE::getInstance().loadSelfPackage(elfPath);
+
     std::string status = "Loaded ELF: ";
     status += elfPath;
     status += " into FEXCore ARM64 JNI JIT memory block.";
@@ -62,9 +72,20 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadElfPackage(
     return env->NewStringUTF(status.c_str());
 }
 
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeGetArchitectureSummary(
+        JNIEnv* env,
+        jobject /* this */) {
+    std::string summary = PS5KernelHLE::getInstance().getKernelStateSummary() + "\n" +
+                          GnmVulkanRenderer::getInstance().getRendererInfo() + "\n" +
+                          AudioInputNative::getInstance().getAudioInputStatus();
+    return env->NewStringUTF(summary.c_str());
+}
+
 // ============================================================================
 // libadrenotools & Turnip Vulkan Custom Driver Loader (Adreno 6xx / 7xx)
 // ============================================================================
+
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeInitAdrenotools(

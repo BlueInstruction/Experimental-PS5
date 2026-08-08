@@ -14,6 +14,8 @@ public class FexCoreWrapper {
 
     public native String nativeLoadElfPackage(String elfPath);
 
+    public native String nativeGetArchitectureSummary();
+
     // libadrenotools & Turnip Vulkan Driver Hook Methods
     public native boolean nativeInitAdrenotools(String driverDir, String libName, String hookLib);
 

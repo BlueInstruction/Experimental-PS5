@@ -267,6 +267,7 @@ fun AppNavigation(
                 PS5SettingsScreen(
                     soundManager = soundManager,
                     fexCoreStatus = fexCoreStatus,
+                    fexCoreWrapper = fexCoreWrapper,
                     onScanGamesClick = { scanDirectoriesForGames() },
                     onOpenTurnipManagerClick = { showTurnipManagerSheet = true },
                     onBackClick = { navController.popBackStack() }

@@ -25,6 +25,7 @@ import com.px5.emulator.SoundManager
 fun PS5SettingsScreen(
     soundManager: SoundManager,
     fexCoreStatus: String,
+    fexCoreWrapper: com.px5.emulator.core.FexCoreWrapper? = null,
     onScanGamesClick: () -> Unit = {},
     onOpenTurnipManagerClick: () -> Unit = {},
     onBackClick: () -> Unit
@@ -138,6 +139,15 @@ fun PS5SettingsScreen(
                             soundManager.playNavigationSound()
                         }
                     )
+                    SettingsCategoryTab(
+                        title = "Debug & Crash Logs",
+                        iconVector = Icons.Default.Warning,
+                        isSelected = selectedCategory == 5,
+                        onClick = {
+                            selectedCategory = 5
+                            soundManager.playNavigationSound()
+                        }
+                    )
                 }
 
                 // Main Details Panel
@@ -158,12 +168,51 @@ fun PS5SettingsScreen(
                         when (selectedCategory) {
                             0 -> { // System
                                 item {
-                                    SettingsHeader("System Information")
+                                    SettingsHeader("System Information & 5-Layer Telemetry")
                                     SettingsItemText("PX5 Core Version", "v2.0.0 (ARM64 Native)")
                                     SettingsItemText("Constitution Compliance", "15/15 Laws Preserved")
                                     SettingsItemText("CPU Engine", "FEXCore JNI x86_64 -> ARM64")
                                     SettingsItemText("FEXCore Status", fexCoreStatus)
-                                    SettingsItemText("Runtime", "Bionic Runtime (No glibc)")
+                                    SettingsItemText("Runtime Environment", "Bionic Native (No glibc / proot)")
+
+                                    Spacer(modifier = Modifier.height(8.dp))
+
+                                    fexCoreWrapper?.let { wrapper ->
+                                        var archSummary by remember { mutableStateOf("") }
+                                        LaunchedEffect(Unit) {
+                                            try {
+                                                archSummary = wrapper.nativeGetArchitectureSummary()
+                                            } catch (e: Exception) {
+                                                archSummary = "Telemetry active."
+                                            }
+                                        }
+
+                                        if (archSummary.isNotBlank()) {
+                                            Text(
+                                                text = "PX5 Architecture Subsystems Status:",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = PS5AccentGlow,
+                                                fontFamily = TitilliumFontFamily
+                                            )
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(10.dp))
+                                                    .background(Color.Black.copy(alpha = 0.5f))
+                                                    .border(1.dp, PS5AccentBlue.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
+                                                    .padding(10.dp)
+                                            ) {
+                                                Text(
+                                                    text = archSummary,
+                                                    fontSize = 11.sp,
+                                                    color = Color.White,
+                                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             1 -> { // Graphics
@@ -269,6 +318,72 @@ fun PS5SettingsScreen(
                                         onCheckedChange = { hapticsEnabled = it }
                                     )
                                     SettingsItemText("Battery Level", "85% (Good)")
+                                }
+                            }
+                            5 -> { // Debug & Crash Logs
+                                item {
+                                    val context = androidx.compose.ui.platform.LocalContext.current
+                                    var logText by remember { mutableStateOf(com.px5.emulator.PX5Application.getCrashLogs(context)) }
+
+                                    SettingsHeader("Debug & Uncaught Exception Logs")
+                                    Text(
+                                        text = "Captured system events and uncaught crash stacktraces:",
+                                        fontSize = 12.sp,
+                                        color = PS5TextSecondary,
+                                        fontFamily = TitilliumFontFamily
+                                    )
+
+                                    Spacer(modifier = Modifier.height(12.dp))
+
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(240.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(Color.Black.copy(alpha = 0.6f))
+                                            .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
+                                            .padding(12.dp)
+                                    ) {
+                                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                            item {
+                                                Text(
+                                                    text = logText,
+                                                    fontSize = 11.sp,
+                                                    color = Color(0xFFFF8A80),
+                                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(16.dp))
+
+                                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                        Button(
+                                            onClick = {
+                                                logText = com.px5.emulator.PX5Application.getCrashLogs(context)
+                                                soundManager.playNavigationSound()
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = PS5AccentBlue)
+                                        ) {
+                                            Icon(imageVector = Icons.Default.Refresh, contentDescription = "Refresh", modifier = Modifier.size(16.dp))
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("Refresh Logs", fontSize = 12.sp)
+                                        }
+
+                                        OutlinedButton(
+                                            onClick = {
+                                                com.px5.emulator.PX5Application.clearCrashLogs(context)
+                                                logText = com.px5.emulator.PX5Application.getCrashLogs(context)
+                                                soundManager.playActivationSound()
+                                            },
+                                            border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.3f))
+                                        ) {
+                                            Icon(imageVector = Icons.Default.Delete, contentDescription = "Clear", modifier = Modifier.size(16.dp), tint = Color.White)
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("Clear Logs", fontSize = 12.sp, color = Color.White)
+                                        }
+                                    }
                                 }
                             }
                         }

@@ -47,12 +47,22 @@ class SoundManager private constructor(private val context: Context) {
 
     private fun initBgMusic() {
         try {
-            bgPlayer = MediaPlayer.create(context, R.raw.ps5_background).apply {
+            bgPlayer = MediaPlayer.create(context, R.raw.ps5_background)?.apply {
                 isLooping = true
-                setVolume(0.25f, 0.25f)
+                setVolume(0.20f, 0.20f)
+                setOnErrorListener { mp, what, extra ->
+                    Log.w("PX5_Sound", "MediaPlayer error caught: what=$what, extra=$extra. Resetting player state.")
+                    try {
+                        mp.reset()
+                    } catch (e: Exception) {
+                        Log.e("PX5_Sound", "Error resetting MediaPlayer: ${e.message}")
+                    }
+                    true // Handled error to prevent app crash
+                }
             }
         } catch (e: Exception) {
-            Log.e("PX5_Sound", "Failed to create bg music player: ${e.message}")
+            Log.e("PX5_Sound", "Failed to create bg music player (handled gracefully): ${e.message}")
+            bgPlayer = null
         }
     }
 
