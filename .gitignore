@@ -17,12 +17,14 @@ AePS4-dest/
 AePS4-src/
 vkd3d-qsa-binaries/
 
-# === BUILD ARTIFACTS ===
+# === BUILD ARTIFACTS & INTERMEDIATES ===
+.gradle/
+**/.gradle/
+.cxx/
+**/.cxx/
 build/
-android/app/build/
-android/.gradle/
+**/build/
 android/local.properties
-android/app/.cxx/
 *.o
 *.a
 *.so

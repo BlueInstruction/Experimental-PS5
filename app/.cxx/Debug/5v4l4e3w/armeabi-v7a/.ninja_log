@@ -1,7 +1,0 @@
-# ninja log v5
-0	1609	1786147657288522728	CMakeFiles/px5.dir/fexcore_wrapper.cpp.o	bc2c8a0b09bb5b5
-1611	1789	1786147657465495178	/app/applet/app/build/intermediates/cxx/Debug/5v4l4e3w/obj/armeabi-v7a/libpx5.so	ed9072ce78159110
-21	1096	1786148311479889377	CMakeFiles/px5.dir/fexcore_wrapper.cpp.o	bc2c8a0b09bb5b5
-1096	1182	1786148311564372273	/app/applet/app/build/intermediates/cxx/Debug/5v4l4e3w/obj/armeabi-v7a/libpx5.so	ed9072ce78159110
-84	1188	1786148720614585694	CMakeFiles/px5.dir/fexcore_wrapper.cpp.o	bc2c8a0b09bb5b5
-1188	1259	1786148720687693080	/app/applet/app/build/intermediates/cxx/Debug/5v4l4e3w/obj/armeabi-v7a/libpx5.so	ed9072ce78159110

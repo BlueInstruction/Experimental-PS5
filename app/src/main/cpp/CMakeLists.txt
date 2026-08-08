@@ -5,7 +5,8 @@ project("px5")
 add_library(
         px5
         SHARED
-        fexcore_wrapper.cpp)
+        fexcore_wrapper.cpp
+        turnip_hook.cpp)
 
 find_library(
         log-lib
