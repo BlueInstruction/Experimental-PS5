@@ -50,11 +50,23 @@ class MainActivity : ComponentActivity() {
         // Initialize PS5 Sound Manager & Music
         soundManager = SoundManager.getInstance(applicationContext)
 
-        // Initialize FEXCore JNI Core
+        // Initialize FEXCore JNI Core & Load ThunksDB / FEX Config
         try {
             val initSuccess = fexCoreWrapper.initializeFexCore()
             fexCoreStatus = if (initSuccess) "Ready (${fexCoreWrapper.stringFromJNI()})" else "Initialized (JNI)"
             android.util.Log.i("PX5_JNI", "FEXCore init status: $initSuccess - ${fexCoreWrapper.stringFromJNI()}")
+
+            // Load ThunksDB and FEX Config from assets
+            try {
+                val thunksStr = assets.open("ThunksDB.json").bufferedReader().use { it.readText() }
+                fexCoreWrapper.nativeLoadThunksConfig(thunksStr)
+
+                val fexConfigStr = assets.open("fex_config.json").bufferedReader().use { it.readText() }
+                fexCoreWrapper.nativeLoadFexConfig(fexConfigStr)
+                android.util.Log.i("PX5_JNI", "Loaded ThunksDB & fex_config assets into FEXCore engine")
+            } catch (assetErr: Exception) {
+                android.util.Log.w("PX5_JNI", "Failed reading FEX assets: ${assetErr.message}")
+            }
         } catch (e: Exception) {
             fexCoreStatus = "Error: ${e.message}"
             android.util.Log.e("PX5_JNI", "Failed to initialize FEXCore: ${e.message}")

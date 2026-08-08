@@ -145,13 +145,16 @@ fun PS5HomeScreen(
             label = "BackdropCrossfade"
         ) { _ ->
             val bgRes = if (selectedGame?.id == "ps5_store") R.drawable.ps5_store_background else R.drawable.ps5_background_all
-            Image(
-                painter = painterResource(id = bgRes),
-                contentDescription = "Backdrop",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-                alpha = 0.5f
-            )
+            val backdropPainter = safePainterResource(id = bgRes)
+            if (backdropPainter != null) {
+                Image(
+                    painter = backdropPainter,
+                    contentDescription = "Backdrop",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                    alpha = 0.5f
+                )
+            }
         }
 
         // Atmosphere Dark Gradient Overlay

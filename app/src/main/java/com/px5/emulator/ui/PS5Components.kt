@@ -34,6 +34,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
+import androidx.annotation.DrawableRes
+import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -42,6 +45,20 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.px5.emulator.GameEntity
 import com.px5.emulator.R
+
+@Composable
+fun safePainterResource(@DrawableRes id: Int): Painter? {
+    val context = LocalContext.current
+    val isValid = remember(id, context) {
+        try {
+            val drawable = context.resources.getDrawable(id, context.theme)
+            drawable != null
+        } catch (e: Throwable) {
+            false
+        }
+    }
+    return if (isValid) painterResource(id = id) else null
+}
 
 @Composable
 fun PS5TopHeader(
@@ -163,12 +180,22 @@ fun PS5TopHeader(
                     .clickable { onProfileClick() },
                 contentAlignment = Alignment.Center
             ) {
-                Image(
-                    painter = painterResource(id = R.drawable.ps5_profile_picture),
-                    contentDescription = "Profile Avatar",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
+                val profilePainter = safePainterResource(id = R.drawable.ps5_profile_picture)
+                if (profilePainter != null) {
+                    Image(
+                        painter = profilePainter,
+                        contentDescription = "Profile Avatar",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.Person,
+                        contentDescription = "Profile Avatar",
+                        tint = PS5TextPrimary,
+                        modifier = Modifier.padding(8.dp)
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.width(8.dp))
@@ -277,11 +304,14 @@ fun PX5GameCardTile(
             contentAlignment = Alignment.Center
         ) {
             if (game.id == "ps5_store") {
-                Image(
-                    painter = painterResource(id = R.drawable.ps5_playstation_store),
-                    contentDescription = "PS Store",
-                    modifier = Modifier.size(56.dp)
-                )
+                val storeIconPainter = safePainterResource(id = R.drawable.ps5_playstation_store)
+                if (storeIconPainter != null) {
+                    Image(
+                        painter = storeIconPainter,
+                        contentDescription = "PS Store",
+                        modifier = Modifier.size(56.dp)
+                    )
+                }
             } else if (game.id == "ps5_add_game") {
                 Icon(
                     imageVector = Icons.Default.Search,
@@ -344,11 +374,14 @@ fun PS5TrophySummaryBar(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Image(
-                painter = painterResource(id = R.drawable.ps5_trophies),
-                contentDescription = "Trophies",
-                modifier = Modifier.size(24.dp)
-            )
+            val trophiesPainter = safePainterResource(id = R.drawable.ps5_trophies)
+            if (trophiesPainter != null) {
+                Image(
+                    painter = trophiesPainter,
+                    contentDescription = "Trophies",
+                    modifier = Modifier.size(24.dp)
+                )
+            }
             Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = "Trophies Progress",
@@ -408,11 +441,14 @@ private fun TrophyBadge(
     label: String
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Image(
-            painter = painterResource(id = iconRes),
-            contentDescription = label,
-            modifier = Modifier.size(18.dp)
-        )
+        val badgePainter = safePainterResource(id = iconRes)
+        if (badgePainter != null) {
+            Image(
+                painter = badgePainter,
+                contentDescription = label,
+                modifier = Modifier.size(18.dp)
+            )
+        }
         Spacer(modifier = Modifier.width(4.dp))
         Text(
             text = count.toString(),

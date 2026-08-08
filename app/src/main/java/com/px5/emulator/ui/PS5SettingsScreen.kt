@@ -179,6 +179,7 @@ fun PS5SettingsScreen(
 
                                     fexCoreWrapper?.let { wrapper ->
                                         var archSummary by remember { mutableStateOf("") }
+                                        var testResult by remember { mutableStateOf<String?>(null) }
                                         LaunchedEffect(Unit) {
                                             try {
                                                 archSummary = wrapper.nativeGetArchitectureSummary()
@@ -211,6 +212,40 @@ fun PS5SettingsScreen(
                                                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                                                 )
                                             }
+                                        }
+
+                                        Spacer(modifier = Modifier.height(12.dp))
+
+                                        Button(
+                                            onClick = {
+                                                soundManager.playActivationSound()
+                                                try {
+                                                    val pass = wrapper.nativeRunCpuConformanceTest()
+                                                    testResult = if (pass) "PASSED: RAX=0x52 (MOV RAX, 0x42 + ADD RAX, 0x10) via ARM64 JIT" else "FAILED"
+                                                } catch (e: Exception) {
+                                                    testResult = "Error running test: ${e.message}"
+                                                }
+                                            },
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = PS5AccentBlue,
+                                                contentColor = Color.White
+                                            ),
+                                            shape = RoundedCornerShape(14.dp)
+                                        ) {
+                                            Icon(imageVector = Icons.Default.Check, contentDescription = "Test", modifier = Modifier.size(16.dp))
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("Run FEXCore JIT Conformance Test", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                        }
+
+                                        testResult?.let { res ->
+                                            Spacer(modifier = Modifier.height(6.dp))
+                                            Text(
+                                                text = "x86_64 JIT Test: $res",
+                                                fontSize = 12.sp,
+                                                color = if (res.startsWith("PASSED")) Color(0xFF69F0AE) else Color(0xFFFF5252),
+                                                fontWeight = FontWeight.Bold,
+                                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                            )
                                         }
                                     }
                                 }

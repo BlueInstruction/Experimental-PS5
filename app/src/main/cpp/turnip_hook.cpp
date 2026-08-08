@@ -1,4 +1,6 @@
 #include "turnip_hook.h"
+#include "utils/linker_ns_bypass.h"
+#include "utils/logger.h"
 #include <android/log.h>
 
 #define LOG_TAG "PX5_TurnipHook"
@@ -14,7 +16,11 @@ bool TurnipDriverHook::initAdrenotools(const std::string& driverDir, const std::
     m_config.libraryName = libName;
     m_config.hookLibrary = hookLib;
 
-    LOGI("libadrenotools: Driver loaded from %s [%s]", driverDir.c_str(), libName.c_str());
+    PX5::LinkerNamespaceBypass::PermitLibraryPath(driverDir);
+    std::string fullLibPath = driverDir + "/" + libName;
+    PX5::LinkerNamespaceBypass::DlopenBypass(fullLibPath.c_str(), 1); // RTLD_LAZY = 1
+
+    LOGI("libadrenotools + liblinkernsbypass: Driver loaded from %s [%s]", driverDir.c_str(), libName.c_str());
     return true;
 }
 

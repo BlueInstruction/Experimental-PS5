@@ -74,13 +74,16 @@ fun PS5StoreScreen(
             .background(PS5DarkBackground)
     ) {
         // Store Backdrop
-        Image(
-            painter = painterResource(id = R.drawable.ps5_store_background),
-            contentDescription = "Store Background",
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize(),
-            alpha = 0.45f
-        )
+        val storePainter = safePainterResource(id = R.drawable.ps5_store_background)
+        if (storePainter != null) {
+            Image(
+                painter = storePainter,
+                contentDescription = "Store Background",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+                alpha = 0.45f
+            )
+        }
 
         // Gradient overlay
         Box(
