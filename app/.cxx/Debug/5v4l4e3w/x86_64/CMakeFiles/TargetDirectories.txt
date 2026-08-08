@@ -1,3 +1,0 @@
-/app/applet/app/.cxx/Debug/5v4l4e3w/x86_64/CMakeFiles/px5.dir
-/app/applet/app/.cxx/Debug/5v4l4e3w/x86_64/CMakeFiles/edit_cache.dir
-/app/applet/app/.cxx/Debug/5v4l4e3w/x86_64/CMakeFiles/rebuild_cache.dir

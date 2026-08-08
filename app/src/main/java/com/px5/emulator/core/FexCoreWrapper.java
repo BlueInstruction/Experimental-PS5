@@ -2,19 +2,24 @@ package com.px5.emulator.core;
 
 public class FexCoreWrapper {
 
-    // Used to load the 'px5' library on application startup.
     static {
         System.loadLibrary("px5");
     }
 
-    /**
-     * A native method that is implemented by the 'px5' native library,
-     * which is packaged with this application.
-     */
     public native String stringFromJNI();
 
-    /**
-     * Initialize FEXCore.
-     */
     public native boolean initializeFexCore();
+
+    public native boolean nativeInstallPkg(String pkgPath, String destPath);
+
+    public native String nativeLoadElfPackage(String elfPath);
+
+    // libadrenotools & Turnip Vulkan Driver Hook Methods
+    public native boolean nativeInitAdrenotools(String driverDir, String libName, String hookLib);
+
+    public native String nativeGetTurnipDriverInfo();
+
+    public native void nativeSetTurnipBcnTextureSupport(boolean enabled);
+
+    public native void nativeSetTurnipPipelineCaching(boolean enabled);
 }

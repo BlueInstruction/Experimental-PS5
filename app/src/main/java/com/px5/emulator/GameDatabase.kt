@@ -20,7 +20,18 @@ data class GameEntity(
     val lastPlayed: String = "Never",
     val playTime: String = "0 hours",
     val version: String = "1.00",
-    val isFavorite: Boolean = false
+    val isFavorite: Boolean = false,
+    val category: String = "PS5", // PS5, PS4, Media, Store
+    val developer: String = "PlayStation Studios",
+    val trophiesUnlocked: Int = 0,
+    val trophiesTotal: Int = 40,
+    val bronzeCount: Int = 0,
+    val silverCount: Int = 0,
+    val goldCount: Int = 0,
+    val coverResName: String = "ps5_custom_cover_bg",
+    val bannerResName: String = "ps5_background_all",
+    val rating: String = "ESRB T",
+    val sizeGb: String = "45.0 GB"
 )
 
 @Dao
@@ -41,7 +52,7 @@ interface GameDao {
     suspend fun updateFavoriteStatus(id: String, isFavorite: Boolean)
 }
 
-@Database(entities = [GameEntity::class], version = 1, exportSchema = false)
+@Database(entities = [GameEntity::class], version = 2, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun gameDao(): GameDao
 
@@ -55,7 +66,9 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "px5_database"
-                ).build()
+                )
+                .fallbackToDestructiveMigration()
+                .build()
                 INSTANCE = instance
                 instance
             }
