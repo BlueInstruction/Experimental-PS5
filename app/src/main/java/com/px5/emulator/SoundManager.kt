@@ -25,21 +25,31 @@ class SoundManager private constructor(private val context: Context) {
         }
 
     init {
-        val audioAttributes = AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_GAME)
-            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-            .build()
-
-        soundPool = SoundPool.Builder()
-            .setMaxStreams(5)
-            .setAudioAttributes(audioAttributes)
-            .build()
-
         try {
-            navSoundId = soundPool?.load(context, R.raw.ps5_navigation, 1) ?: 0
-            actSoundId = soundPool?.load(context, R.raw.ps5_activation, 1) ?: 0
-        } catch (e: Exception) {
-            Log.e("PX5_Sound", "Failed to load sound effects: ${e.message}")
+            val audioAttributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_GAME)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
+
+            soundPool = SoundPool.Builder()
+                .setMaxStreams(5)
+                .setAudioAttributes(audioAttributes)
+                .build()
+
+            val navFd = context.resources.openRawResourceFd(R.raw.ps5_navigation)
+            if (navFd != null) {
+                navSoundId = soundPool?.load(navFd, 1) ?: 0
+                navFd.close()
+            }
+
+            val actFd = context.resources.openRawResourceFd(R.raw.ps5_activation)
+            if (actFd != null) {
+                actSoundId = soundPool?.load(actFd, 1) ?: 0
+                actFd.close()
+            }
+        } catch (e: Throwable) {
+            Log.w("PX5_Sound", "SoundPool initialization disabled or failed: ${e.message}")
+            soundPool = null
         }
 
         initBgMusic()
@@ -47,25 +57,32 @@ class SoundManager private constructor(private val context: Context) {
 
     private fun initBgMusic() {
         try {
-            bgPlayer = MediaPlayer.create(context, R.raw.ps5_background)?.apply {
-                isLooping = true
-                setVolume(0.20f, 0.20f)
-                setOnInfoListener { _, what, extra ->
-                    Log.d("PX5_Sound", "MediaPlayer info: what=$what, extra=$extra")
-                    false
-                }
-                setOnErrorListener { mp, what, extra ->
-                    Log.w("PX5_Sound", "MediaPlayer error caught: what=$what, extra=$extra. Resetting player state.")
-                    try {
-                        mp.reset()
-                    } catch (e: Throwable) {
-                        Log.e("PX5_Sound", "Error resetting MediaPlayer: ${e.message}")
-                    }
-                    true // Handled error to prevent app crash
-                }
+            val bgFd = context.resources.openRawResourceFd(R.raw.ps5_background) ?: return
+            val player = MediaPlayer()
+            player.setDataSource(bgFd.fileDescriptor, bgFd.startOffset, bgFd.length)
+            bgFd.close()
+            player.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_GAME)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build()
+            )
+            player.isLooping = true
+            player.setVolume(0.20f, 0.20f)
+            player.setOnErrorListener { mp, what, extra ->
+                Log.w("PX5_Sound", "MediaPlayer error: what=$what, extra=$extra")
+                try {
+                    mp.reset()
+                    mp.release()
+                } catch (_: Throwable) {}
+                bgPlayer = null
+                isBgMusicEnabled = false
+                true
             }
+            player.prepareAsync()
+            bgPlayer = player
         } catch (e: Throwable) {
-            Log.w("PX5_Sound", "Failed to create bg music player (handled gracefully for environment without hardware codecs): ${e.message}")
+            Log.w("PX5_Sound", "Background music player disabled: ${e.message}")
             bgPlayer = null
         }
     }

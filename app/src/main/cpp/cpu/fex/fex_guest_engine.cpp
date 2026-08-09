@@ -4,6 +4,8 @@
 #include <cstring>
 #include <cstdlib>
 
+using PX5::LogCategory;
+
 namespace FEX {
 uint64_t FetchHostFeatures() {
     // ARM64 host feature flags (NEON, AES, SVE2, Atomicity, TSO)

@@ -24,15 +24,9 @@ val PS5TrophyBronze = Color(0xFFCD7F32)
 val PS5TrophySilver = Color(0xFFC0C0C0)
 val PS5TrophyGold = Color(0xFFFFD700)
 
-val TitilliumFontFamily = FontFamily(
-    Font(R.font.titillium_regular, FontWeight.Normal),
-    Font(R.font.titillium_semibold, FontWeight.SemiBold),
-    Font(R.font.titillium_bold, FontWeight.Bold)
-)
+val TitilliumFontFamily = FontFamily.SansSerif
 
-val PlayStationFontFamily = FontFamily(
-    Font(R.font.playstation, FontWeight.Normal)
-)
+val PlayStationFontFamily = FontFamily.SansSerif
 
 val PS5Typography = Typography(
     displayLarge = TextStyle(
