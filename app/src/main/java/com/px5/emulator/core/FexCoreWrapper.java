@@ -20,17 +20,7 @@ public class FexCoreWrapper {
 
     public native String nativeLoadElfPackage(String elfPath);
 
-    public native boolean nativeRun();
-
-    public native void nativePause();
-
-    public native void nativeResume();
-
-    public native boolean nativeStep();
-
     public native boolean nativeRunCpuConformanceTest();
-
-    public native void nativeReset();
 
     public native long nativeMapMemory(long addr, long size, int flags);
 

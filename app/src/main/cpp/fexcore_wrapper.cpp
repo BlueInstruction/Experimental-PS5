@@ -1,8 +1,8 @@
 #include <jni.h>
 #include <string>
 #include "core/emulator.h"
+#include "fexcore_integration.h"
 #include "gpu/vulkan_device.h"
-#include "cpu/fex/fex_wrapper.h"
 #include "utils/logger.h"
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -17,14 +17,14 @@ extern "C" JNIEXPORT jboolean JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_initializeFexCore(
         JNIEnv* env,
         jobject /* this */) {
-    return PX5::Emulator::GetInstance().Initialize("/sdcard/PX5") ? JNI_TRUE : JNI_FALSE;
+    return PX5::FexCoreIntegration::Initialize() ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeShutdown(
         JNIEnv* env,
         jobject /* this */) {
-    PX5::Emulator::GetInstance().Shutdown();
+    PX5::FexCoreIntegration::Shutdown();
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -81,45 +81,10 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadElfPackage(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_px5_emulator_core_FexCoreWrapper_nativeRun(
-        JNIEnv* env,
-        jobject /* this */) {
-    return PX5::Emulator::GetInstance().Run() ? JNI_TRUE : JNI_FALSE;
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_px5_emulator_core_FexCoreWrapper_nativePause(
-        JNIEnv* env,
-        jobject /* this */) {
-    PX5::Emulator::GetInstance().Pause();
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_px5_emulator_core_FexCoreWrapper_nativeResume(
-        JNIEnv* env,
-        jobject /* this */) {
-    PX5::Emulator::GetInstance().Resume();
-}
-
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_px5_emulator_core_FexCoreWrapper_nativeStep(
-        JNIEnv* env,
-        jobject /* this */) {
-    return PX5::Emulator::GetInstance().Step() ? JNI_TRUE : JNI_FALSE;
-}
-
-extern "C" JNIEXPORT jboolean JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunCpuConformanceTest(
         JNIEnv* env,
         jobject /* this */) {
-    return PX5::FexCpuEngine::GetInstance().RunConformanceTest() ? JNI_TRUE : JNI_FALSE;
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_px5_emulator_core_FexCoreWrapper_nativeReset(
-        JNIEnv* env,
-        jobject /* this */) {
-    PX5::Emulator::GetInstance().Reset();
+    return PX5::FexCoreIntegration::RunGuestCodeTest() ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -145,7 +110,7 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeGetArchitectureSummary(
         JNIEnv* env,
         jobject /* this */) {
-    std::string summary = PX5::FexCpuEngine::GetInstance().GetArchitectureSummary();
+    std::string summary = PX5::FexCoreIntegration::GetArchitectureSummary();
     return env->NewStringUTF(summary.c_str());
 }
 
@@ -155,10 +120,8 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadThunksConfig(
         jobject /* this */,
         jstring thunksJsonStr) {
     if (!thunksJsonStr) return JNI_FALSE;
-    const char* json = env->GetStringUTFChars(thunksJsonStr, nullptr);
-    bool res = PX5::FexCpuEngine::GetInstance().LoadThunks(json);
-    env->ReleaseStringUTFChars(thunksJsonStr, json);
-    return res ? JNI_TRUE : JNI_FALSE;
+    PX5_LOGW(PX5::LogCategory::FEX, "Thunk configuration is outside Phase 2");
+    return JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -167,10 +130,8 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadFexConfig(
         jobject /* this */,
         jstring fexConfigJsonStr) {
     if (!fexConfigJsonStr) return JNI_FALSE;
-    const char* json = env->GetStringUTFChars(fexConfigJsonStr, nullptr);
-    bool res = PX5::FexCpuEngine::GetInstance().LoadConfig(json);
-    env->ReleaseStringUTFChars(fexConfigJsonStr, json);
-    return res ? JNI_TRUE : JNI_FALSE;
+    PX5_LOGW(PX5::LogCategory::FEX, "FEX configuration is outside Phase 2");
+    return JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

@@ -2,14 +2,27 @@ cmake_minimum_required(VERSION 3.22.1)
 
 project("px5")
 
+# FEXCore is built from the vendored upstream source. Android-specific options
+# are set before entering FEX's CMake project so no glibc allocator is enabled.
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(BUILD_FEXCONFIG OFF CACHE BOOL "" FORCE)
+set(BUILD_THUNKS OFF CACHE BOOL "" FORCE)
+set(ENABLE_FEX_ALLOCATOR OFF CACHE BOOL "" FORCE)
+set(ENABLE_JEMALLOC_GLIBC_ALLOC OFF CACHE BOOL "" FORCE)
+set(ENABLE_GLIBC_ALLOCATOR_HOOK_FAULT OFF CACHE BOOL "" FORCE)
+set(ENABLE_VIXL_DISASSEMBLER OFF CACHE BOOL "" FORCE)
+set(ENABLE_VIXL_SIMULATOR OFF CACHE BOOL "" FORCE)
+set(ENABLE_ZYDIS OFF CACHE BOOL "" FORCE)
+set(ENABLE_FEXCORE_PROFILER OFF CACHE BOOL "" FORCE)
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../../../../third_party/fex
+                 ${CMAKE_CURRENT_BINARY_DIR}/fex)
+
 add_library(
         px5
         SHARED
         fexcore_wrapper.cpp
+        fexcore_integration.cpp
         core/emulator.cpp
-        cpu/fex/fex_wrapper.cpp
-        cpu/fex/fex_guest_engine.cpp
-        cpu/fex/fex_guest_cpu.cpp
         memory/memory.cpp
         memory/memory_map.cpp
         kernel/syscalls.cpp
@@ -29,6 +42,11 @@ add_library(
         media/media_codec_hle.cpp
         turnip_hook.cpp)
 
+target_include_directories(px5 PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/../../../../third_party/fex/FEXCore/include
+        ${CMAKE_CURRENT_BINARY_DIR}/fex/FEXCore/include
+        ${CMAKE_CURRENT_BINARY_DIR}/fex/generated)
+
 find_library(log-lib log)
 find_library(android-lib android)
 find_library(aaudio-lib aaudio)
@@ -37,4 +55,7 @@ target_link_libraries(
         px5
         ${log-lib}
         ${android-lib}
-        ${aaudio-lib})
+        ${aaudio-lib}
+        FEXCore
+        FEXCore_Base
+        JemallocDummy)

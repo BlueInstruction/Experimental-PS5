@@ -1,4 +1,5 @@
 #include "emulator.h"
+#include "../fexcore_integration.h"
 #include "../utils/logger.h"
 
 namespace PX5 {
@@ -24,8 +25,8 @@ bool Emulator::Initialize(const std::string& baseDir) {
     // 3. Initialize Virtual File System
     VirtualFileSystem::GetInstance().Initialize(baseDir);
 
-    // 4. Initialize FEXCore CPU Engine
-    FexCpuEngine::GetInstance().Initialize();
+    // 4. Initialize the upstream FEXCore runtime.
+    if (!FexCoreIntegration::Initialize()) return false;
 
     // 5. Initialize Vulkan Device & Audio
     VulkanGpuDevice::GetInstance().Initialize();
@@ -40,7 +41,7 @@ void Emulator::Shutdown() {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_initialized) return;
 
-    FexCpuEngine::GetInstance().Shutdown();
+    FexCoreIntegration::Shutdown();
     VulkanGpuDevice::GetInstance().Shutdown();
     MemoryManager::GetInstance().Shutdown();
 
@@ -67,35 +68,6 @@ bool Emulator::LoadExecutable(const std::string& path, bool isSelf) {
     return success;
 }
 
-bool Emulator::Run() {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_initialized) return false;
-
-    m_running = FexCpuEngine::GetInstance().Run(m_entryPoint);
-    return m_running;
-}
-
-void Emulator::Pause() {
-    FexCpuEngine::GetInstance().Pause();
-}
-
-void Emulator::Resume() {
-    FexCpuEngine::GetInstance().Resume();
-}
-
-bool Emulator::Step() {
-    return FexCpuEngine::GetInstance().ExecuteStep();
-}
-
-void Emulator::Reset() {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    FexCpuEngine::GetInstance().Shutdown();
-    FexCpuEngine::GetInstance().Initialize();
-    m_running = false;
-    m_entryPoint = 0;
-    PX5_LOGI(LogCategory::CORE, "Emulator state reset.");
-}
-
 bool Emulator::ReadMemory(uint64_t addr, void* buffer, size_t size) {
     return MemoryManager::GetInstance().ReadGuestMemory(addr, buffer, size);
 }
@@ -110,14 +82,6 @@ uint64_t Emulator::MapMemory(uint64_t addr, size_t size, uint32_t flags) {
 
 bool Emulator::UnmapMemory(uint64_t addr, size_t size) {
     return MemoryManager::GetInstance().UnmapMemory(addr, size);
-}
-
-CpuRegisters Emulator::GetRegisters() const {
-    return FexCpuEngine::GetInstance().GetRegisters();
-}
-
-void Emulator::SetRegisters(const CpuRegisters& regs) {
-    FexCpuEngine::GetInstance().SetRegisters(regs);
 }
 
 std::string Emulator::GetStatusString() const {
