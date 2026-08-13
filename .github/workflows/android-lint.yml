@@ -1,23 +1,25 @@
 # Android Lint for the PSX5 Kotlin/Java codebase.
 #
-# Runs Google's official Android Lint static analyzer, then COMMITS the
-# report to diagnostic-output/<run_id>/android-lint/ in the repo so the
-# AI agent can read it via the Contents API (no artifact download needed).
+# Runs Google's official Android Lint, then COMMITS the HTML report to:
+#   diagnostic-output/<run_id>/android-lint-report/lint-results-debug.html
 #
 # Also uploads SARIF to GitHub's Security tab + keeps the artifact as backup.
+#
+# NOTE: pull_request trigger is intentionally omitted. When a PR is open,
+# GitHub restricts the GITHUB_TOKEN's contents:write permission, which
+# prevents the commit step from pushing the report to the repo. The
+# workflow still runs on push to main/fix branches + manual dispatch.
 
 name: Android Lint
 
 on:
   push:
     branches: ["main", "fix/**"]
-  pull_request:
-    branches: ["main"]
   workflow_dispatch:
 
 permissions:
-  contents: write   # needed to commit reports to the repo
-  security-events: write  # for SARIF upload
+  contents: write
+  security-events: write
 
 jobs:
   android-lint:
@@ -57,6 +59,8 @@ jobs:
           ls -la app/build/reports/lint-results-debug.sarif 2>/dev/null || echo "No SARIF"
           echo "=== HTML ==="
           ls -la app/build/reports/lint-results-debug.html 2>/dev/null || echo "No HTML"
+          echo "=== XML ==="
+          ls -la app/build/reports/lint-results-debug.xml 2>/dev/null || echo "No XML"
 
       - name: Upload SARIF to GitHub Security tab
         if: always() && hashFiles('app/build/reports/lint-results-debug.sarif') != ''
@@ -66,50 +70,33 @@ jobs:
           category: '/android-lint'
         continue-on-error: true
 
-      - name: Commit lint report to repo
+      - name: Publish Android Lint report to diagnostic-output/
         if: always()
         shell: bash
         run: |
-          # Create the diagnostic-output directory for this run
-          OUT="diagnostic-output/${GITHUB_RUN_ID}/android-lint"
+          # Target directory — matches the structure the user requested:
+          #   diagnostic-output/<run-id>/android-lint-report/
+          OUT="diagnostic-output/${GITHUB_RUN_ID}/android-lint-report"
           mkdir -p "$OUT"
 
-          # Copy all lint report files
+          # Copy the original Android Lint HTML report as-is.
+          # Do NOT convert to Markdown or extract text.
           cp app/build/reports/lint-results-debug.html "$OUT/" 2>/dev/null || true
           cp app/build/reports/lint-results-debug.sarif "$OUT/" 2>/dev/null || true
           cp app/build/reports/lint-results-debug.xml "$OUT/" 2>/dev/null || true
           cp lint.log "$OUT/" 2>/dev/null || true
 
-          # Also extract a plain-text summary of errors/warnings
-          {
-            echo "# Android Lint Report — Run ${{ github.run_id }}"
-            echo ""
-            echo "- commit: ${{ github.sha }}"
-            echo "- branch: ${{ github.ref_name }}"
-            echo "- date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-            echo ""
-            ## If XML report exists, extract error/warning counts
-            if [ -f app/build/reports/lint-results-debug.xml ]; then
-              echo "## Summary"
-              echo '```'
-              grep -o 'errors="[0-9]*"' app/build/reports/lint-results-debug.xml | head -1
-              grep -o 'warnings="[0-9]*"' app/build/reports/lint-results-debug.xml | head -1
-              echo '```'
-              echo ""
-              echo "## Errors (first 50)"
-              echo '```'
-              grep -o '<issue[^>]*severity="Error"[^>]*>' app/build/reports/lint-results-debug.xml | head -50 || echo "(none)"
-              echo '```'
-              echo ""
-              echo "## Warnings (first 30)"
-              echo '```'
-              grep -o '<issue[^>]*severity="Warning"[^>]*>' app/build/reports/lint-results-debug.xml | head -30 || echo "(none)"
-              echo '```'
-            fi
-          } > "$OUT/summary.md"
-
-          echo "=== Files committed to $OUT ==="
+          echo "=== Files published to $OUT ==="
           ls -la "$OUT/"
+
+          # Verify the HTML report exists
+          echo ""
+          echo "=== HTML report integrity check ==="
+          if [ -f "$OUT/lint-results-debug.html" ]; then
+            echo "  OK: lint-results-debug.html exists ($(wc -c < "$OUT/lint-results-debug.html") bytes)"
+          else
+            echo "  MISSING: lint-results-debug.html"
+          fi
 
           # Commit
           git config user.name  "github-actions[bot]"
