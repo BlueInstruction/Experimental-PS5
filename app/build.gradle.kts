@@ -16,6 +16,20 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+
+        // Only build the px5 shared library target. By default AGP asks ninja
+        // to build ALL CMake targets, including FEX's host tools (FEX, FEXBash,
+        // FEXServer, FEXGetConfig, FEXOfflineCompiler, FEXRootFSFetcher,
+        // FEXpidof) and FEXCore_shared. The host tools are Linux binaries that
+        // fail to link against Bionic, and FEXCore_shared has an upstream bug
+        // (only links FEXCore_Base under MINGW, missing fmt/xxhash/Allocator/
+        // Config/LogMan deps on Linux/Android). We only need libpx5.so, which
+        // statically links FEXCore + FEXCore_Base + JemallocDummy + deps.
+        externalNativeBuild {
+            cmake {
+                targets += "px5"
+            }
+        }
     }
 
     compileOptions {
