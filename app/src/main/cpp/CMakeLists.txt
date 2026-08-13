@@ -2,6 +2,14 @@ cmake_minimum_required(VERSION 3.22.1)
 
 project("px5")
 
+# FEXCore headers use C++20 concepts (requires clauses, std::is_invocable_r_v)
+# so the px5 target MUST be compiled with C++20. FEX's own CMakeLists sets this
+# only for FEX's subdirectory scope, which does not propagate up to this file.
+# Setting it here at parent scope propagates DOWN to FEX's subdirectory too.
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 # FEXCore is built from the vendored upstream source. Android-specific options
 # are set before entering FEX's CMake project so no glibc allocator is enabled.
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
@@ -48,6 +56,10 @@ target_include_directories(px5 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/../../../../third_party/fex/FEXCore/include
         ${CMAKE_CURRENT_BINARY_DIR}/fex/FEXCore/include
         ${CMAKE_CURRENT_BINARY_DIR}/fex/generated)
+
+# Belt and suspenders: explicitly require C++20 on the px5 target itself
+# so any consumer of px5 inherits the requirement.
+target_compile_features(px5 PRIVATE cxx_std_20)
 
 find_library(log-lib log)
 find_library(android-lib android)
