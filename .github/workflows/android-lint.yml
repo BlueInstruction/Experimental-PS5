@@ -78,6 +78,7 @@ jobs:
         with:
           sarif_file: app/build/reports/lint-results-debug.sarif
           category: '/android-lint'
+        continue-on-error: true  # SARIF upload may fail if AGP version doesn't emit valid schema
 
       - name: Upload HTML report
         if: always()

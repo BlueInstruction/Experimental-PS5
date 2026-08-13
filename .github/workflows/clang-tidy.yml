@@ -137,6 +137,7 @@ jobs:
         with:
           sarif_file: build-reports/clang-tidy.sarif
           category: '/clang-tidy'
+        continue-on-error: true  # SARIF upload may fail if converter produced invalid schema
 
       - name: Upload report artifact
         if: always()

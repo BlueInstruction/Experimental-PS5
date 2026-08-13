@@ -71,6 +71,7 @@ jobs:
         with:
           sarif_file: results.sarif
           category: '/codacy'
+        continue-on-error: true  # SARIF upload may fail if schema mismatch — don't fail CI
 
       - name: Upload SARIF as artifact (fallback)
         if: always() && hashFiles('results.sarif') != ''
