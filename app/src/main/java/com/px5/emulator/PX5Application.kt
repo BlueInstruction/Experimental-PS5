@@ -1,6 +1,7 @@
 package com.px5.emulator
 
 import android.app.Application
+import android.content.Context
 import android.util.Log
 import com.px5.emulator.core.FexCoreWrapper
 import java.io.File
@@ -214,6 +215,61 @@ class PX5Application : Application() {
             if (!dir.exists()) return
             dir.listFiles()?.forEach { f ->
                 if (f.isFile) f.delete()
+            }
+        }
+
+        // ---- Backward-compat helpers used by PS5SettingsScreen.kt ----
+        // These read all log files on disk and return them as a single
+        // concatenated string (newest first). The old PX5 code stored logs
+        // in a single SharedPreferences key + single file; the new system
+        // writes one file per crash + a rotating main log. We bridge the
+        // two APIs here so the existing Settings UI keeps working without
+        // changes.
+
+        fun getCrashLogs(context: Context): String {
+            val dir = File(logDirectory)
+            if (!dir.exists()) return "No crash or error logs recorded."
+            val files = dir.listFiles()
+                ?.filter { it.isFile && it.name.endsWith(".log") }
+                ?.sortedByDescending { it.lastModified() }
+                ?: return "No crash or error logs recorded."
+            if (files.isEmpty()) return "No crash or error logs recorded."
+            val sb = StringBuilder(8192)
+            for (f in files) {
+                sb.append("===== ").append(f.name).append(" (")
+                  .append(f.length()).append(" bytes) =====\n")
+                try {
+                    sb.append(f.readText())
+                } catch (e: Exception) {
+                    sb.append("(could not read: ").append(e.message).append(")\n")
+                }
+                sb.append("\n\n")
+                // Cap the in-memory representation so we don't blow up the
+                // Compose text renderer.
+                if (sb.length > 200_000) {
+                    sb.append("... (truncated, see files on disk for full logs)\n")
+                    break
+                }
+            }
+            return sb.toString()
+        }
+
+        fun clearCrashLogs(context: Context) {
+            clearAllLogs()
+        }
+
+        fun logSystemEvent(context: Context, tag: String, message: String) {
+            // Bridge to the native logger via FexCoreWrapper so old call
+            // sites that used PX5Application.logSystemEvent keep working.
+            try {
+                com.px5.emulator.core.FexCoreWrapper().let {
+                    // No JNI equivalent for "logSystemEvent"; route through
+                    // android.util.Log so at least it lands in logcat AND
+                    // the logcat capture thread picks it up.
+                }
+                Log.i(tag, message)
+            } catch (_: Exception) {
+                // best-effort
             }
         }
     }
