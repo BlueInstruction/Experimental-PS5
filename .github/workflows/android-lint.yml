@@ -30,7 +30,7 @@ permissions:
 jobs:
   android-lint:
     name: Android Lint
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
