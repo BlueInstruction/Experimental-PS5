@@ -4,14 +4,24 @@
 // Installs sigaction handlers for SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE,
 // SIGPIPE, SIGTRAP, SIGSYS. When a fatal signal fires, the handler:
 //
-//   1. Writes a structured crash report to
-//      <log_dir>/px5_crash_<YYYYMMDD_HHMMSS>.log
-//      (one file per crash, so we never lose history to overwrites)
+//   1. Writes a structured crash report to <log_dir>/px5_crash.log
+//      (single file, overwritten on each crash — see "Crash loop detection"
+//      below for why this is not per-crash).
 //   2. Dumps: timestamp, signal info (signo/si_code/si_addr), faulting thread
 //      id + name, all ARM64 general-purpose registers from ucontext, and a
 //      best-effort stack backtrace using _Unwind_Backtrace.
 //   3. Re-raises the original signal so the system's normal tombstone flow
 //      still runs (so we keep the logcat "signal XX" line + process death).
+//
+// Crash loop detection:
+//   If the same process crashes more than 3 times, the handler stops writing
+//   crash files and just re-raises the signal. This prevents the launch
+//   crash loop from spamming hundreds of files (the original bug was: Compose
+//   threw a font-loading exception on every launch → Android restarted the
+//   process → crash again → 40+ files in 14 seconds).
+//
+//   The crash count is per-process (reset on every Install()), so a normal
+//   single crash still produces a full report.
 //
 // All syscalls used here are async-signal-safe (open, write, close, fsync,
 // getpid, gettid, prctl, localtime_r, sigaction). _Unwind_Backtrace is

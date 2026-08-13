@@ -73,7 +73,12 @@ class PX5Application : Application() {
         // 4. Install the Kotlin-side uncaught exception handler.
         //    This catches exceptions on the Java/Kotlin side. Native crashes
         //    (SIGSEGV etc.) are caught by the native CrashHandler installed
-        //    in step 2.
+        //    in step 2 (which writes to a single px5_crash.log file with
+        //    crash-loop suppression).
+        //
+        //    Like the native handler, we use a single fixed filename
+        //    (px5_kotlin_crash.log) instead of one file per crash, to avoid
+        //    spamming the log directory in a crash loop.
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             try {
@@ -82,14 +87,14 @@ class PX5Application : Application() {
                 throwable.printStackTrace(pw)
                 val stackTrace = sw.toString()
 
-                val ts = SimpleDateFormat("yyyy-MM-dd_HH:mm:ss", Locale.US).format(Date())
-                val crashFile = File(logsDir, "px5_kotlin_crash_${ts}_${thread.id}.log")
+                val ts = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+                val crashFile = File(logsDir, "px5_kotlin_crash.log")
                 val pid = android.os.Process.myPid()
                 crashFile.bufferedWriter().use { w ->
                     w.write("==============================================================\n")
                     w.write("PX5 KOTLIN CRASH REPORT\n")
                     w.write("==============================================================\n")
-                    w.write("Timestamp: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())}\n")
+                    w.write("Timestamp: $ts\n")
                     w.write("Process PID: $pid\n")
                     w.write("Thread: ${thread.name} (id=${thread.id})\n")
                     w.write("Exception class: ${throwable.javaClass.name}\n")
