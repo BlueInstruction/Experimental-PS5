@@ -10,6 +10,24 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# ----------------------------------------------------------------------------
+# std::atomic_ref polyfill (force-include)
+# ----------------------------------------------------------------------------
+# NDK 26/27 libc++ does NOT export std::atomic_ref<T> in <atomic> on Bionic,
+# even with -std=c++20. FEXCore headers (SpinWaitLock.h, WritePriorityMutex.h)
+# heavily use std::atomic_ref. We provide a minimal polyfill using __atomic_*
+# builtins and force-include it in EVERY C++ translation unit (px5 + FEXCore)
+# via add_compile_options() BEFORE add_subdirectory(fex) so it applies to the
+# FEX subdirectory as well.
+#
+# Note: -include and the path MUST be passed as two separate arguments; the
+# generator-expression form below produces two separate compiler options.
+set(PX5_ATOMIC_REF_POLYFILL
+        "${CMAKE_CURRENT_LIST_DIR}/compat/std_atomic_ref_polyfill.h")
+add_compile_options(
+        $<$<COMPILE_LANGUAGE:CXX>:-include>
+        $<$<COMPILE_LANGUAGE:CXX>:${PX5_ATOMIC_REF_POLYFILL}>)
+
 # FEXCore is built from the vendored upstream source. Android-specific options
 # are set before entering FEX's CMake project so no glibc allocator is enabled.
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
