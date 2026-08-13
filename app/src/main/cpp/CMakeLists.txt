@@ -58,6 +58,39 @@ list(APPEND CMAKE_MODULE_PATH
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../../../../third_party/fex
                  ${CMAKE_CURRENT_BINARY_DIR}/fex)
 
+# ----------------------------------------------------------------------------
+# Disable FEX targets we don't need on Android
+# ----------------------------------------------------------------------------
+# FEXCore_shared is fundamentally broken on Android: FEXCore/Source/CMakeLists.txt
+# only links FEXCore_Base (which carries fmt, xxhash, Allocator, Config, LogManager
+# as PUBLIC deps) into FEXCore_shared when MINGW is set. On Linux/Android, the
+# shared library is built without those deps and fails at link time with
+# -Wl,--no-undefined (NDK default) due to undefined symbols:
+#   fmt::v12::detail::vformat_to, FEXCore::Config::detail::*, FEXCore::Allocator::*,
+#   LogMan::*, XXH3_64bits, ...
+# We only use the STATIC FEXCore target (linked into libpx5.so), so we just
+# exclude FEXCore_shared from the default build set.
+#
+# We also exclude the host tools (FEX, FEXBash, FEXServer, FEXGetConfig,
+# FEXOfflineCompiler, FEXRootFSFetcher, FEXpidof, CodeSizeValidation) since
+# they are Linux host binaries that cannot run on Android and would fail to
+# link against Android's Bionic libc anyway.
+set(_PX5_FEX_TARGETS_TO_EXCLUDE
+        FEXCore_shared
+        FEX
+        FEXBash
+        FEXServer
+        FEXGetConfig
+        FEXOfflineCompiler
+        FEXRootFSFetcher
+        FEXpidof
+        CodeSizeValidation)
+foreach(_t ${_PX5_FEX_TARGETS_TO_EXCLUDE})
+        if(TARGET ${_t})
+                set_target_properties(${_t} PROPERTIES EXCLUDE_FROM_ALL TRUE)
+        endif()
+endforeach()
+
 add_library(
         px5
         SHARED
