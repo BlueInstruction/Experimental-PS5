@@ -40,29 +40,5 @@ public class FexCoreWrapper {
     public native void nativeSetTurnipBcnTextureSupport(boolean enabled);
 
     public native void nativeSetTurnipPipelineCaching(boolean enabled);
-
-    // ---- Logging system (added by fix/logging-system) ----
-
-    /**
-     * Initialize the native file logger + native crash handler.
-     * Call this once at app startup (PX5Application.onCreate).
-     *
-     * @param logDir Absolute path to a writable directory where log files
-     *               will be created. Typically
-     *               {@code /storage/emulated/0/Android/data/com.px5.emulator/files/logs}.
-     * @return true if both the logger and crash handler initialized OK.
-     */
-    public native boolean nativeInitLogger(String logDir);
-
-    /** Returns the absolute path of the current main log file (px5_main.log). */
-    public native String nativeGetLogFilePath();
-
-    /** Flushes pending log writes to disk (useful before sharing logs). */
-    public native void nativeFlushLogs();
-
-    /**
-     * Sets the minimum log level for the native logger.
-     * @param level 0=TRACE, 1=DEBUG, 2=INFO, 3=WARN, 4=ERROR, 5=FATAL.
-     */
-    public native void nativeSetLogLevel(int level);
 }
+
