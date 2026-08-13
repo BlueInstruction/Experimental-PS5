@@ -37,7 +37,17 @@ struct CrashHandlerState {
     std::atomic<bool> installed{false};
     // Save old sigactions so we can chain (or restore) them.
     struct sigaction old_sa[NSIG];
+    // ---- Crash loop detection ----
+    // Count crashes seen in the current process. Reset to 0 in Install().
+    // When crash_count exceeds kMaxCrashesPerProcess, the handler stops
+    // writing crash files and just re-raises the signal — this prevents
+    // a single misbehaving launch from spamming hundreds of files (which
+    // is exactly what was happening in the launch crash loop: 40 crashes
+    // in 14 seconds = 40 files written).
+    std::atomic<int> crash_count{0};
 };
+
+constexpr int kMaxCrashesPerProcess = 3;
 
 CrashHandlerState& State() {
     static CrashHandlerState s;
@@ -90,24 +100,19 @@ size_t safe_utoa_hex(char* buf, unsigned long long v) {
     return i;
 }
 
-// Compose crash file name: px5_crash_YYYYMMDD_HHMMSS_<pid>.log
-// (we add pid to disambiguate when multiple crashes happen within the same
-// second, e.g. during a fork.)
+// Build the path to the single crash log file.
+// We deliberately use ONE fixed filename (px5_crash.log) and overwrite it
+// on every crash — this prevents the launch-crash-loop from spamming
+// hundreds of files. The previous crash's content is lost, but that's
+// acceptable because:
+//   1. The most recent crash is almost always the one you want.
+//   2. The Kotlin-side handler keeps separate per-crash files for
+//      Java exceptions (see PX5Application.kt).
+//   3. The main log file (px5_main.log) retains the full session history
+//      with rotation.
 void make_crash_filename(char* buf, size_t buflen) {
-    using namespace std::chrono;
-    auto now = system_clock::now();
-    auto t = system_clock::to_time_t(now);
-    struct tm tm_buf;
-    localtime_r(&t, &tm_buf);
-
-    char ts[32];
-    std::snprintf(ts, sizeof(ts), "%04d%02d%02d_%02d%02d%02d",
-                  tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
-                  tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
-
-    auto pid = static_cast<unsigned>(::getpid());
-    std::snprintf(buf, buflen, "%s/px5_crash_%s_%u.log",
-                  State().log_dir.c_str(), ts, pid);
+    std::snprintf(buf, buflen, "%s/px5_crash.log",
+                  State().log_dir.c_str());
 }
 
 // Async-signal-safe-ish: dump the ARM64 GP register file from ucontext.
@@ -196,8 +201,30 @@ void dump_backtrace(int fd) {
 extern "C" void px5_signal_handler(int signo, siginfo_t* info, void* ucontext) {
     auto& s = State();
 
-    // Open a dedicated crash file (separate from px5_main.log so we never
-    // lose prior context to overwrites).
+    // ---- Crash loop detection ----
+    // If we've already crashed kMaxCrashesPerProcess times in this process,
+    // stop writing crash files. This is essential for the launch crash loop
+    // case: if Compose throws on every launch, the OS will restart the
+    // process and we'll crash again, generating 40+ files in seconds.
+    // After the limit, we just re-raise the signal and let the OS handle it.
+    int prev_count = s.crash_count.fetch_add(1);
+    if (prev_count >= kMaxCrashesPerProcess) {
+        // Log to logcat only — no file write.
+        __android_log_print(ANDROID_LOG_FATAL, "PX5_Crash",
+                            "Crash loop detected (crash #%d in this process); "
+                            "suppressing further crash reports. "
+                            "Last crash is in px5_crash.log.",
+                            prev_count + 1);
+        // Restore default disposition and re-raise.
+        struct sigaction sa_def{};
+        sa_def.sa_handler = SIG_DFL;
+        sigemptyset(&sa_def.sa_mask);
+        ::sigaction(signo, &sa_def, nullptr);
+        ::raise(signo);
+        return;
+    }
+
+    // Open the single crash file (overwrite mode).
     char crash_path[512];
     make_crash_filename(crash_path, sizeof(crash_path));
     int fd = ::open(crash_path, O_WRONLY | O_CREAT | O_TRUNC, 0660);

@@ -24,9 +24,47 @@ val PS5TrophyBronze = Color(0xFFCD7F32)
 val PS5TrophySilver = Color(0xFFC0C0C0)
 val PS5TrophyGold = Color(0xFFFFD700)
 
-val TitilliumFontFamily = FontFamily.SansSerif
+// ---------------------------------------------------------------------------
+// Font families — bound to the actual .ttf files in res/font/.
+//
+// Previously these were set to FontFamily.SansSerif (the platform default),
+// which means Compose would never load any of the bundled .ttf files at
+// all. That in turn meant the res/font/*.ttf entries were dead weight —
+// and, worse, on some AGP versions the resource compiler still emits
+// R.font.* IDs for them, so anything that accidentally resolved one of
+// those IDs (e.g. an older cached layout, or a Material3 internal
+// fallback) would crash with Resources$NotFoundException because the
+// font was never actually packaged into the APK.
+//
+// By binding each FontFamily to the matching R.font.* resource, we:
+//   1. Make the bundled .ttf files actually load at runtime.
+//   2. Get the PS5 / Titillium visual identity the project was designed for.
+//   3. Eliminate the "ResourceFont(resId=…, weight=700) could not be
+//      retrieved" crash that was causing the launch crash loop.
+// ---------------------------------------------------------------------------
+val TitilliumFontFamily = FontFamily(
+    Font(R.font.titillium_regular, weight = FontWeight.Normal),
+    Font(R.font.titillium_semibold, weight = FontWeight.SemiBold),
+    Font(R.font.titillium_bold, weight = FontWeight.Bold),
+    // Provide a Bold (700) entry explicitly — the crash log showed
+    // Compose asking for weight=700 and getting Resources$NotFoundException.
+    // Mapping 700 -> titillium_bold.ttf (which IS weight 700) covers that.
+    Font(R.font.titillium_bold, weight = FontWeight(700)),
+    // Black/extrabold fallback — if anything asks for heavier than Bold,
+    // we still serve titillium_bold rather than crashing.
+    Font(R.font.titillium_bold, weight = FontWeight.Black),
+    Font(R.font.titillium_bold, weight = FontWeight.ExtraBold),
+)
 
-val PlayStationFontFamily = FontFamily.SansSerif
+val PlayStationFontFamily = FontFamily(
+    Font(R.font.playstation, weight = FontWeight.Normal),
+    Font(R.font.playstation, weight = FontWeight.Medium),
+    Font(R.font.playstation, weight = FontWeight.SemiBold),
+    Font(R.font.playstation, weight = FontWeight.Bold),
+    Font(R.font.playstation, weight = FontWeight(700)),
+    Font(R.font.playstation, weight = FontWeight.Black),
+    Font(R.font.playstation, weight = FontWeight.ExtraBold),
+)
 
 val PS5Typography = Typography(
     displayLarge = TextStyle(
