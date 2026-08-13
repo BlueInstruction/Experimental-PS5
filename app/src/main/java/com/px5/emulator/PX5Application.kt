@@ -4,18 +4,49 @@ import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * PX5Application — exact copy of the old PX5 repo's logging approach.
+ *
+ * - Thread.setDefaultUncaughtExceptionHandler catches Kotlin/Java exceptions
+ * - Writes the full stack trace to:
+ *     /storage/emulated/0/Android/data/com.px5.emulator/files/logs/px5_crash_log.txt
+ * - Also keeps a copy in SharedPreferences (px5_debug_prefs / crash_logs)
+ * - 50KB cap
+ *
+ * The native crash handler + file logger + logcat capture from the
+ * fix/logging-system branch have been REMOVED — they were producing
+ * useless output (stripped binary backtraces, empty logcat file, etc).
+ *
+ * IMPORTANT: libpx5.so is NOT loaded here. It is loaded lazily by
+ * FexCoreWrapper's static initializer when MainActivity first references
+ * it. This ensures that if the native lib fails to load, the
+ * UncaughtExceptionHandler is already installed and can capture the
+ * UnsatisfiedLinkError stack trace.
+ */
 class PX5Application : Application() {
 
     override fun onCreate() {
         super.onCreate()
         instance = this
-        
+
+        // Pre-create the logs directory so saveCrashLog() never fails on
+        // a missing directory.
+        try {
+            val logsDir = getExternalFilesDir("logs")
+            if (logsDir != null && !logsDir.exists()) {
+                logsDir.mkdirs()
+            }
+        } catch (e: Exception) {
+            Log.e("PX5CrashHandler", "Failed to create logs dir", e)
+        }
+
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             try {
@@ -50,7 +81,7 @@ class PX5Application : Application() {
             val logsDir = getExternalFilesDir("logs")
             if (logsDir != null) {
                 if (!logsDir.exists()) logsDir.mkdirs()
-                val logFile = java.io.File(logsDir, "px5_crash_log.txt")
+                val logFile = File(logsDir, "px5_crash_log.txt")
                 logFile.writeText(trimmedLogs)
             }
         } catch (e: Exception) {
@@ -77,7 +108,7 @@ class PX5Application : Application() {
             try {
                 val logsDir = context.getExternalFilesDir("logs")
                 if (logsDir != null) {
-                    val logFile = java.io.File(logsDir, "px5_crash_log.txt")
+                    val logFile = File(logsDir, "px5_crash_log.txt")
                     if (logFile.exists()) logFile.delete()
                 }
             } catch (e: Exception) {
@@ -98,7 +129,7 @@ class PX5Application : Application() {
                 val logsDir = context.getExternalFilesDir("logs")
                 if (logsDir != null) {
                     if (!logsDir.exists()) logsDir.mkdirs()
-                    val logFile = java.io.File(logsDir, "px5_crash_log.txt")
+                    val logFile = File(logsDir, "px5_crash_log.txt")
                     logFile.writeText(trimmedLogs)
                 }
             } catch (e: Exception) {
@@ -107,4 +138,3 @@ class PX5Application : Application() {
         }
     }
 }
-
