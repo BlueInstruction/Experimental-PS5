@@ -28,6 +28,19 @@ add_compile_options(
         $<$<COMPILE_LANGUAGE:CXX>:-include>
         $<$<COMPILE_LANGUAGE:CXX>:${PX5_ATOMIC_REF_POLYFILL}>)
 
+# ----------------------------------------------------------------------------
+# Linker + LTO settings
+# ----------------------------------------------------------------------------
+# FEX defaults ENABLE_LTO=TRUE, which makes CMake invoke `ld.gold` with the
+# LLVMgold.so plugin. NDK 27 does NOT ship LLVMgold.so, so the link fails:
+#   /usr/bin/ld.gold: error: LLVMgold.so: could not load plugin library
+#   /usr/bin/ld.gold: fatal error: crtbegin_so.o: unsupported ELF machine number 183
+# We disable LTO entirely (debug builds don't benefit from it anyway) and
+# force the modern lld linker, which is bundled with the NDK and fully
+# supports ARM64 (machine number 183).
+set(ENABLE_LTO OFF CACHE BOOL "" FORCE)
+add_link_options($<$<COMPILE_LANGUAGE:CXX>:-fuse-ld=lld>)
+
 # FEXCore is built from the vendored upstream source. Android-specific options
 # are set before entering FEX's CMake project so no glibc allocator is enabled.
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
