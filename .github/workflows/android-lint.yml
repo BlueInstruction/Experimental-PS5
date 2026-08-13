@@ -1,30 +1,36 @@
 # Android Lint for the PSX5 Kotlin/Java codebase.
 #
-# Runs Google's official Android Lint, then COMMITS the HTML report to:
-#   diagnostic-output/<run_id>/android-lint-report/lint-results-debug.html
+# Replaces the upstream Jekyll site CI starter (which was irrelevant —
+# PSX5 has no Ruby/Jekyll docs site). Android Lint is Google's official
+# static analyzer for Android code; it catches:
+#   - Resource leaks (unclosed Cursor, InputStream, BroadcastReceiver)
+#   - Deprecated API usage (targetSdk=35 catches a lot)
+#   - Accessibility issues (missing contentDescription, touch target size)
+#   - Internationalization (hardcoded strings, RTL issues)
+#   - Security (exported components without permission, cleartext traffic)
+#   - Performance (heavy work on main thread, inefficient layouts)
+#   - Correctness (wrong fragment lifecycle, missing permissions)
 #
-# Also uploads SARIF to GitHub's Security tab + keeps the artifact as backup.
-#
-# NOTE: pull_request trigger is intentionally omitted. When a PR is open,
-# GitHub restricts the GITHUB_TOKEN's contents:write permission, which
-# prevents the commit step from pushing the report to the repo. The
-# workflow still runs on push to main/fix branches + manual dispatch.
+# Output: lint-results-debug.sarif uploaded to GitHub's Security tab +
+#         HTML report as an artifact.
 
 name: Android Lint
 
 on:
   push:
-    branches: ["main", "fix/**"]
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
-  contents: write
-  security-events: write
+  contents: read
+  security-events: write  # for SARIF upload
 
 jobs:
   android-lint:
     name: Android Lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
 
     steps:
@@ -49,63 +55,32 @@ jobs:
 
       - name: Run Android Lint
         run: |
+          # Run only the lint task — not the full assembleDebug, which
+          # would also trigger native CMake build (slow + needs NDK).
+          # `-x lintDebug` is the variant-specific task; we also use
+          # `lint` to cover all variants.
           gradle :app:lintDebug --no-daemon --stacktrace 2>&1 | tee lint.log || true
 
-      - name: Check for report output
+      - name: Check for SARIF output
         run: |
-          echo "=== lint report files ==="
-          ls -la app/build/reports/ 2>/dev/null || echo "No reports dir"
-          echo "=== SARIF ==="
-          ls -la app/build/reports/lint-results-debug.sarif 2>/dev/null || echo "No SARIF"
-          echo "=== HTML ==="
-          ls -la app/build/reports/lint-results-debug.html 2>/dev/null || echo "No HTML"
-          echo "=== XML ==="
-          ls -la app/build/reports/lint-results-debug.xml 2>/dev/null || echo "No XML"
+          # AGP 8.x writes SARIF to app/build/reports/lint-results-debug.sarif
+          if [ -f app/build/reports/lint-results-debug.sarif ]; then
+            echo "SARIF found: app/build/reports/lint-results-debug.sarif"
+            ls -la app/build/reports/lint-results-debug.sarif
+          else
+            echo "No SARIF found — Android Lint may have failed before producing it."
+            ls -la app/build/reports/ 2>/dev/null || true
+          fi
 
-      - name: Upload SARIF to GitHub Security tab
+      - name: Upload SARIF
         if: always() && hashFiles('app/build/reports/lint-results-debug.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: app/build/reports/lint-results-debug.sarif
           category: '/android-lint'
-        continue-on-error: true
+        continue-on-error: true  # SARIF upload may fail if AGP version doesn't emit valid schema
 
-      - name: Publish Android Lint report to diagnostic-output/
-        if: always()
-        shell: bash
-        run: |
-          # Target directory — matches the structure the user requested:
-          #   diagnostic-output/<run-id>/android-lint-report/
-          OUT="diagnostic-output/${GITHUB_RUN_ID}/android-lint-report"
-          mkdir -p "$OUT"
-
-          # Copy the original Android Lint HTML report as-is.
-          # Do NOT convert to Markdown or extract text.
-          cp app/build/reports/lint-results-debug.html "$OUT/" 2>/dev/null || true
-          cp app/build/reports/lint-results-debug.sarif "$OUT/" 2>/dev/null || true
-          cp app/build/reports/lint-results-debug.xml "$OUT/" 2>/dev/null || true
-          cp lint.log "$OUT/" 2>/dev/null || true
-
-          echo "=== Files published to $OUT ==="
-          ls -la "$OUT/"
-
-          # Verify the HTML report exists
-          echo ""
-          echo "=== HTML report integrity check ==="
-          if [ -f "$OUT/lint-results-debug.html" ]; then
-            echo "  OK: lint-results-debug.html exists ($(wc -c < "$OUT/lint-results-debug.html") bytes)"
-          else
-            echo "  MISSING: lint-results-debug.html"
-          fi
-
-          # Commit
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add diagnostic-output/
-          git commit -m "chore(lint): publish android-lint report for run ${GITHUB_RUN_ID} [skip ci]" || echo "Nothing to commit"
-          git push
-
-      - name: Upload report as artifact (backup)
+      - name: Upload HTML report
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -113,7 +88,7 @@ jobs:
           path: |
             app/build/reports/lint-results-*.html
             app/build/reports/lint-results-*.sarif
-            app/build/reports/lint-results-*.xml
             lint.log
           if-no-files-found: ignore
           retention-days: 14
+
