@@ -81,6 +81,11 @@ int MemoryManager::CreateSharedMemory(const char* name, size_t size) {
             fd = -1;
         }
     }
+#else
+    // cppcheck-suppress knownConditionTrueFalse
+    // On this platform __NR_memfd_create is not defined, so fd is always -1
+    // here and we fall through to the ASharedMemory_create fallback below.
+    fd = -1;
 #endif
     if (fd < 0) {
         // Fallback: ASharedMemory_create (Android NDK API)
@@ -141,3 +146,4 @@ size_t MemoryManager::GetTotalAllocatedMB() const {
 }
 
 } // namespace PX5
+

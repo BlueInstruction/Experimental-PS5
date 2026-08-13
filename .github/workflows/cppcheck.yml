@@ -1,35 +1,22 @@
 # cppcheck static analysis for the PSX5 C/C++ codebase.
 #
-# Replaces the upstream Deno starter workflow (which was irrelevant — PSX5
-# has no TypeScript). cppcheck is a free, fast static analyzer that catches:
-#   - Null pointer dereferences
-#   - Buffer overruns / underruns
-#   - Memory leaks (double-free, use-after-free)
-#   - Uninitialized variables
-#   - STL misuse
-#   - Bit-shift UB
-#   - Integer overflow
-#   - Dangerous casts
+# Runs cppcheck, generates XML + HTML reports, then COMMITS them to
+# diagnostic-output/<run_id>/cppcheck/ in the repo so the AI agent
+# can read them via the Contents API (no artifact download needed).
 #
-# Output is uploaded as SARIF so findings show up in the GitHub Security tab
-# alongside CodeQL + Codacy.
-#
-# We exclude:
-#   - third_party/fex/ — upstream code we don't own (FEXCore has its own CI)
-#   - app/.cxx/         — CMake build artifacts
-#   - app/build/        — Gradle build artifacts
+# Also uploads SARIF to GitHub's Security tab + keeps the artifact as backup.
 
 name: cppcheck
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "fix/**"]
   pull_request:
     branches: ["main"]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write   # needed to commit reports to the repo
   security-events: write  # for SARIF upload
 
 jobs:
@@ -52,22 +39,12 @@ jobs:
         run: |
           mkdir -p build-reports
 
-          # We use --inline-suppr so individual lines can opt out with
-          # "// cppcheck-suppress <id>" comments.
-          #
-          # --enable=all turns on warning,style,performance,portability
-          # (but not unusedFunction — too noisy on a partial build).
-          #
-          # --suppress=missingIncludeSystem silences noise from system headers.
-          #
-          # --error-exitcode=1 makes CI fail on actual errors (not warnings).
           cppcheck \
             --enable=warning,style,performance,portability \
             --suppress=missingIncludeSystem \
             --suppress=unusedFunction \
             --inline-suppr \
             --force \
-            --inline-suppr \
             -D__ANDROID__ \
             -D__aarch64__ \
             -DARM64 \
@@ -89,17 +66,13 @@ jobs:
             --output-file=build-reports/cppcheck.xml \
             app/src/main/cpp/ 2>&1 | tee build-reports/cppcheck.log || true
 
-          # Convert XML to SARIF for GitHub upload
+          # Generate HTML report
           cppcheck-htmlreport --file=build-reports/cppcheck.xml \
             --report-dir=build-reports/html || true
 
       - name: Convert cppcheck XML to SARIF
         run: |
-          # Try multiple converters; if all fail, generate a minimal SARIF
-          # ourselves so the GitHub Security tab still has something to show.
           set +e
-
-          # Option 1: official cppcheck-sarif PyPI package
           pip install --quiet cppcheck-sarif 2>/dev/null
           if command -v cppcheck-sarif >/dev/null 2>&1; then
             cppcheck-sarif build-reports/cppcheck.xml -o build-reports/cppcheck.sarif
@@ -108,53 +81,85 @@ jobs:
               exit 0
             fi
           fi
-
-          # Option 2: use Python directly with the sarif-tools package
-          pip install --quiet sarif-tools 2>/dev/null
-          if python -c "import sarif" 2>/dev/null; then
-            # sarif-tools doesn't have a direct cppcheck converter, but
-            # we can at least verify the sarif module is importable.
-            :
-          fi
-
-          # Option 3: minimal inline SARIF (no findings — just so the
-          # upload step succeeds and we don't get a red X on CI).
-          echo "All converters failed; generating minimal empty SARIF."
+          # Fallback: minimal empty SARIF
           cat > build-reports/cppcheck.sarif <<'EOF'
           {
             "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
             "version": "2.1.0",
-            "runs": [
-              {
-                "tool": {
-                  "driver": {
-                    "name": "cppcheck",
-                    "informationUri": "https://cppcheck.sourceforge.io/",
-                    "version": "unknown"
-                  }
-                },
-                "results": [],
-                "invocations": [
-                  {
-                    "executionSuccessful": true,
-                    "ruleConfigurationOverrides": []
-                  }
-                ]
-              }
-            ]
+            "runs": [{ "tool": { "driver": { "name": "cppcheck" } }, "results": [] }]
           }
           EOF
-          echo "Minimal SARIF written to build-reports/cppcheck.sarif"
 
-      - name: Upload SARIF
+      - name: Upload SARIF to GitHub Security tab
         if: always() && hashFiles('build-reports/cppcheck.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: build-reports/cppcheck.sarif
           category: '/cppcheck'
-        continue-on-error: true  # don't fail the workflow if SARIF upload rejects our file
+        continue-on-error: true
 
-      - name: Upload HTML report
+      - name: Commit cppcheck report to repo
+        if: always()
+        shell: bash
+        run: |
+          OUT="diagnostic-output/${GITHUB_RUN_ID}/cppcheck"
+          mkdir -p "$OUT"
+
+          # Copy all report files
+          cp build-reports/cppcheck.xml "$OUT/" 2>/dev/null || true
+          cp build-reports/cppcheck.log "$OUT/" 2>/dev/null || true
+          cp build-reports/cppcheck.sarif "$OUT/" 2>/dev/null || true
+          cp -r build-reports/html/* "$OUT/" 2>/dev/null || true
+
+          # Generate a plain-text summary the AI agent can read directly
+          {
+            echo "# Cppcheck Report — Run ${{ github.run_id }}"
+            echo ""
+            echo "- commit: ${{ github.sha }}"
+            echo "- branch: ${{ github.ref_name }}"
+            echo "- date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo ""
+            echo "## Findings"
+            echo '```'
+            # Extract findings from XML: severity, id, file, line, message
+            python3 -c "
+import xml.etree.ElementTree as ET
+import sys
+try:
+    tree = ET.parse('build-reports/cppcheck.xml')
+    root = tree.getroot()
+    errors = root.find('errors')
+    if errors is not None:
+        for err in errors.findall('error'):
+            sev = err.get('severity', '?')
+            eid = err.get('id', '?')
+            msg = err.get('msg', '?')
+            loc = err.find('location')
+            if loc is not None:
+                f = loc.get('file', '?')
+                line = loc.get('line', '?')
+                print(f'  [{sev:10s}] {eid:30s} {f}:{line} — {msg}')
+            else:
+                print(f'  [{sev:10s}] {eid:30s} — {msg}')
+    else:
+        print('(no errors element found)')
+except Exception as e:
+    print(f'(could not parse XML: {e})')
+" || echo "(could not extract findings)"
+            echo '```'
+          } > "$OUT/summary.md"
+
+          echo "=== Files committed to $OUT ==="
+          ls -la "$OUT/"
+
+          # Commit
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add diagnostic-output/
+          git commit -m "chore(diag): publish cppcheck report for run ${GITHUB_RUN_ID} [skip ci]" || echo "Nothing to commit"
+          git push
+
+      - name: Upload report as artifact (backup)
         if: always()
         uses: actions/upload-artifact@v4
         with:

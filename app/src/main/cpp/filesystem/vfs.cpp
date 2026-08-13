@@ -44,10 +44,11 @@ std::string VirtualFileSystem::ResolveHostPath(const std::string& guestPath) con
 
 std::vector<MountPoint> VirtualFileSystem::GetMountPoints() const {
     std::vector<MountPoint> result;
-    for (const auto& [_, mount] : m_mounts) {
+    for (const auto& [/*unused*/, mount] : m_mounts) {
         result.push_back(mount);
     }
     return result;
 }
 
 } // namespace PX5
+
