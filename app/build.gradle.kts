@@ -8,7 +8,7 @@ plugins {
 android {
     namespace = "com.px5.emulator"
     compileSdk = 35
-    ndkVersion = "26.1.10909125"
+    ndkVersion = "27.3.13750724"
 
     defaultConfig {
         applicationId = "com.px5.emulator"
@@ -58,3 +58,4 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
 }
+
