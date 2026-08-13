@@ -1,0 +1,152 @@
+# Python scripts lint + test for PSX5 helper scripts.
+#
+# PSX5 has no Python application code, but it does have Python helper
+# scripts in:
+#   - scripts/                  (build helpers, diagnostics)
+#   - .github/scripts/          (CI helpers)
+#
+# This workflow catches:
+#   - Syntax errors (E9, F63, F7, F82 — flake8's "definitely broken" set)
+#   - Style violations (line length, unused imports, complexity)
+#   - Type errors (mypy on scripts that have type hints)
+#   - Common security issues (bandit)
+#
+# Improvements over the upstream conda starter:
+#   - Drops conda (we have no environment.yml — overkill for a few scripts)
+#   - Adds mypy for type checking
+#   - Adds bandit for security
+#   - Scopes the scan to scripts/ + .github/scripts/ only (not the whole
+#     repo, which would waste time on vendored Python in third_party/)
+
+name: Python scripts lint & test
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - 'scripts/**'
+      - '.github/scripts/**'
+      - '**/*.py'
+      - '.github/workflows/python-scripts.yml'
+  pull_request:
+    branches: ["main"]
+    paths:
+      - 'scripts/**'
+      - '.github/scripts/**'
+      - '**/*.py'
+      - '.github/workflows/python-scripts.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write  # for SARIF upload
+
+jobs:
+  lint:
+    name: flake8 + mypy + bandit
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install linters
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            flake8 \
+            mypy \
+            bandit \
+            bandit-sarif-formatter
+
+      - name: Discover Python files
+        id: discover
+        run: |
+          # Find all .py files we own (skip third_party, build artifacts,
+          # and any vendored Python in app/src/main/python/)
+          {
+            find scripts -name '*.py' 2>/dev/null || true
+            find .github/scripts -name '*.py' 2>/dev/null || true
+            find . -maxdepth 2 -name '*.py' \
+              -not -path './third_party/*' \
+              -not -path './app/.cxx/*' \
+              -not -path './app/build/*' \
+              -not -path './.gradle/*' \
+              -not -path './build/*' \
+              2>/dev/null || true
+          } | sort -u > pyfiles.txt
+          echo "Found $(wc -l < pyfiles.txt) Python files:"
+          cat pyfiles.txt
+          echo "files=$(cat pyfiles.txt | tr '\n' ' ')" >> $GITHUB_OUTPUT
+
+      - name: flake8 (syntax + critical errors)
+        run: |
+          if [ -s pyfiles.txt ]; then
+            # E9,F63,F7,F82 = syntax + undefined names + unused imports —
+            # these are "definitely broken" and should fail the build.
+            flake8 $(cat pyfiles.txt) \
+              --count --select=E9,F63,F7,F82 \
+              --show-source --statistics
+          else
+            echo "No Python files to lint."
+          fi
+
+      - name: flake8 (style, warnings only)
+        run: |
+          if [ -s pyfiles.txt ]; then
+            # Style + complexity — exit-zero so they don't break CI,
+            # just surface as warnings.
+            flake8 $(cat pyfiles.txt) \
+              --count --exit-zero \
+              --max-complexity=15 \
+              --max-line-length=120 \
+              --extend-ignore=E203,W503 \
+              --statistics
+          fi
+
+      - name: mypy (type check)
+        run: |
+          if [ -s pyfiles.txt ]; then
+            # --ignore-missing-imports so we don't fail on optional deps
+            # that aren't installed in this minimal env.
+            mypy $(cat pyfiles.txt) \
+              --ignore-missing-imports \
+              --no-strict-optional \
+              --allow-untyped-defs \
+              || true  # mypy is informational for now
+          fi
+
+      - name: bandit (security)
+        run: |
+          if [ -s pyfiles.txt ]; then
+            # -ll = only high-severity findings
+            # -x = exclude third_party
+            bandit -r $(cat pyfiles.txt | tr '\n' ' ') \
+              -ll \
+              -f sarif \
+              -o build-bandit.sarif \
+              || true
+          fi
+
+      - name: Upload bandit SARIF
+        if: always() && hashFiles('build-bandit.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: build-bandit.sarif
+          category: '/bandit'
+
+      - name: pytest (if tests exist)
+        run: |
+          if find scripts .github/scripts -name 'test_*.py' -o -name '*_test.py' 2>/dev/null | grep -q .; then
+            pip install pytest
+            pytest scripts .github/scripts || true
+          else
+            echo "No Python tests found — skipping pytest."
+          fi

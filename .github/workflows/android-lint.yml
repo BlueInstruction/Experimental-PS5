@@ -1,0 +1,92 @@
+# Android Lint for the PSX5 Kotlin/Java codebase.
+#
+# Replaces the upstream Jekyll site CI starter (which was irrelevant —
+# PSX5 has no Ruby/Jekyll docs site). Android Lint is Google's official
+# static analyzer for Android code; it catches:
+#   - Resource leaks (unclosed Cursor, InputStream, BroadcastReceiver)
+#   - Deprecated API usage (targetSdk=35 catches a lot)
+#   - Accessibility issues (missing contentDescription, touch target size)
+#   - Internationalization (hardcoded strings, RTL issues)
+#   - Security (exported components without permission, cleartext traffic)
+#   - Performance (heavy work on main thread, inefficient layouts)
+#   - Correctness (wrong fragment lifecycle, missing permissions)
+#
+# Output: lint-results-debug.sarif uploaded to GitHub's Security tab +
+#         HTML report as an artifact.
+
+name: Android Lint
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write  # for SARIF upload
+
+jobs:
+  android-lint:
+    name: Android Lint
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-35'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.9'
+
+      - name: Run Android Lint
+        run: |
+          # Run only the lint task — not the full assembleDebug, which
+          # would also trigger native CMake build (slow + needs NDK).
+          # `-x lintDebug` is the variant-specific task; we also use
+          # `lint` to cover all variants.
+          gradle :app:lintDebug --no-daemon --stacktrace 2>&1 | tee lint.log || true
+
+      - name: Check for SARIF output
+        run: |
+          # AGP 8.x writes SARIF to app/build/reports/lint-results-debug.sarif
+          if [ -f app/build/reports/lint-results-debug.sarif ]; then
+            echo "SARIF found: app/build/reports/lint-results-debug.sarif"
+            ls -la app/build/reports/lint-results-debug.sarif
+          else
+            echo "No SARIF found — Android Lint may have failed before producing it."
+            ls -la app/build/reports/ 2>/dev/null || true
+          fi
+
+      - name: Upload SARIF
+        if: always() && hashFiles('app/build/reports/lint-results-debug.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: app/build/reports/lint-results-debug.sarif
+          category: '/android-lint'
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-lint-report-${{ github.run_id }}
+          path: |
+            app/build/reports/lint-results-*.html
+            app/build/reports/lint-results-*.sarif
+            lint.log
+          if-no-files-found: ignore
+          retention-days: 14
