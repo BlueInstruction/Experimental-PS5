@@ -24,46 +24,18 @@ val PS5TrophyBronze = Color(0xFFCD7F32)
 val PS5TrophySilver = Color(0xFFC0C0C0)
 val PS5TrophyGold = Color(0xFFFFD700)
 
-// ---------------------------------------------------------------------------
-// Font families — sourced from PS5ish (https://github.com/SeaNaxxx/PS5ish)
-//
-// The previous font files (titillium_regular.ttf, titillium_bold.ttf,
-// titillium_semibold.ttf, playstation.ttf) were CORRUPT — `file` reported
-// invalid TrueType data. Loading them caused either:
-//   - A Kotlin IllegalStateException (when FontFamily was SansSerif and
-//     Compose tried to resolve an R.font.* ID that had no real font behind it)
-//   - A native SIGSEGV (when FontFamily was bound to R.font.* and the
-//     corrupt .ttf was actually parsed by Skia/HarfBuzz)
-//
-// Fix: replaced all 4 corrupt files with the correct ones from PS5ish:
-//   titillium_regular.ttf   → titilliumweb_regular.ttf   (from PS5ish)
-//   titillium_semibold.ttf  → titilliumweb_semibold.ttf  (from PS5ish)
-//   titillium_bold.ttf      → titilliumweb_bold.ttf      (from PS5ish)
-//   playstation.ttf         → playstation4.ttf            (from PS5ish)
-//
-// All 4 new files verified with `file` as valid TrueType Font data.
-// ---------------------------------------------------------------------------
+// Font families — uses the exact same definitions as the working PX5 repo.
+// The res/font/titillium_web.xml font-family XML (synced from PX5 in this
+// commit) maps FontWeight values to the correct .ttf files, so we don't
+// need to enumerate every weight here — Compose resolves via the XML.
 val TitilliumFontFamily = FontFamily(
-    Font(R.font.titilliumweb_regular, weight = FontWeight.Normal),
-    Font(R.font.titilliumweb_semibold, weight = FontWeight.SemiBold),
-    Font(R.font.titilliumweb_bold, weight = FontWeight.Bold),
-    // Explicit weight=700 mapping (the crash log showed Compose asking for
-    // FontWeight(weight=700) which is Bold).
-    Font(R.font.titilliumweb_bold, weight = FontWeight(700)),
-    // Heavier weights fall back to Bold (the heaviest TitilliumWeb variant
-    // we ship). This prevents crashes if any code requests Black/ExtraBold.
-    Font(R.font.titilliumweb_bold, weight = FontWeight.Black),
-    Font(R.font.titilliumweb_bold, weight = FontWeight.ExtraBold),
+    Font(R.font.titilliumweb_regular, FontWeight.Normal),
+    Font(R.font.titilliumweb_semibold, FontWeight.SemiBold),
+    Font(R.font.titilliumweb_bold, FontWeight.Bold)
 )
 
 val PlayStationFontFamily = FontFamily(
-    Font(R.font.playstation4, weight = FontWeight.Normal),
-    Font(R.font.playstation4, weight = FontWeight.Medium),
-    Font(R.font.playstation4, weight = FontWeight.SemiBold),
-    Font(R.font.playstation4, weight = FontWeight.Bold),
-    Font(R.font.playstation4, weight = FontWeight(700)),
-    Font(R.font.playstation4, weight = FontWeight.Black),
-    Font(R.font.playstation4, weight = FontWeight.ExtraBold),
+    Font(R.font.playstation4, FontWeight.Normal)
 )
 
 val PS5Typography = Typography(
