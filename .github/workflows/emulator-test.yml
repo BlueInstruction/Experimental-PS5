@@ -75,8 +75,16 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 30
-          target: google_apis
+          target: default
           arch: x86_64
+          # Use 'default' target (not google_apis) — smaller disk footprint.
+          # The previous run failed with 'Not enough space to create userdata
+          # partition. Available: 7056.64 MB, need 7372.80 MB'.
+          # Using default + sdcard-path with smaller size avoids this.
+          disk-size: 4096M
+          heap-size: 512M
+          sdcard-path-or-size: 512M
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -wipe-data
           # We need arm64-v8a for the actual app (it's the only ABI we build),
           # but the emulator runs x86_64. The app's arm64-v8a .so won't load
           # on x86_64 emulator, BUT the Kotlin/Compose UI will still render
