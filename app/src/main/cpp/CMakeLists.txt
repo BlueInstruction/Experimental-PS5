@@ -112,6 +112,7 @@ add_library(
         input/controller.cpp
         filesystem/vfs.cpp
         utils/logger.cpp
+        utils/crash_handler.cpp
         utils/linker_ns_bypass.cpp
         media/media_codec_hle.cpp
         turnip_hook.cpp)
@@ -125,6 +126,10 @@ target_include_directories(px5 PRIVATE
 # so any consumer of px5 inherits the requirement.
 target_compile_features(px5 PRIVATE cxx_std_20)
 
+# The crash handler uses _Unwind_Backtrace, which lives in libgcc. On Android
+# NDK 27, the unwinder is split into a separate libunwind.a; both symbols
+# are pulled in automatically by -lc, but we link explicitly to be safe.
+# Also link -latomic for any 16-byte atomic ops used by FEXCore.
 find_library(log-lib log)
 find_library(android-lib android)
 find_library(aaudio-lib aaudio)
@@ -136,4 +141,5 @@ target_link_libraries(
         ${aaudio-lib}
         FEXCore
         FEXCore_Base
-        JemallocDummy)
+        JemallocDummy
+        unwind)
