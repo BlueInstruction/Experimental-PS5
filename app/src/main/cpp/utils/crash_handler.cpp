@@ -130,8 +130,8 @@ void dump_registers(int fd, ucontext_t* uc) {
             std::snprintf(reg1, sizeof(reg1), "x%d", i);
             std::snprintf(reg2, sizeof(reg2), "x%d", i + 1);
             char v1[32], v2[32];
-            safe_utoa_hex(v1, reinterpret_cast<unsigned long long>(regs[i]));
-            safe_utoa_hex(v2, reinterpret_cast<unsigned long long>(regs[i + 1]));
+            safe_utoa_hex(v1, static_cast<unsigned long long>(regs[i]));
+            safe_utoa_hex(v2, static_cast<unsigned long long>(regs[i + 1]));
             std::snprintf(buf, sizeof(buf), "  %-5s = 0x%s   %-5s = 0x%s\n",
                           reg1, v1, reg2, v2);
             safe_write(fd, buf);
@@ -140,8 +140,8 @@ void dump_registers(int fd, ucontext_t* uc) {
     // x29 (FP), x30 (LR)
     {
         char v29[32], v30[32];
-        safe_utoa_hex(v29, reinterpret_cast<unsigned long long>(regs[29]));
-        safe_utoa_hex(v30, reinterpret_cast<unsigned long long>(regs[30]));
+        safe_utoa_hex(v29, static_cast<unsigned long long>(regs[29]));
+        safe_utoa_hex(v30, static_cast<unsigned long long>(regs[30]));
         std::snprintf(buf, sizeof(buf), "  x29(FP) = 0x%s   x30(LR) = 0x%s\n",
                       v29, v30);
         safe_write(fd, buf);
@@ -149,8 +149,8 @@ void dump_registers(int fd, ucontext_t* uc) {
     // SP, PC, PSTATE
     {
         char sp_buf[32], pc_buf[32], ps_buf[32];
-        safe_utoa_hex(sp_buf, reinterpret_cast<unsigned long long>(uc->uc_mcontext.sp));
-        safe_utoa_hex(pc_buf, reinterpret_cast<unsigned long long>(uc->uc_mcontext.pc));
+        safe_utoa_hex(sp_buf, static_cast<unsigned long long>(uc->uc_mcontext.sp));
+        safe_utoa_hex(pc_buf, static_cast<unsigned long long>(uc->uc_mcontext.pc));
         safe_utoa_hex(ps_buf, static_cast<unsigned long long>(uc->uc_mcontext.pstate));
         std::snprintf(buf, sizeof(buf),
                       "  SP     = 0x%s   PC     = 0x%s   PSTATE = 0x%s\n",
@@ -170,7 +170,9 @@ _Unwind_Reason_Code unwind_callback(struct _Unwind_Context* ctx, void* arg) {
     auto* us = static_cast<UnwindState*>(arg);
     if (us->count >= us->max_frames) return _URC_END_OF_STACK;
 
-    auto pc = reinterpret_cast<unsigned long long>(_Unwind_GetIP(ctx));
+    // _Unwind_GetIP returns _Unwind_Word (typically 'unsigned long' on ARM64).
+    // Use static_cast (not reinterpret_cast — these are both integer types).
+    auto pc = static_cast<unsigned long long>(_Unwind_GetIP(ctx));
     if (pc == 0) return _URC_END_OF_STACK;
 
     char buf[80];
@@ -262,7 +264,8 @@ extern "C" void px5_signal_handler(int signo, siginfo_t* info, void* ucontext) {
         }
         char hdr[256];
         char addr_buf[32], code_buf[16];
-        safe_utoa_hex(addr_buf, reinterpret_cast<unsigned long long>(info->si_addr));
+        safe_utoa_hex(addr_buf, static_cast<unsigned long long>(
+            reinterpret_cast<uintptr_t>(info->si_addr)));
         safe_utoa(code_buf, static_cast<unsigned long long>(info->si_code));
         std::snprintf(hdr, sizeof(hdr),
                       "Signal: %d (%s)   code: %s   fault address: 0x%s\n",
