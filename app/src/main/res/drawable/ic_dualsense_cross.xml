@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- PX5 DualSense: Cross (X) button — Vector Drawable -->
+<!-- Blue tinted, transparent fill, scalable to any size -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+
+    <!-- Circle background (transparent, visible on press) -->
+    <path
+        android:pathData="M24,24m-22,0a22,22 0,1 1,44 0a22,22 0,1 1,-44 0"
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.5"
+        android:strokeAlpha="0.3" />
+
+    <!-- Cross (X) shape -->
+    <path
+        android:pathData="M16,16 L32,32 M32,16 L16,32"
+        android:strokeColor="#0066FF"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round" />
+
+</vector>

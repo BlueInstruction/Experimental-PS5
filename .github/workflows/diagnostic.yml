@@ -1,0 +1,161 @@
+name: PX5 Diagnostic Build
+
+# Triggered manually OR on push to fix/diag branches.
+# Captures full build output and COMMITS it back to the repo as
+# diagnostic-output/<run_id>/*.log so it can be read via Contents API
+# (no need to fetch logs from Azure blob storage).
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'fix/ci-android-build'
+      - 'diag/**'
+
+permissions:
+  contents: write   # needed so the GITHUB_TOKEN can commit log files back
+
+jobs:
+  diagnostic:
+    name: Capture verbose build log
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+        # Use the PAT-issued GITHUB_TOKEN so we can push back
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+      with:
+        packages: 'ndk;27.3.13750724 cmake;3.22.1'
+
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v3
+      with:
+        gradle-version: '8.9'
+
+    - name: Capture environment info
+      shell: bash
+      run: |
+        mkdir -p "diagnostic-output/${GITHUB_RUN_ID}"
+        OUT="diagnostic-output/${GITHUB_RUN_ID}"
+        {
+          echo "# PX5 Diagnostic Build"
+          echo ""
+          echo "- run_id: ${GITHUB_RUN_ID}"
+          echo "- run_number: ${GITHUB_RUN_NUMBER}"
+          echo "- commit: ${GITHUB_SHA}"
+          echo "- branch: ${GITHUB_REF_NAME}"
+          echo "- runner: $(uname -a)"
+          echo "- date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo ""
+          echo "## Tool versions"
+          echo '```'
+          java -version 2>&1
+          echo '---'
+          gradle --version 2>&1 | head -10
+          echo '---'
+          cmake --version 2>&1 | head -1
+          echo '---'
+          echo "NDK dirs: ${ANDROID_HOME:-$ANDROID_SDK_ROOT}/ndk/*"
+          ls -1 "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/ndk/" 2>&1 || echo "(no NDK found)"
+          echo '---'
+          echo "SDK dir contents:"
+          ls -1 "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/" 2>&1
+          echo '```'
+          echo ""
+          echo "## Repo tree (depth 3, no .git)"
+          echo '```'
+          find . -maxdepth 3 -type d -not -path './.git*' -not -path './.gradle*' -not -path './build*' -not -path './app/build*' -not -path './app/.cxx*' | sort
+          echo '```'
+        } > "${OUT}/env.md"
+        echo "### env.md written"
+
+    - name: Run gradle assembleDebug with full output
+      shell: bash
+      run: |
+        OUT="diagnostic-output/${GITHUB_RUN_ID}"
+        # Build with maximum verbosity. tee to capture. Don't fail step on gradle failure.
+        set +e
+        gradle assembleDebug --no-daemon --stacktrace --info --console=plain > "${OUT}/build-full.log" 2>&1
+        GRADLE_EXIT=$?
+        set -e
+        echo "Gradle exit code: ${GRADLE_EXIT}" | tee "${OUT}/exit-code.txt"
+        echo "GRADLE_EXIT=${GRADLE_EXIT}" >> "${GITHUB_ENV}"
+
+    - name: Build summary (errors + last 400 lines)
+      if: always()
+      shell: bash
+      run: |
+        OUT="diagnostic-output/${GITHUB_RUN_ID}"
+        FULL="${OUT}/build-full.log"
+        {
+          echo "# Build Summary"
+          echo ""
+          echo "- gradle exit code: ${GRADLE_EXIT:-unknown}"
+          echo ""
+          echo "## Matched failure patterns"
+          echo '```'
+          grep -nEi "(FAILURE|BUILD FAILED|error:|Error:|Caused by|> Task.*FAILED|CMake Error|ninja: error|fatal error|undefined reference|ld: error|cannot find|No such file or directory|unrecognized|unsupported|FATAL_ERROR)" "${FULL}" | head -100 || echo "(no matches)"
+          echo '```'
+          echo ""
+          echo "## CMake / NDK specific errors"
+          echo '```'
+          grep -nEi "(CMake|NDK|Android NDK|toolchain|sysroot|clang|aarch64-linux-android)" "${FULL}" | head -80 || echo "(no matches)"
+          echo '```'
+          echo ""
+          echo "## Last 400 lines"
+          echo '```'
+          tail -n 400 "${FULL}"
+          echo '```'
+        } > "${OUT}/build-summary.md"
+        echo "### summary written"
+
+    - name: Trim full log if huge
+      if: always()
+      shell: bash
+      run: |
+        OUT="diagnostic-output/${GITHUB_RUN_ID}"
+        FULL="${OUT}/build-full.log"
+        LINES=$(wc -l < "${FULL}")
+        echo "Full log lines: ${LINES}"
+        # GitHub per-file limit ~100MB. Be conservative: trim to last 8000 lines if > 10000.
+        if [ "${LINES}" -gt 10000 ]; then
+          TMP="${FULL}.trim"
+          head -n 200 "${FULL}" > "${TMP}"
+          echo "" >> "${TMP}"
+          echo "...(middle trimmed, ${LINES} lines total)..." >> "${TMP}"
+          echo "" >> "${TMP}"
+          tail -n 7800 "${FULL}" >> "${TMP}"
+          mv "${TMP}" "${FULL}"
+          echo "Trimmed to $(wc -l < ${FULL}) lines"
+        fi
+
+    - name: Commit diagnostic output to repo
+      if: always()
+      shell: bash
+      run: |
+        git config user.name  "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add diagnostic-output/
+        # [skip ci] prevents this commit from re-triggering the workflow
+        git commit -m "chore(diag): capture build output for run ${GITHUB_RUN_ID} [skip ci]" || echo "Nothing to commit"
+        git push
+
+    - name: Upload full log as artifact (backup)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: diagnostic-build-log-${{ github.run_id }}
+        path: diagnostic-output/
+        retention-days: 14

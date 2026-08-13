@@ -1,0 +1,22 @@
+{
+  "FEXCore": {
+    "CPU": {
+      "Multithread": true,
+      "VectorEmulation": "SVE2_FALLBACK_NEON",
+      "TSOEnabled": true,
+      "JITAsyncCompilation": true,
+      "X86_64_Mode": "BionicDirect"
+    },
+    "Memory": {
+      "VirtualMemorySize": "8GB",
+      "PageSize": "4KB",
+      "HostBionicBridge": true
+    },
+    "Graphics": {
+      "Renderer": "Vulkan1.3",
+      "CustomDriver": "TurnipAdreno",
+      "BCnTextureDecoding": true,
+      "PipelineCaching": true
+    }
+  }
+}

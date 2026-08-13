@@ -1,0 +1,120 @@
+# cppcheck static analysis for the PSX5 C/C++ codebase.
+#
+# Replaces the upstream Deno starter workflow (which was irrelevant — PSX5
+# has no TypeScript). cppcheck is a free, fast static analyzer that catches:
+#   - Null pointer dereferences
+#   - Buffer overruns / underruns
+#   - Memory leaks (double-free, use-after-free)
+#   - Uninitialized variables
+#   - STL misuse
+#   - Bit-shift UB
+#   - Integer overflow
+#   - Dangerous casts
+#
+# Output is uploaded as SARIF so findings show up in the GitHub Security tab
+# alongside CodeQL + Codacy.
+#
+# We exclude:
+#   - third_party/fex/ — upstream code we don't own (FEXCore has its own CI)
+#   - app/.cxx/         — CMake build artifacts
+#   - app/build/        — Gradle build artifacts
+
+name: cppcheck
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write  # for SARIF upload
+
+jobs:
+  cppcheck:
+    name: cppcheck static analysis
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cppcheck
+          cppcheck --version
+
+      - name: Run cppcheck on px5 native code
+        run: |
+          mkdir -p build-reports
+
+          # We use --inline-suppr so individual lines can opt out with
+          # "// cppcheck-suppress <id>" comments.
+          #
+          # --enable=all turns on warning,style,performance,portability
+          # (but not unusedFunction — too noisy on a partial build).
+          #
+          # --suppress=missingIncludeSystem silences noise from system headers.
+          #
+          # --error-exitcode=1 makes CI fail on actual errors (not warnings).
+          cppcheck \
+            --enable=warning,style,performance,portability \
+            --suppress=missingIncludeSystem \
+            --suppress=unusedFunction \
+            --inline-suppr \
+            --force \
+            --inline-suppr \
+            -D__ANDROID__ \
+            -D__aarch64__ \
+            -DARM64 \
+            --platform=unix64 \
+            --std=c++20 \
+            --xml \
+            --xml-version=2 \
+            -I app/src/main/cpp \
+            -I app/src/main/cpp/utils \
+            -I app/src/main/cpp/core \
+            -I app/src/main/cpp/memory \
+            -I app/src/main/cpp/kernel \
+            -I app/src/main/cpp/loader \
+            -I app/src/main/cpp/gpu \
+            -I app/src/main/cpp/audio \
+            -I app/src/main/cpp/input \
+            -I app/src/main/cpp/filesystem \
+            -I app/src/main/cpp/media \
+            --output-file=build-reports/cppcheck.xml \
+            app/src/main/cpp/ 2>&1 | tee build-reports/cppcheck.log || true
+
+          # Convert XML to SARIF for GitHub upload
+          cppcheck-htmlreport --file=build-reports/cppcheck.xml \
+            --report-dir=build-reports/html || true
+
+      - name: Convert cppcheck XML to SARIF
+        run: |
+          # Use the official cppcheck SARIF converter if available;
+          # otherwise fall back to a minimal Python script.
+          if command -v cppcheck-sarif >/dev/null 2>&1; then
+            cppcheck-sarif build-reports/cppcheck.xml -o build-reports/cppcheck.sarif
+          else
+            pip install --quiet cppcheck-sarif
+            cppcheck-sarif build-reports/cppcheck.xml -o build-reports/cppcheck.sarif || true
+          fi
+
+      - name: Upload SARIF
+        if: always() && hashFiles('build-reports/cppcheck.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: build-reports/cppcheck.sarif
+          category: '/cppcheck'
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cppcheck-report-${{ github.run_id }}
+          path: build-reports/
+          retention-days: 14

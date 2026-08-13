@@ -1,0 +1,62 @@
+# === SECURITY — NEVER COMMIT THESE ===
+.creds/
+.env
+*.token
+*.pat
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# === GIT SUBMODULES (never track) ===
+vkd3d-qsa-repo/
+vkd3d-v3.0.1-src/
+AePS4-dest/
+AePS4-src/
+vkd3d-qsa-binaries/
+
+# === BUILD ARTIFACTS & INTERMEDIATES ===
+.gradle/
+**/.gradle/
+.cxx/
+**/.cxx/
+build/
+**/build/
+android/local.properties
+*.o
+*.a
+*.so
+*.apk
+*.aab
+*.dex
+
+# === IDE ===
+.vscode/
+.idea/
+*.iml
+.clangd/
+.cache/
+*.swp
+*~
+
+# === OS ===
+.DS_Store
+Thumbs.db
+
+# === GRADLE ===
+android/gradlew
+android/gradlew.bat
+android/gradle/wrapper/gradle-wrapper.jar
+
+# === LOGS ===
+*.log
+logs/
+
+# === TEMP ===
+tool-results/
+upload/
+download/
+__pycache__/
+*.pyc
