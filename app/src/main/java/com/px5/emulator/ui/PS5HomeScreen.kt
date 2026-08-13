@@ -143,8 +143,8 @@ fun PS5HomeScreen(
             targetState = selectedGame?.id,
             animationSpec = tween(durationMillis = 400),
             label = "BackdropCrossfade"
-        ) { _ ->
-            val bgRes = if (selectedGame?.id == "ps5_store") R.drawable.ps5_store_background else R.drawable.ps5_background_all
+        ) { targetId ->
+            val bgRes = if (targetId == "ps5_store") R.drawable.ps5_store_background else R.drawable.ps5_background_all
             val backdropPainter = safePainterResource(id = bgRes)
             if (backdropPainter != null) {
                 Image(
@@ -472,3 +472,4 @@ private fun BadgePill(text: String) {
         )
     }
 }
+
