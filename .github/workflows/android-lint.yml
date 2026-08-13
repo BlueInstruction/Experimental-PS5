@@ -30,7 +30,7 @@ permissions:
 jobs:
   android-lint:
     name: Android Lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
 
     steps:
@@ -91,4 +91,5 @@ jobs:
             lint.log
           if-no-files-found: ignore
           retention-days: 14
+
 

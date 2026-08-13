@@ -35,7 +35,7 @@ permissions:
 jobs:
   cppcheck:
     name: cppcheck static analysis
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
 
     steps:
@@ -161,4 +161,5 @@ jobs:
           name: cppcheck-report-${{ github.run_id }}
           path: build-reports/
           retention-days: 14
+
 
