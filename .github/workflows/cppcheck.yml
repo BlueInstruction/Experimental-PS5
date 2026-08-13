@@ -152,6 +152,7 @@ jobs:
         with:
           sarif_file: build-reports/cppcheck.sarif
           category: '/cppcheck'
+        continue-on-error: true  # don't fail the workflow if SARIF upload rejects our file
 
       - name: Upload HTML report
         if: always()

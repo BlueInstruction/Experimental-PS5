@@ -141,6 +141,7 @@ jobs:
         with:
           sarif_file: build-bandit.sarif
           category: '/bandit'
+        continue-on-error: true  # SARIF upload may fail if bandit formatter produced invalid schema
 
       - name: pytest (if tests exist)
         run: |
