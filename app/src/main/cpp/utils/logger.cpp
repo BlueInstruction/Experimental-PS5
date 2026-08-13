@@ -274,7 +274,7 @@ std::string Logger::GetCurrentLogFilePath() noexcept {
 // ============================================================================
 
 void Logger::MaybeRotate() noexcept {
-    auto& s = State();
+    const auto& s = State();
     if (s.bytes_written >= kMaxFileSize) {
         RotateFiles();
     }
@@ -351,3 +351,4 @@ void Logger::Log(LogLevel level, LogCategory category,
 }
 
 } // namespace PX5
+
