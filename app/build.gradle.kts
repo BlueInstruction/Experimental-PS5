@@ -17,6 +17,15 @@ android {
         versionCode = 1
         versionName = "1.0"
 
+        // FEXCore is a 64-bit-only codebase (it rejects 32-bit pointer sizes
+        // with "Unsupported pointer size 4" at CMake configure time). PS5's CPU
+        // is x86-64 and FEXCore translates x86-64 -> ARM64, so we only need the
+        // arm64-v8a ABI. Building armeabi-v7a / x86 / x86_64 is pointless and
+        // would fail in FEX's platform check.
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+
         // Only build the px5 shared library target. By default AGP asks ninja
         // to build ALL CMake targets, including FEX's host tools (FEX, FEXBash,
         // FEXServer, FEXGetConfig, FEXOfflineCompiler, FEXRootFSFetcher,
