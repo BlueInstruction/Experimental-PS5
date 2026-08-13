@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- PX5 launcher background — PS5-style deep blue gradient -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
     <gradient
-        android:angle="135"
-        android:endColor="#000000"
-        android:startColor="#1A1A1A"
-        android:type="linear" />
+        android:startColor="#001B3D"
+        android:endColor="#003893"
+        android:angle="135" />
 </shape>
