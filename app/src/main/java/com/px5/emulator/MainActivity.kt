@@ -63,43 +63,35 @@ class MainActivity : ComponentActivity() {
             // Don't crash — sound is non-essential
         }
 
-        // Initialize FEXCore JNI Core & Load ThunksDB / FEX Config
-        // Wrapped in try/catch so a native init failure doesn't kill the app
-        // before we can log it.
+        // FEXCore init — SKIPPED for now to isolate UI rendering issues.
+        // The diagnostic log showed the app crashes during initializeFexCore()
+        // (native SIGSEGV). By skipping it, we can verify the UI renders
+        // correctly without FEXCore. Once UI works, we'll re-enable FEXCore
+        // init with proper error handling.
         writeDiagnosticLog("MainActivity.onCreate: loading libpx5.so via FexCoreWrapper")
         try {
             fexCoreWrapper = FexCoreWrapper()
             writeDiagnosticLog("MainActivity.onCreate: FexCoreWrapper() constructed — libpx5.so loaded")
 
-            val initSuccess = fexCoreWrapper!!.initializeFexCore()
-            fexCoreStatus = if (initSuccess) "Ready (${fexCoreWrapper!!.stringFromJNI()})" else "Initialized (JNI)"
-            writeDiagnosticLog("MainActivity.onCreate: initializeFexCore() returned $initSuccess")
-
-            // Load ThunksDB and FEX Config from assets
-            try {
-                val thunksStr = assets.open("ThunksDB.json").bufferedReader().use { it.readText() }
-                fexCoreWrapper!!.nativeLoadThunksConfig(thunksStr)
-
-                val fexConfigStr = assets.open("fex_config.json").bufferedReader().use { it.readText() }
-                fexCoreWrapper!!.nativeLoadFexConfig(fexConfigStr)
-                writeDiagnosticLog("MainActivity.onCreate: ThunksDB & fex_config loaded")
-            } catch (assetErr: Exception) {
-                writeDiagnosticLog("MainActivity.onCreate: FEX assets load FAILED: ${assetErr.message}")
-            }
+            // SKIP: initializeFexCore() — causes native SIGSEGV
+            // val initSuccess = fexCoreWrapper!!.initializeFexCore()
+            // fexCoreStatus = if (initSuccess) "Ready" else "Error"
+            fexCoreStatus = "FEXCore init SKIPPED (debug mode)"
+            writeDiagnosticLog("MainActivity.onCreate: initializeFexCore() SKIPPED — UI-only mode")
         } catch (e: Throwable) {
             fexCoreStatus = "Error: ${e.message}"
-            writeDiagnosticLog("MainActivity.onCreate: FEXCore init FAILED: ${e.javaClass.name}: ${e.message}\n${e.stackTraceToString()}")
+            writeDiagnosticLog("MainActivity.onCreate: FexCoreWrapper FAILED: ${e.javaClass.name}: ${e.message}")
         }
 
-        // If FEXCore failed to init, we still need a non-null FexCoreWrapper
-        // for AppNavigation (which calls nativeInitAdrenotools on it).
-        // Re-throw as a RuntimeException so the global handler captures it
-        // AND writes to the crash log. Without this, AppNavigation would
-        // get a null FexCoreWrapper and crash with a confusing NPE.
+        // If FEXCore wrapper is null, create a dummy so AppNavigation doesn't NPE
         if (fexCoreWrapper == null) {
-            val err = RuntimeException("FexCoreWrapper is null — libpx5.so failed to load or initializeFexCore threw. Check px5_diagnostic.log for the step-by-step trace.")
-            writeDiagnosticLog("MainActivity.onCreate: fexCoreWrapper is null, throwing to global handler")
-            throw err
+            writeDiagnosticLog("MainActivity.onCreate: fexCoreWrapper is null, creating dummy")
+            try {
+                fexCoreWrapper = FexCoreWrapper()
+            } catch (e: Throwable) {
+                writeDiagnosticLog("MainActivity.onCreate: dummy FexCoreWrapper also failed: ${e.message}")
+                fexCoreStatus = "FATAL: libpx5.so cannot load"
+            }
         }
 
         writeDiagnosticLog("MainActivity.onCreate: calling enableEdgeToEdge")
@@ -513,4 +505,5 @@ fun EmulationScreen(
         }
     }
 }
+
 
