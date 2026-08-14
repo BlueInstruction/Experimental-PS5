@@ -1,164 +1,115 @@
 # PSX5 Android ARM64
 
-Experimental research project for a PlayStation 5 emulator targeting Android ARM64.
+Experimental research project for a PlayStation 5 emulator targeting
+Android ARM64.
 
-The long-term objective is to build a native Android application capable of executing legally obtained PlayStation 5 software through a compatibility and translation stack rather than relying on direct execution of PS5 binaries on Android.
-
-> Status: Experimental research. PS5 commercial game compatibility is not currently claimed.
+> Status: experimental research. No commercial PS5 compatibility is
+> claimed.
 
 ## Architecture
 
-```text
-                    PSX5 Android APK
-                           |
-              +------------+------------+
-              |                         |
-          Android UI                Native Core
-                                        |
-                              +---------+---------+
-                              |                   |
-                           CPU Core            GPU Core
-                              |                   |
-                         x86-64 Guest         PS5 GPU Model
-                              |                   |
-                              v                   v
-                           FEX/IR             GPU IR
-                              |                   |
-                              v                   v
-                         ARM64 JIT             SPIR-V
-                              |                   |
-                              +---------+---------+
-                                        |
-                                      Vulkan
-                                        |
-                                        v
-                                  Android GPU
+PSX5 is a compatibility and translation stack, not a PS5 binary wrapper.
+
+``` text
+PS5 x86-64
+    |
+    v
+decoder -> IR -> optimizer -> ARM64 JIT -> Android ARM64
+
+PS5 GPU semantics
+    |
+    v
+GPU model -> GPU IR -> shader translation -> SPIR-V -> Vulkan -> Android GPU
+
+PS5 audio
+    |
+    v
+ATRAC9 / game-audio decoding -> mixer -> Android audio
+
+PS5 input
+    |
+    v
+input abstraction -> Android / DualSense / SDL
 ```
 
-The fundamental execution path is:
+The CPU and GPU paths are independent. The project must not assume that
+PS5 graphics are D3D12.
 
-```text
-PS5 x86-64 code
-      |
-      v
-x86-64 decoding
-      |
-      v
-IR
-      |
-      v
-optimization
-      |
-      v
-ARM64 JIT
-      |
-      v
-Android ARM64 execution
+## Critical correction: VKD3D-Proton
+
+VKD3D-Proton is NOT the PSX5 GPU backend.
+
+It is a Direct3D 12 to Vulkan translation project and can be used as
+research material for:
+
+-   Vulkan resource management
+-   descriptors
+-   barriers
+-   synchronization
+-   pipeline state
+-   shader translation
+-   Vulkan capability handling
+
+PSX5 must instead implement:
+
+``` text
+PS5 GPU semantics
+        |
+        v
+PSX5 GPU IR
+        |
+        v
+host Vulkan backend
 ```
 
-The graphics path is independent:
+VKD3D-Proton is therefore a research reference, not a core PSX5
+dependency.
 
-```text
-PS5 GPU model
-      |
-      v
-GPU command translation
-      |
-      v
-GPU IR
-      |
-      v
-shader translation
-      |
-      v
-SPIR-V
-      |
-      v
-Vulkan
-      |
-      v
-Android GPU
+## Core milestones
+
+``` text
+M0  Android/toolchain bootstrap
+M1  Native runtime/JNI
+M2  Guest memory model
+M3  x86-64 decoder
+M4  IR
+M5  ARM64 JIT
+M6  Scheduler/threading
+M7  PS5 ABI/platform compatibility
+M8  Executable loader
+M9  PS5 GPU abstraction
+M10 Vulkan backend
+M11 Shader translation
+M12 Audio
+M13 Input/DualSense
+M14 System bring-up
+M15 Application execution
+M16 Compatibility
+M17 Optimization
 ```
 
-## Core principles
+## Repository layout
 
-PSX5 treats every layer as an independently verifiable subsystem.
-
-The project distinguishes:
-
-1. Source compilation.
-2. Static and dynamic linking.
-3. Final ELF contents.
-4. Code reachability.
-5. Runtime initialization.
-6. Runtime execution.
-7. Application compatibility.
-
-A successful build does not prove runtime correctness.
-
-Likewise, the presence of strings, symbols, object files, or static archives does not prove that executable code was incorporated into the final binary or that the code was actually executed.
-
-Evidence should therefore be classified as:
-
-```text
-DIRECTLY PROVEN
-STRONGLY INDICATED
-NOT PROVEN
-```
-
-## Target platform
-
-Primary target:
-
-```text
-Android ARM64
-arm64-v8a
-ARMv8-A or newer
-Android NDK
-Clang/LLVM
-CMake
-Ninja
-Gradle
-Vulkan
-C/C++
-```
-
-Initial hardware validation should focus on modern Qualcomm Snapdragon and Adreno devices while keeping the architecture portable.
-
-The core emulator must not depend on a single Snapdragon model or vendor-specific implementation.
-
-## Repository structure
-
-```text
+``` text
 PSX5/
-├── app/
-│   └── src/main/
-│       ├── java/
-│       ├── cpp/
-│       │   ├── psx5/
-│       │   ├── cpu/
-│       │   ├── kernel/
-│       │   ├── memory/
-│       │   ├── scheduler/
-│       │   ├── gpu/
-│       │   ├── vulkan/
-│       │   ├── android/
-│       │   ├── debugger/
-│       │   └── tests/
-│       └── assets/
-├── core/
+├── app/src/main/java/
+├── app/src/main/cpp/
 │   ├── cpu/
+│   ├── ir/
+│   ├── jit/
 │   ├── kernel/
 │   ├── memory/
 │   ├── scheduler/
-│   └── gpu/
-├── third_party/
-│   ├── fex/
+│   ├── gpu/
+│   ├── shader/
+│   ├── audio/
+│   ├── input/
 │   ├── vulkan/
-│   ├── spirv/
-│   ├── fmt/
-│   ├── xxhash/
-│   └── softfloat/
+│   ├── android/
+│   ├── debugger/
+│   └── tests/
+├── core/
+├── third_party/
 ├── tools/
 ├── tests/
 ├── docs/
@@ -169,310 +120,96 @@ PSX5/
 └── README.md
 ```
 
-## Development roadmap
+## Android target
 
-The detailed project roadmap is maintained separately in [`ROADMAP.md`](ROADMAP.md).
+Primary target:
 
-The major development sequence is:
-
-```text
-M0  Build bootstrap
-M1  Android native runtime
-M2  x86-64 CPU
-M3  ARM64 JIT
-M4  Kernel/platform compatibility
-M5  GPU abstraction
-M6  Vulkan backend
-M7  Shader translation
-M8  System bring-up
-M9  Application execution
-M10 Compatibility
-M11 Optimization
-```
-
-The project should not skip directly from APK build success to game testing.
-
-## Phase 0: Android build bootstrap
-
-The first milestone is intentionally small:
-
-```text
-Android APK
-    |
-    +-- lib/arm64-v8a/libpsx5.so
-```
-
-No PS5 emulation is required at this stage.
-
-Build:
-
-```bash
-./gradlew assembleDebug
-```
-
-Inspect the APK:
-
-```bash
-unzip -l app/build/outputs/apk/debug/*.apk
-```
-
-The native library must exist at:
-
-```text
-lib/arm64-v8a/libpsx5.so
-```
-
-Inspect the native artifact:
-
-```bash
-file libpsx5.so
-readelf -h libpsx5.so
-readelf -d libpsx5.so
-readelf -Ws libpsx5.so
-```
-
-## Phase 1: Android native runtime
-
-Implement:
-
-- JNI
-- native logging
-- Android lifecycle
-- native worker threads
-- memory allocation
-- mmap/mprotect
-- timers
-- file I/O
-- controller/input abstraction
-- Vulkan initialization
-
-Initial runtime target:
-
-```text
-APK
- |
- v
-JNI
- |
- v
-libpsx5.so
- |
- v
-worker thread
- |
- v
+``` text
+Android
+arm64-v8a
+AArch64
+Android NDK
+Clang/LLVM
+C/C++
+CMake
+Ninja
+Gradle
+Bionic
 Vulkan
- |
- v
-Android surface
 ```
 
-## Phase 2: Guest memory
+The emulator core must remain portable. Adreno-specific behavior belongs
+behind explicit backend/quirk interfaces.
 
-Create an explicit guest virtual-address abstraction.
+## CPU/JIT
 
-```cpp
-using GuestVA = uint64_t;
+The PS5 CPU is x86-64/Zen 2 based. Android ARM64 requires dynamic binary
+translation.
+
+``` text
+x86-64 -> decoder -> IR -> optimization -> ARM64 -> executable code cache
 ```
 
-Required concepts:
+Initial CPU state should cover GPRs, RIP, RSP, RFLAGS, SIMD state,
+MXCSR, relevant segment state, atomics, and exceptions.
 
-- Guest virtual address space.
-- Page permissions.
-- Mappings.
-- Guard pages.
-- Executable mappings.
-- Shared mappings.
-- Code-cache mappings.
-- Guest-to-host address translation.
-
-A guest address must never be assumed to be equivalent to an Android host pointer.
-
-## Phase 3: x86-64 CPU emulation
-
-The PlayStation 5 uses an AMD Zen 2 x86-64 CPU architecture while Android ARM64 devices use AArch64.
-
-The practical architecture is dynamic binary translation:
-
-```text
-x86-64 instructions
-        |
-        v
-decoder
-        |
-        v
-IR
-        |
-        v
-optimization
-        |
-        v
-register allocation
-        |
-        v
-ARM64 code generation
-        |
-        v
-executable code cache
-```
-
-Initial CPU state includes:
-
-- GPRs
-- RIP
-- RSP
-- RFLAGS
-- XMM/YMM state
-- MXCSR
-- relevant segment state
-- atomic and memory-ordering state
-- exception state
-
-Initial instruction coverage should prioritize:
-
-```text
-MOV
-ADD
-SUB
-CMP
-TEST
-LEA
-JMP
-CALL
-RET
-conditional branches
-PUSH
-POP
-```
-
-SIMD and additional ISA requirements should be expanded from executable tests rather than assumptions.
-
-## FEX integration
-
-FEX is an important reference and potential technology source for x86/x86-64 to ARM64 translation.
-
-Repository:
+FEX is the main CPU/JIT reference:
 
 https://github.com/FEX-Emu/FEX
 
-FEX provides concepts and components related to:
+FEX primarily targets ARM64 Linux, so Android/Bionic integration must be
+proven before making it a dependency.
 
-- x86/x86-64 frontend
-- IR
-- optimization
-- JIT
-- ARM64 code generation
-- code caching
-- syscall handling
-- signal handling
-- memory management
+VIXL is an alternative/reference AArch64 code-generation library:
 
-FEX primarily targets ARM64 Linux. Android uses Bionic and has different platform and security behavior.
+https://github.com/Linaro/vixl
 
-Therefore PSX5 should separate:
+JIT evidence must distinguish:
 
-```text
-FEX CPU/JIT technology
-```
-
-from:
-
-```text
-Android runtime
-PS5 ABI
-PS5 syscalls
-PS5 platform semantics
-```
-
-If FEXCore or another static archive is linked into PSX5, final ELF inspection must verify what actually entered the executable.
-
-Useful inspection commands:
-
-```bash
-readelf -Ws libpsx5.so
-readelf -S libpsx5.so
-readelf -r libpsx5.so
-objdump -d libpsx5.so
-nm -C libFEXCore.a
-```
-
-A linker map should be generated where practical.
-
-## Phase 4: JIT
-
-Required components:
-
-- Translation blocks.
-- Guest RIP lookup.
-- x86-64 decoding.
-- IR generation.
-- Optimization.
-- ARM64 lowering.
-- Register allocation.
-- Code cache.
-- Block linking.
-- Invalidation.
-- Self-modifying-code detection.
-
-Suggested representation:
-
-```text
-TranslationBlock
-├── guest address
-├── guest size
-├── host address
-├── host size
-├── generation
-└── dependencies
-```
-
-JIT verification must distinguish:
-
-```text
-compiled
+``` text
+decoded
+IR generated
+ARM64 generated
+cached
 linked
-present in final ELF
 reachable
 executed
 ```
 
-`strings` output is not proof of JIT execution.
+Source names, strings, symbols, or static archives do not prove
+execution.
 
-## Phase 5: Scheduler and threads
+## Guest memory
+
+Use an explicit guest address type:
+
+``` cpp
+using GuestVA = uint64_t;
+```
 
 Implement:
 
-- guest process
-- guest thread
-- CPU context
-- scheduler
-- TLS
-- mutexes
-- events
-- semaphores
-- condition variables
-- atomics
-- synchronization primitives
+-   guest virtual address space
+-   page permissions
+-   mappings
+-   guard pages
+-   executable mappings
+-   code cache
+-   guest-to-host translation
+-   invalidation
+-   memory faults
 
-Initial implementation can use Android host threads.
+Guest virtual addresses must not be treated as Android pointers.
 
-Later optimization can introduce:
+## PS5 platform compatibility
 
-- worker pools
-- CPU affinity
-- JIT workers
-- GPU workers
-- I/O workers
+Use a compatibility layer:
 
-## Phase 6: PS5 kernel/platform compatibility
-
-The emulator requires a PS5-oriented compatibility layer.
-
-```text
-Guest syscall/API
+``` text
+PS5 guest API/syscall
         |
         v
-PS5 compatibility layer
+PSX5 compatibility layer
         |
         +-- process
         +-- thread
@@ -484,306 +221,376 @@ PS5 compatibility layer
         +-- networking
         |
         v
-Android implementation
+Android/Bionic
 ```
 
-PS5 system behavior must not be assumed to be equivalent to ordinary Linux syscalls.
+Do not translate PS5 behavior directly into arbitrary Linux syscalls
+without modeling the required semantics.
 
-Implement behavior from documented and reproducible research and legally usable test material.
+## GPU
 
-## Phase 7: Executable loading
+The PS5 GPU must be represented by a PSX5-specific GPU abstraction.
 
-Implement a controlled loader for the supported guest executable format.
+Model as required:
 
-Required concepts:
+-   GPU virtual memory
+-   buffers
+-   images
+-   render targets
+-   depth/stencil
+-   samplers
+-   descriptors
+-   pipelines
+-   command buffers
+-   queues
+-   fences
+-   semaphores
+-   barriers
+-   coherency
 
-- headers
-- segments
-- permissions
-- relocations
-- symbol resolution where required
-- dynamic dependencies
-- TLS
-- entry point
-- memory mappings
+Do not assume one PS5 GPU command equals one Vulkan command.
 
-Guest ABI handling must remain separate from Android's ELF loader.
+## Vulkan
 
-## Phase 8: PS5 GPU abstraction
+Primary host graphics API:
 
-The PS5 GPU is based on AMD RDNA-family technology, while Android devices may use Adreno or other GPU architectures.
+https://github.com/KhronosGroup/Vulkan-Headers
 
-PSX5 should not attempt direct execution of PS5 GPU instructions on an Android GPU.
+https://github.com/KhronosGroup/Vulkan-Loader
 
-Instead:
+https://github.com/KhronosGroup/Vulkan-Docs
 
-```text
-PS5 GPU abstraction
-        |
-        v
-GPU command translation
-        |
-        v
-GPU IR
-        |
-        v
-Vulkan backend
-```
+https://github.com/KhronosGroup/Vulkan-Hpp
 
-The GPU abstraction should independently model:
+https://github.com/KhronosGroup/Vulkan-Guide
 
-- GPU virtual memory
-- resources
-- buffers
-- images
-- render targets
-- depth/stencil
-- samplers
-- descriptors
-- pipelines
-- command buffers
-- queues
-- fences
-- semaphores
-- events
-- barriers
+https://github.com/KhronosGroup/Vulkan-Samples
 
-## Phase 9: Vulkan backend
+SPIR-V:
 
-Vulkan is the initial host graphics backend.
+https://github.com/KhronosGroup/SPIRV-Headers
 
-References:
+https://github.com/KhronosGroup/SPIRV-Tools
 
-- https://www.vulkan.org/
-- https://github.com/KhronosGroup/Vulkan-Hpp
-- https://github.com/KhronosGroup/glslang
+https://github.com/KhronosGroup/SPIRV-Registry
 
-The backend should cover:
+https://github.com/KhronosGroup/SPIRV-Cross
 
-- instance
-- physical device
-- logical device
-- queues
-- command pools
-- command buffers
-- descriptor layouts
-- descriptor pools
-- buffers
-- images
-- memory allocation
-- samplers
-- fences
-- semaphores
-- timeline synchronization
-- shader modules
-- pipeline cache
+https://github.com/KhronosGroup/SPIRV-LLVM-Translator
 
-Actual device features and extensions must be queried at runtime rather than assumed.
+https://github.com/KhronosGroup/glslang
 
-## Phase 10: Qualcomm Adreno and Turnip
+https://github.com/microsoft/DirectXShaderCompiler
 
-Qualcomm Android devices are an important initial hardware target.
+DXC is optional shader infrastructure; PS5 shaders must not be assumed
+to be HLSL source.
 
-Turnip and related tooling are useful research references.
+Vulkan memory allocation reference:
 
-Repository:
+https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
+
+VMA manages host Vulkan memory; it does not replace the guest PS5 memory
+manager.
+
+Validation/debugging:
+
+https://github.com/KhronosGroup/VK-GL-CTS
+
+https://github.com/KhronosGroup/Vulkan-ExtensionLayer
+
+https://github.com/baldurk/renderdoc
+
+https://github.com/ValveSoftware/Fossilize
+
+https://github.com/ARM-software/perfdoc
+
+## Adreno and Android graphics
+
+libadrenotools:
 
 https://github.com/bylaws/libadrenotools
 
-The emulator should detect:
+Forks/related implementations:
 
-- vendor ID
-- device ID
-- GPU generation
-- Vulkan version
-- extensions
-- features
-- memory heaps
-- queue families
-- descriptor capabilities
-- shader capabilities
+https://github.com/eden-emulator/libadrenotools
 
-Vendor-specific workarounds should remain isolated:
+https://github.com/Pipetto-crypto/libadrenotools
 
-```text
-gpu/
-└── quirks/
-    ├── adreno.cpp
-    └── turnip.cpp
+https://github.com/TouseefX/libadrenotools-native
+
+https://github.com/xodiosx/libadrenotools
+
+Android linker namespace research:
+
+https://github.com/bylaws/liblinkernsbypass
+
+https://github.com/Pipetto-crypto/liblinkernsbypass
+
+Important distinction:
+
+``` text
+libadrenotools = Android/Adreno driver loading/replacement support
+Turnip         = Mesa Vulkan driver
+PSX5 GPU       = PS5 GPU model + translation
 ```
 
-The core emulator must not hard-code one Snapdragon device.
+libadrenotools is not Turnip and neither is a PS5 GPU emulator.
 
-## Phase 11: Shader translation
+Android Mesa container reference:
 
-The graphics path requires a shader translation pipeline:
+https://github.com/lfdevs/mesa-for-android-container
 
-```text
-PS5 shader
-    |
-    v
-decoder
-    |
-    v
-shader IR
-    |
-    v
-optimizer
-    |
-    v
-SPIR-V
-    |
-    v
-Vulkan
+Qualcomm Vulkan/OpenGL examples:
+
+https://github.com/SnapdragonGameStudios/adreno-gpu-vulkan-code-sample-framework
+
+https://github.com/SnapdragonGameStudios/adreno-gpu-opengl-es-code-sample-framework
+
+Qualcomm Windows driver research:
+
+https://github.com/WOA-Project/Qualcomm-Reference-Drivers
+
+Winlator graphics references:
+
+https://github.com/brunodev85/vortek
+
+https://github.com/brunodev85/gladio
+
+These are references, not PSX5 GPU implementations.
+
+## Upscaling and post-processing
+
+Do not label generic upscalers as Sony PSSR implementations.
+
+Preferred optional host-side technologies:
+
+https://github.com/SnapdragonGameStudios/snapdragon-gsr
+
+https://github.com/GPUOpen-Effects/FidelityFX-FSR
+
+https://github.com/DadSchoorse/vkBasalt
+
+https://github.com/crosire/reshade
+
+Snapdragon GSR 1 is spatial upscaling/sharpening and GSR 2 is temporal
+upscaling for Adreno. These are presentation technologies, not PS5 GPU
+emulation.
+
+Pipeline:
+
+``` text
+PSX5 Vulkan output -> optional upscaler/post-process -> Android surface
 ```
 
-Unit tests should cover:
+## Audio
 
-- arithmetic
-- branches
-- texture operations
-- samplers
-- derivatives
-- barriers
-- atomics
-- subgroup operations
-- FP16
-- FP32
-- integer operations
+ATRAC9 and game-audio references:
 
-## Phase 12: GPU synchronization
+https://github.com/Thealexbarney/LibAtrac9
 
-Model:
+https://github.com/Thealexbarney/VGAudio
 
-```text
-PS5 queue
-    |
-    v
-PSX5 synchronization
-    |
-    +-- fence
-    +-- semaphore
-    +-- event
-    +-- barrier
-    +-- ownership
-    |
-    v
-Vulkan synchronization
+General media/audio:
+
+https://github.com/FFmpeg/FFmpeg
+
+Audio should be independent:
+
+``` text
+PS5 audio data -> decoder -> PCM/mixer -> Android audio backend
 ```
 
-Avoid global GPU waits as a compatibility shortcut. Excessive global synchronization can hide correctness problems and destroy performance.
+## Input
 
-## Phase 13: Memory and GPU budget
+SDL:
 
-Track independently:
+https://github.com/libsdl-org/SDL
 
-```text
-guest RAM
-GPU allocations
-JIT cache
-shader cache
-pipeline cache
-staging buffers
-textures
-render targets
-system allocations
-```
+DualSense Linux research:
 
-Expose diagnostic counters.
+https://github.com/nowrep/dualsensectl
 
-Memory values should not be spoofed unless the behavior is understood and isolated behind an explicit compatibility layer.
+Use a platform-neutral input abstraction. DualSense-specific behavior
+remains a guest compatibility concern.
 
-## Phase 14: VKD3D-Proton research
+## PS5 emulator references
 
-VKD3D-Proton is useful as a reference for modern Vulkan translation architecture.
+SharpEmu:
 
-Repository:
+https://github.com/sharpemu/sharpemu
 
-https://github.com/HansKristian-Work/vkd3d-proton
+SharpEmu is an experimental PS5 emulator and is a strong PS5-specific
+architecture reference. Its current targets are Windows/Linux/macOS, so
+it is not an Android dependency.
 
-Relevant areas include:
+KytyPS5:
 
-- descriptor management
-- D3D12/Vulkan abstraction
-- resource barriers
-- pipeline state
-- shader translation
-- SPIR-V
-- synchronization
-- Vulkan capability detection
+https://github.com/KytyPS5/KytyPS5
 
-VKD3D-Proton is not a PS5 graphics implementation.
+PS5-specific research and emulator architecture reference.
 
-Previous project research:
+shadPS4:
 
-https://github.com/SeaNaxxx/VKD3D-Proton-QSA-Mesa-Turnip-QSA
+https://github.com/shadps4-emu/shadPS4
 
-Earlier research included:
-
-- Adreno quirks
-- UE5 compatibility
-- Wave32
-- FP16
-- metadata pools
-- UMA memory fallback
-- KGSL-related behavior
-- memory budget behavior
-- Turnip interaction
-
-These techniques must be independently verified before reuse.
-
-## Phase 15: Android emulator references
-
-aPS3e is not a PS5 emulator, but it is useful for Android emulator engineering.
-
-Repository:
-
-https://github.com/aenu1/aps3e
-
-Relevant areas:
-
-- Android packaging
-- Gradle
-- C++
-- native libraries
-- emulator configuration
-- input
-- graphics integration
-- Android build workflow
-
-PS3-specific emulation assumptions should not be copied into PSX5.
-
-## Phase 16: Additional emulator references
+PS4 emulator reference for Vulkan, shader compilation, compatibility
+testing, debugging, and console architecture. It is not a PS5 emulator.
 
 RPCS3:
 
 https://github.com/RPCS3/rpcs3
 
-Other useful architectural references include PCSX2, Dolphin, Ryujinx, and Xenia.
+Useful for CPU translation, memory, kernel compatibility, scheduling,
+GPU abstraction, debugging, and testing.
 
-These projects can inform:
+ARMSX3:
 
-- CPU emulation
-- JIT
-- IR
-- memory management
-- scheduling
-- GPU abstraction
-- shader systems
-- debugging
-- testing
+https://github.com/ARMSX2/ARMSX3
 
-They are references, not PS5 implementation sources.
+Useful for Android ARM64 emulator porting and packaging research.
 
-## Phase 17: Virtualization research
+Bachata-S4:
 
-Virtualization is an optional research path.
+https://github.com/JICA98/Bachata-S4
+
+Android PS4-emulator reference.
+
+## PS5 Linux research
+
+https://github.com/ps5-linux/ps5-linux-tools
+
+https://github.com/ps5-linux/ps5-linux-image
+
+https://github.com/ps5-linux/ps5-linux-patches
+
+https://github.com/ps5-linux/ps5-linux-loader
+
+These projects are useful for real PS5 hardware/Linux behavior and
+low-level research. They are not PSX5 user-space emulator dependencies.
+
+## Kernel/low-level references
+
+Linux:
+
+https://github.com/torvalds/linux
+
+Qualcomm mainline:
+
+https://github.com/linux-msm/mainline-status
+
+ARM Trusted Firmware:
+
+https://github.com/ARM-software/arm-trusted-firmware
+
+Historical Samsung Android kernel:
+
+https://github.com/coolya/android_kernel_samsung
+
+The Samsung kernel is device-specific and historical; it is only a
+reference.
+
+## Graphics architecture references
+
+AMD PAL:
+
+https://github.com/GPUOpen-Drivers/pal
+
+The Forge:
+
+https://github.com/ConfettiFX/The-Forge
+
+GLM:
+
+https://github.com/g-truc/glm
+
+GLI:
+
+https://github.com/g-truc/gli
+
+OpenGL samples:
+
+https://github.com/g-truc/ogl-samples
+
+ANARI:
+
+https://github.com/KhronosGroup/ANARI-SDK
+
+UnityGLTF:
+
+https://github.com/KhronosGroup/UnityGLTF
+
+Sascha Willems Vulkan examples:
+
+https://github.com/SaschaWillems/Vulkan
+
+ARM Vulkan SDK:
+
+https://github.com/ARM-software/vulkan-sdk
+
+MoltenVK:
+
+https://github.com/KhronosGroup/MoltenVK
+
+MoltenVK is an Apple Metal portability layer and is not part of the
+Android backend.
+
+OpenCL headers:
+
+https://github.com/KhronosGroup/OpenCL-Headers
+
+These are optional/general graphics references and should not
+automatically enter third_party/.
+
+## Console/general research
+
+libnx:
+
+https://github.com/switchbrew/libnx
+
+libnx is a Nintendo Switch homebrew library. It is not a PS5 component
+and should only be used as a general console API/reference.
+
+Game Console Dev Guide:
+
+https://github.com/mikeroyal/Game-Console-Dev-Guide
+
+General console development reference.
+
+## Android framework and tooling
+
+https://github.com/LineageOS/android_frameworks_native
+
+Android native framework reference.
+
+## Security research
+
+mast1c0re:
+
+https://github.com/McCaulay/mast1c0re
+
+Security/exploit research reference only. It is not required for normal
+PSX5 emulation.
+
+Magisk:
+
+https://github.com/topjohnwu/Magisk
+
+Optional device-development/root tooling. Root must not be a PSX5
+requirement.
+
+PS5ish:
+
+https://github.com/davidkgriggs/PS5ish
+
+PS5 UI/theme reference only.
+
+## Optional virtualization
 
 Android Virtualization Framework:
 
 https://android.googlesource.com/platform/packages/modules/Virtualization/
 
-AVF documentation:
+AVF getting started:
 
 https://android.googlesource.com/platform/packages/modules/Virtualization/+/HEAD/docs/getting_started.md
 
@@ -793,73 +600,110 @@ https://github.com/google/crosvm
 
 Potential architecture:
 
-```text
-Android
-   |
-   v
-AVF
-   |
-   v
-crosvm
-   |
-   v
-Gunyah
-   |
-   v
-guest environment
+``` text
+Android -> AVF -> crosvm -> Gunyah -> guest
 ```
 
-Virtualization does not automatically solve PS5 GPU emulation. GPU virtualization or passthrough is a separate problem.
+Virtualization does not solve PS5 GPU emulation. The PSX5 core must
+remain independent of AVF, crosvm, and Gunyah.
 
-The core emulator must remain independent of AVF, crosvm, and Gunyah.
+## Dependencies that must NOT be misclassified
+
+These are not PSX5 core GPU/CPU layers:
+
+``` text
+VKD3D-Proton
+MoltenVK
+libnx
+Samsung Android kernels
+Linux kernel
+ARM Trusted Firmware
+GPUOpen PAL
+ANARI
+UnityGLTF
+ReShade
+vkBasalt
+Magisk
+PS5 Linux loader
+mast1c0re
+Vortek
+Gladio
+Qualcomm Windows reference drivers
+```
+
+They belong to research, tooling, optional platform integration,
+security research, or presentation categories.
+
+## Dependency policy
+
+Before adding any repository to `third_party/`, answer:
+
+``` text
+1. Which PSX5 subsystem needs it?
+2. Is it runtime code or reference material?
+3. Is the license compatible?
+4. Does it support Android ARM64?
+5. Does it support Bionic?
+6. Does it require Linux-only facilities?
+7. Does it require x86 host execution?
+8. Does it require a different graphics API?
+9. Can it be isolated behind an interface?
+10. Is it demonstrably exercised at runtime?
+```
 
 ## Testing hierarchy
 
-Testing should progress in this order:
-
-```text
+``` text
 1.  unit tests
 2.  x86-64 decoder tests
 3.  IR tests
 4.  JIT tests
 5.  memory tests
 6.  scheduler tests
-7.  syscall tests
-8.  Vulkan tests
-9.  shader tests
-10. GPU translation tests
-11. executable-loader tests
-12. system bring-up
-13. application compatibility
+7.  platform compatibility tests
+8.  executable-loader tests
+9.  Vulkan tests
+10. shader tests
+11. GPU translation tests
+12. audio tests
+13. input tests
+14. system bring-up
+15. application execution
+16. compatibility tests
 ```
 
-Do not treat application launch as proof that the lower layers are correct.
+## Runtime evidence
 
-## Performance profiling
+Use explicit evidence states:
 
-Measure:
+``` text
+BUILD_SUCCESS
+BINARY_VALID
+NATIVE_LOAD_SUCCESS
+VULKAN_INITIALIZED
+CPU_RUNTIME_ACTIVE
+JIT_ACTIVE
+GPU_RUNTIME_ACTIVE
+AUDIO_RUNTIME_ACTIVE
+INPUT_RUNTIME_ACTIVE
+APPLICATION_REACHED
+APPLICATION_EXECUTED
+```
 
-- guest instructions per second
-- translation time
-- JIT compilation time
-- JIT cache hit rate
-- code-cache size
-- GPU translation time
-- shader compilation time
-- pipeline creation time
-- Vulkan CPU overhead
-- GPU frame time
-- synchronization stalls
-- memory bandwidth
-- allocation counts
+Evidence levels:
 
-Optimization should follow measured bottlenecks.
+``` text
+DIRECTLY PROVEN
+STRONGLY INDICATED
+NOT PROVEN
+```
 
-## Native binary forensics
+Compilation, symbol presence, static linkage, APK installation, or
+strings output do not prove runtime execution.
 
-Every release candidate should be inspected.
+## Binary inspection
 
-```bash
+``` bash
 file libpsx5.so
 readelf -h libpsx5.so
 readelf -S libpsx5.so
@@ -869,51 +713,34 @@ readelf -r libpsx5.so
 objdump -d libpsx5.so
 ```
 
-Verify:
+For static libraries:
 
-- AArch64
-- ELF64
-- Android-compatible dependencies
-- unexpected DT_NEEDED entries
-- undefined symbols
-- SONAME
-- RELRO
-- BIND_NOW
-- build ID
-- stripped/unstripped state
-
-Forensic conclusions must distinguish between:
-
-```text
-DIRECTLY PROVEN
-STRONGLY INDICATED
-NOT PROVEN
+``` bash
+nm -C libFEXCore.a
 ```
 
-For example, the presence of `JIT.cpp` in `strings` output does not prove that JIT code exists in the final executable or that the JIT was executed.
+Verify ABI, ELF type, dependencies, undefined symbols, relocations,
+RELRO/BIND_NOW, build ID, and actual code inclusion.
 
 ## Reproducible builds
 
 Record:
 
-```text
+``` text
 Git commit
-FEX revision
-Mesa/Turnip revision
-VKD3D revision
-Vulkan headers revision
-NDK version
-CMake version
-Clang version
-Gradle version
-Android API level
+dependency revisions
+NDK
+CMake
+Clang
+Gradle
+Android API
 compiler flags
 linker flags
 ```
 
-Recommended evidence artifacts:
+Recommended artifacts:
 
-```text
+``` text
 build/
 ├── build.log
 ├── compile_commands.json
@@ -928,221 +755,78 @@ build/
 └── elf-relocations.txt
 ```
 
-## CI and runtime evidence
+## CI
 
-CI should build:
+Build:
 
-```text
+``` text
 Debug arm64-v8a
 Release arm64-v8a
 ```
 
-And run:
+Run:
 
-- unit tests
-- decoder tests
-- IR tests
-- JIT tests
-- shader tests
-- Vulkan initialization
-- ELF inspection
-- APK structure validation
-- native loading checks
-
-CI should fail if:
-
-- `libpsx5.so` is missing
-- the wrong ABI is produced
-- an unexpected shared dependency appears
-- required native symbols are unresolved
-- required assets are missing
-- the native library cannot load
-
-### Agent evidence
-
-PSX5 development should use runtime evidence rather than build-only claims.
-
-The project is intended to integrate with an external evidence engine that can collect:
-
-```text
-source
-  |
-  v
-build
-  |
-  v
-final APK
-  |
-  v
-native ELF
-  |
-  v
-Android runtime
-  |
-  v
-logcat / probes
-  |
-  v
-structured evidence
-  |
-  v
-agent report
+``` text
+unit tests
+decoder tests
+IR tests
+JIT tests
+shader tests
+Vulkan initialization
+ELF inspection
+APK validation
+native-load tests
 ```
 
-A diagnostic system should identify the failing subsystem rather than merely matching arbitrary log strings.
+Fail CI if:
 
-The evidence model should distinguish:
-
-```text
-BUILD_SUCCESS
-BINARY_VALID
-NATIVE_LOAD_SUCCESS
-VULKAN_INITIALIZED
-CPU_RUNTIME_ACTIVE
-GPU_RUNTIME_ACTIVE
-APPLICATION_REACHED
-APPLICATION_EXECUTED
+``` text
+libpsx5.so is missing
+wrong ABI is produced
+unexpected shared dependency appears
+required symbols are unresolved
+required assets are missing
+native loading fails
 ```
-
-A green build is therefore not equivalent to a green runtime.
 
 ## Legal boundary
 
-The repository must not distribute:
+Do not distribute:
 
-- copyrighted Sony firmware
-- proprietary keys
-- commercial games
-- copyrighted game assets
-- proprietary system binaries
+-   Sony firmware
+-   proprietary keys
+-   commercial games
+-   copyrighted game assets
+-   proprietary system binaries
 
-The project should provide mechanisms for legally obtained user-owned material where required.
+Support legally obtained user-owned material where required.
 
-Test fixtures should be legally distributable.
+## Final engineering chain
 
-## Current status
-
-PSX5 is an experimental research project.
-
-Current development should prioritize engineering foundations:
-
-```text
-Android build
-    |
-    v
-native runtime
-    |
-    v
-memory model
-    |
-    v
-CPU/JIT
-    |
-    v
-kernel/platform layer
-    |
-    v
-GPU abstraction
-    |
-    v
-Vulkan
-    |
-    v
-shader translation
-    |
-    v
-system bring-up
-    |
-    v
-application compatibility
-```
-
-The project should not claim compatibility based on compilation, static linkage, symbol presence, or application launch alone.
-
-## References
-
-FEX:
-
-https://github.com/FEX-Emu/FEX
-
-VKD3D-Proton:
-
-https://github.com/HansKristian-Work/vkd3d-proton
-
-aPS3e:
-
-https://github.com/aenu1/aps3e
-
-libadrenotools:
-
-https://github.com/bylaws/libadrenotools
-
-PSX5 VKD3D/QSA research:
-
-https://github.com/SeaNaxxx/VKD3D-Proton-QSA-Mesa-Turnip-QSA
-
-crosvm:
-
-https://github.com/google/crosvm
-
-Android Virtualization Framework:
-
-https://android.googlesource.com/platform/packages/modules/Virtualization/
-
-Vulkan-Hpp:
-
-https://github.com/KhronosGroup/Vulkan-Hpp
-
-glslang:
-
-https://github.com/KhronosGroup/glslang
-
-Proton:
-
-https://github.com/ValveSoftware/Proton
-
-RPCS3:
-
-https://github.com/RPCS3/rpcs3
-
-Android NDK:
-
-https://developer.android.com/ndk/guides
-
-## Final engineering principle
-
-The critical development chain is:
-
-```text
+``` text
 source
- ->
-compile
- ->
-link
- ->
-final ELF
- ->
-binary verification
- ->
-runtime initialization
- ->
-x86-64 execution
- ->
-ARM64 JIT
- ->
-PS5 platform compatibility
- ->
-GPU translation
- ->
-Vulkan
- ->
-Android GPU
- ->
-application compatibility
+  -> compile
+  -> link
+  -> final ELF
+  -> binary verification
+  -> Android native initialization
+  -> x86-64 decode
+  -> IR
+  -> ARM64 JIT
+  -> PS5 platform compatibility
+  -> PS5 GPU model
+  -> GPU IR
+  -> SPIR-V
+  -> Vulkan
+  -> Android GPU
+  -> audio/input
+  -> application execution
+  -> compatibility testing
 ```
 
-Every transition is an independent milestone and must be independently verified.
+Every transition is an independent milestone and must be independently
+verified.
 
-The objective is not merely to produce an APK.
-
-The objective is to build a reproducible, observable, testable, and progressively verifiable PS5 compatibility stack for Android ARM64.
+The objective is not merely to produce an APK. The objective is a
+reproducible, observable, testable, progressively verifiable PS5
+compatibility stack for Android ARM64.
