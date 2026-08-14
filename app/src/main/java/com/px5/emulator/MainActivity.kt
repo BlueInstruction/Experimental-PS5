@@ -47,16 +47,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // ========================================================================
-        // Layer 1: Event Log — factual record of what happened (no interpretation)
-        // Layer 2: State Tracking — current runtime state
-        // Layer 3: Diagnostics — derived from events + state + exceptions
-        //
-        // The logger records events and state. It does NOT diagnose.
-        // Diagnostics are derived from the evidence after the fact.
-        // ========================================================================
-
-        // Event: Activity created
+        // ---- Early diagnostic logging ----
+        // Write a "MainActivity.onCreate started" line to the crash log file
+        // BEFORE doing anything else. If the app crashes after this point,
+        // we'll at least know it got this far.
         logEvent("MainActivity", "onCreate", "started")
 
         // --- SoundManager ---
@@ -70,51 +64,41 @@ class MainActivity : ComponentActivity() {
         }
 
         // --- FEXCore ---
+        // initializeFexCore() causes native SIGSEGV on this device.
+        // The crash happens inside FEXCore's InitCore() which sets up
+        // the JIT compiler. This is a known issue that needs investigation
+        // in the FEXCore source (possibly signal handler conflict with
+        // Android's debuggerd, or memory mapping issue).
+        //
+        // For now, we load the library (to prove it links) but skip
+        // the runtime initialization. The UI works without FEXCore.
         logState("fex", "loading_library")
         try {
             fexCoreWrapper = FexCoreWrapper()
             logState("fex", "library_loaded")
             logEvent("FEXCore", "library_loaded", "libpx5.so")
 
-            // Attempt FEXCore initialization
-            logState("fex", "initializing_runtime")
-            logEvent("FEXCore", "initializeRuntime", "called")
-            try {
-                val initResult = fexCoreWrapper!!.initializeFexCore()
-                logEvent("FEXCore", "initializeRuntime", "returned", initResult.toString())
-                if (initResult) {
-                    logState("fex", "runtime_ready")
-                    fexCoreStatus = "Ready"
-                } else {
-                    logState("fex", "runtime_error")
-                    fexCoreStatus = "Error"
-                }
-
-                // Load config assets
-                logEvent("FEXCore", "loadAssets", "called")
-                try {
-                    val thunksStr = assets.open("ThunksDB.json").bufferedReader().use { it.readText() }
-                    fexCoreWrapper!!.nativeLoadThunksConfig(thunksStr)
-                    val fexConfigStr = assets.open("fex_config.json").bufferedReader().use { it.readText() }
-                    fexCoreWrapper!!.nativeLoadFexConfig(fexConfigStr)
-                    logEvent("FEXCore", "loadAssets", "completed")
-                } catch (assetErr: Exception) {
-                    logEvent("FEXCore", "loadAssets", "failed")
-                    logException("FEXCore.loadAssets", assetErr)
-                }
-            } catch (e: Throwable) {
-                // FEXCore init threw — record the exception and continue
-                logState("fex", "runtime_crashed")
-                logException("FEXCore.initializeRuntime", e)
-                fexCoreStatus = "Error: ${e.message}"
-            }
+            logState("fex", "initialization_skipped")
+            logEvent("FEXCore", "initializeRuntime", "not_called")
+            fexCoreStatus = "FEXCore library loaded (runtime init pending)"
         } catch (e: Throwable) {
             logState("fex", "library_load_failed")
             logException("FexCoreWrapper.constructor", e)
             fexCoreStatus = "Error: ${e.message}"
         }
 
-        // --- UI ---
+        if (fexCoreWrapper == null) {
+            logState("fex", "creating_fallback_wrapper")
+            try {
+                fexCoreWrapper = FexCoreWrapper()
+                logState("fex", "fallback_wrapper_created")
+            } catch (e: Throwable) {
+                logState("fex", "fallback_wrapper_failed")
+                logException("FexCoreWrapper.fallback", e)
+                fexCoreStatus = "FATAL: libpx5.so cannot load"
+            }
+        }
+
         logState("ui", "initializing")
         logEvent("UI", "enableEdgeToEdge", "called")
         try {
@@ -145,19 +129,13 @@ class MainActivity : ComponentActivity() {
             throw e
         }
 
-        // --- Final state ---
         logState("app", "onCreate_completed")
     }
 
     // ========================================================================
-    // Logging infrastructure — 3 separated layers
+    // 3-layer logging: Event / State / Diagnostic
     // ========================================================================
 
-    /**
-     * Layer 1: Event Log
-     * Records what happened, factually, without interpretation.
-     * Format: [timestamp] EVENT component action detail
-     */
     private fun logEvent(component: String, action: String, detail: String = "", result: String = "") {
         val msg = buildString {
             append("EVENT")
@@ -169,69 +147,47 @@ class MainActivity : ComponentActivity() {
         writeLog(msg)
     }
 
-    /**
-     * Layer 2: State Tracking
-     * Records the current runtime state of a component.
-     * Format: [timestamp] STATE component=value
-     */
     private fun logState(component: String, state: String) {
-        val msg = "STATE component=$component state=$state"
-        writeLog(msg)
+        writeLog("STATE component=$component state=$state")
     }
 
-    /**
-     * Layer 3: Diagnostic — Exception recording
-     * Records an exception with full stack trace.
-     * Only called when something actually went wrong.
-     * Format: [timestamp] DIAGNOSTIC source exception_class message stacktrace
-     */
     private fun logException(source: String, e: Throwable) {
         val sw = java.io.StringWriter()
         val pw = java.io.PrintWriter(sw)
         e.printStackTrace(pw)
-        val msg = buildString {
-            append("DIAGNOSTIC")
-            append(" source=").append(source)
-            append(" exception=").append(e.javaClass.name)
-            append(" message=").append(e.message ?: "(none)")
-            append("\n").append(sw.toString().trim())
-        }
-        writeLog(msg)
+        writeLog("DIAGNOSTIC source=$source exception=${e.javaClass.name} message=${e.message ?: "(none)"}\n${sw.toString().trim()}")
     }
 
-    /**
-     * Write a log line to both logcat and the diagnostic file.
-     * The file is appended (not overwritten) so we get the full
-     * launch sequence across multiple attempts.
-     */
     private fun writeLog(message: String) {
         try {
             android.util.Log.i("PX5", message)
             val logsDir = getExternalFilesDir("logs") ?: return
             if (!logsDir.exists()) logsDir.mkdirs()
             val logFile = File(logsDir, "px5_diagnostic.log")
-            val timestamp = java.text.SimpleDateFormat(
-                "yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US
-            ).format(java.util.Date())
+            val timestamp = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date())
             logFile.appendText("[$timestamp] $message\n")
-        } catch (_: Throwable) {
-            // Logging must never crash the app
-        }
+        } catch (_: Throwable) {}
     }
 
     override fun onResume() {
         super.onResume()
-        try { soundManager.startBgMusic() } catch (_: Throwable) {}
+        try {
+            soundManager.startBgMusic()
+        } catch (_: Throwable) {}
     }
 
     override fun onPause() {
         super.onPause()
-        try { soundManager.pauseBgMusic() } catch (_: Throwable) {}
+        try {
+            soundManager.pauseBgMusic()
+        } catch (_: Throwable) {}
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        try { soundManager.release() } catch (_: Throwable) {}
+        try {
+            soundManager.release()
+        } catch (_: Throwable) {}
     }
 }
 
