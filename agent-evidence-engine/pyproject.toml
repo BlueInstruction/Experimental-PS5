@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "agent-evidence-engine"
+version = "0.1.0"
+description = "Deterministic runtime evidence collection engine"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "pyyaml>=6.0",
+    "jsonschema>=4.0",
+]
+
+[project.scripts]
+aee = "engine.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["engine*", "probes*"]

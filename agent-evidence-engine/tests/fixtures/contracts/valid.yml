@@ -1,0 +1,17 @@
+version: 1
+project:
+  name: test-project
+  type: android-native
+runtime:
+  package: com.test.app
+  activity: com.test.app.MainActivity
+  abi: arm64-v8a
+build:
+  apk_path: test.apk
+  native_libs:
+    - libtest.so
+probes: [build]
+policy:
+  fail_on: [P0, P1]
+artifacts:
+  logcat: true

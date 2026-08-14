@@ -1,0 +1,18 @@
+# Turnip (Mesa Vulkan driver) contract
+version: 1
+project:
+  name: turnip
+  type: android-vulkan-driver
+runtime:
+  package: com.mesa.turnip
+  abi: arm64-v8a
+build:
+  apk_path: build/turnip.apk
+  native_libs:
+    - vulkan.freedreno.so
+components: [vulkan, mesa]
+probes: [build, vulkan-dummy]
+policy:
+  fail_on: [P0, P1]
+artifacts:
+  logcat: true

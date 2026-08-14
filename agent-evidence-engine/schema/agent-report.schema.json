@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agent Report",
+  "description": "The primary output artifact — compact, structured, machine-readable",
+  "type": "object",
+  "required": ["schema_version", "engine_version", "status", "probes"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "engine_version": { "type": "string" },
+    "run": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "commit": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      }
+    },
+    "status": { "enum": ["PASS", "FAIL", "INCONCLUSIVE"] },
+    "severity": { "enum": ["P0", "P1", "P2", "P3", "NONE"] },
+    "phase": { "enum": ["BUILD", "INSTALL", "LAUNCH", "RUNTIME"] },
+    "summary": { "type": "string" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "severity": { "enum": ["P0", "P1", "P2", "P3"] },
+          "component": { "type": "string" },
+          "title": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": { "enum": ["PASS", "FAIL", "INCONCLUSIVE", "SKIPPED"] }
+    },
+    "agent_action": {
+      "type": "object",
+      "properties": {
+        "required": { "type": "boolean" },
+        "instruction": { "type": "string" }
+      }
+    }
+  }
+}
