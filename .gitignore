@@ -24,7 +24,7 @@ vkd3d-qsa-binaries/
 **/.cxx/
 build/
 **/build/
-android/local.properties
+local.properties
 *.o
 *.a
 *.so
@@ -44,11 +44,6 @@ android/local.properties
 # === OS ===
 .DS_Store
 Thumbs.db
-
-# === GRADLE ===
-android/gradlew
-android/gradlew.bat
-android/gradle/wrapper/gradle-wrapper.jar
 
 # === LOGS ===
 *.log
