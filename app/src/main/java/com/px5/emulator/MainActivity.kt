@@ -78,9 +78,23 @@ class MainActivity : ComponentActivity() {
             logState("fex", "library_loaded")
             logEvent("FEXCore", "library_loaded", "libpx5.so")
 
-            logState("fex", "initialization_skipped")
-            logEvent("FEXCore", "initializeRuntime", "not_called")
-            fexCoreStatus = "FEXCore library loaded (runtime init pending)"
+            logState("fex", "initializing_runtime")
+            logEvent("FEXCore", "initializeRuntime", "called")
+            try {
+                val initResult = fexCoreWrapper!!.initializeFexCore()
+                logEvent("FEXCore", "initializeRuntime", "returned", initResult.toString())
+                if (initResult) {
+                    logState("fex", "runtime_ready")
+                    fexCoreStatus = "Ready"
+                } else {
+                    logState("fex", "runtime_error")
+                    fexCoreStatus = "Error"
+                }
+            } catch (e: Throwable) {
+                logState("fex", "runtime_crashed")
+                logException("FEXCore.initializeRuntime", e)
+                fexCoreStatus = "Error: ${e.message}"
+            }
         } catch (e: Throwable) {
             logState("fex", "library_load_failed")
             logException("FexCoreWrapper.constructor", e)
@@ -532,6 +546,7 @@ fun EmulationScreen(
         }
     }
 }
+
 
 
 
