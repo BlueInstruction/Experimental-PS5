@@ -47,61 +47,85 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // ---- Early diagnostic logging ----
-        // Write a "MainActivity.onCreate started" line to the crash log file
-        // BEFORE doing anything else. If the app crashes after this point,
-        // we'll at least know it got this far.
-        writeDiagnosticLog("MainActivity.onCreate: start")
+        // ========================================================================
+        // Layer 1: Event Log — factual record of what happened (no interpretation)
+        // Layer 2: State Tracking — current runtime state
+        // Layer 3: Diagnostics — derived from events + state + exceptions
+        //
+        // The logger records events and state. It does NOT diagnose.
+        // Diagnostics are derived from the evidence after the fact.
+        // ========================================================================
 
-        // Initialize PS5 Sound Manager & Music
-        writeDiagnosticLog("MainActivity.onCreate: initializing SoundManager")
+        // Event: Activity created
+        logEvent("MainActivity", "onCreate", "started")
+
+        // --- SoundManager ---
+        logState("sound", "initializing")
         try {
             soundManager = SoundManager.getInstance(applicationContext)
-            writeDiagnosticLog("MainActivity.onCreate: SoundManager OK")
+            logState("sound", "ready")
         } catch (e: Throwable) {
-            writeDiagnosticLog("MainActivity.onCreate: SoundManager FAILED: ${e.javaClass.name}: ${e.message}")
-            // Don't crash — sound is non-essential
+            logState("sound", "error")
+            logException("SoundManager.init", e)
         }
 
-        // FEXCore init — SKIPPED for now to isolate UI rendering issues.
-        // The diagnostic log showed the app crashes during initializeFexCore()
-        // (native SIGSEGV). By skipping it, we can verify the UI renders
-        // correctly without FEXCore. Once UI works, we'll re-enable FEXCore
-        // init with proper error handling.
-        writeDiagnosticLog("MainActivity.onCreate: loading libpx5.so via FexCoreWrapper")
+        // --- FEXCore ---
+        logState("fex", "loading_library")
         try {
             fexCoreWrapper = FexCoreWrapper()
-            writeDiagnosticLog("MainActivity.onCreate: FexCoreWrapper() constructed — libpx5.so loaded")
+            logState("fex", "library_loaded")
+            logEvent("FEXCore", "library_loaded", "libpx5.so")
 
-            // SKIP: initializeFexCore() — causes native SIGSEGV
-            // val initSuccess = fexCoreWrapper!!.initializeFexCore()
-            // fexCoreStatus = if (initSuccess) "Ready" else "Error"
-            fexCoreStatus = "FEXCore init SKIPPED (debug mode)"
-            writeDiagnosticLog("MainActivity.onCreate: initializeFexCore() SKIPPED — UI-only mode")
-        } catch (e: Throwable) {
-            fexCoreStatus = "Error: ${e.message}"
-            writeDiagnosticLog("MainActivity.onCreate: FexCoreWrapper FAILED: ${e.javaClass.name}: ${e.message}")
-        }
-
-        // If FEXCore wrapper is null, create a dummy so AppNavigation doesn't NPE
-        if (fexCoreWrapper == null) {
-            writeDiagnosticLog("MainActivity.onCreate: fexCoreWrapper is null, creating dummy")
+            // Attempt FEXCore initialization
+            logState("fex", "initializing_runtime")
+            logEvent("FEXCore", "initializeRuntime", "called")
             try {
-                fexCoreWrapper = FexCoreWrapper()
+                val initResult = fexCoreWrapper!!.initializeFexCore()
+                logEvent("FEXCore", "initializeRuntime", "returned", initResult.toString())
+                if (initResult) {
+                    logState("fex", "runtime_ready")
+                    fexCoreStatus = "Ready"
+                } else {
+                    logState("fex", "runtime_error")
+                    fexCoreStatus = "Error"
+                }
+
+                // Load config assets
+                logEvent("FEXCore", "loadAssets", "called")
+                try {
+                    val thunksStr = assets.open("ThunksDB.json").bufferedReader().use { it.readText() }
+                    fexCoreWrapper!!.nativeLoadThunksConfig(thunksStr)
+                    val fexConfigStr = assets.open("fex_config.json").bufferedReader().use { it.readText() }
+                    fexCoreWrapper!!.nativeLoadFexConfig(fexConfigStr)
+                    logEvent("FEXCore", "loadAssets", "completed")
+                } catch (assetErr: Exception) {
+                    logEvent("FEXCore", "loadAssets", "failed")
+                    logException("FEXCore.loadAssets", assetErr)
+                }
             } catch (e: Throwable) {
-                writeDiagnosticLog("MainActivity.onCreate: dummy FexCoreWrapper also failed: ${e.message}")
-                fexCoreStatus = "FATAL: libpx5.so cannot load"
+                // FEXCore init threw — record the exception and continue
+                logState("fex", "runtime_crashed")
+                logException("FEXCore.initializeRuntime", e)
+                fexCoreStatus = "Error: ${e.message}"
             }
+        } catch (e: Throwable) {
+            logState("fex", "library_load_failed")
+            logException("FexCoreWrapper.constructor", e)
+            fexCoreStatus = "Error: ${e.message}"
         }
 
-        writeDiagnosticLog("MainActivity.onCreate: calling enableEdgeToEdge")
+        // --- UI ---
+        logState("ui", "initializing")
+        logEvent("UI", "enableEdgeToEdge", "called")
         try {
             enableEdgeToEdge()
+            logEvent("UI", "enableEdgeToEdge", "completed")
         } catch (e: Throwable) {
-            writeDiagnosticLog("MainActivity.onCreate: enableEdgeToEdge FAILED: ${e.message}")
+            logEvent("UI", "enableEdgeToEdge", "failed")
+            logException("UI.enableEdgeToEdge", e)
         }
 
-        writeDiagnosticLog("MainActivity.onCreate: calling setContent")
+        logEvent("UI", "setContent", "called")
         try {
             setContent {
                 PX5Theme {
@@ -112,55 +136,102 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
-            writeDiagnosticLog("MainActivity.onCreate: setContent OK")
+            logEvent("UI", "setContent", "completed")
+            logState("ui", "ready")
         } catch (e: Throwable) {
-            writeDiagnosticLog("MainActivity.onCreate: setContent FAILED: ${e.javaClass.name}: ${e.message}\n${e.stackTraceToString()}")
-            throw e  // re-throw so the global handler catches it
+            logEvent("UI", "setContent", "failed")
+            logException("UI.setContent", e)
+            logState("ui", "crashed")
+            throw e
         }
+
+        // --- Final state ---
+        logState("app", "onCreate_completed")
+    }
+
+    // ========================================================================
+    // Logging infrastructure — 3 separated layers
+    // ========================================================================
+
+    /**
+     * Layer 1: Event Log
+     * Records what happened, factually, without interpretation.
+     * Format: [timestamp] EVENT component action detail
+     */
+    private fun logEvent(component: String, action: String, detail: String = "", result: String = "") {
+        val msg = buildString {
+            append("EVENT")
+            append(" component=").append(component)
+            append(" action=").append(action)
+            if (detail.isNotEmpty()) append(" detail=").append(detail)
+            if (result.isNotEmpty()) append(" result=").append(result)
+        }
+        writeLog(msg)
     }
 
     /**
-     * Write a diagnostic line to px5_diagnostic.log in the app's external
-     * files dir. This is SEPARATE from the crash log — it's a running
-     * trace of every step in MainActivity.onCreate so we can see exactly
-     * where the app crashes.
-     *
-     * The file is appended to (not overwritten) so we get the full
+     * Layer 2: State Tracking
+     * Records the current runtime state of a component.
+     * Format: [timestamp] STATE component=value
+     */
+    private fun logState(component: String, state: String) {
+        val msg = "STATE component=$component state=$state"
+        writeLog(msg)
+    }
+
+    /**
+     * Layer 3: Diagnostic — Exception recording
+     * Records an exception with full stack trace.
+     * Only called when something actually went wrong.
+     * Format: [timestamp] DIAGNOSTIC source exception_class message stacktrace
+     */
+    private fun logException(source: String, e: Throwable) {
+        val sw = java.io.StringWriter()
+        val pw = java.io.PrintWriter(sw)
+        e.printStackTrace(pw)
+        val msg = buildString {
+            append("DIAGNOSTIC")
+            append(" source=").append(source)
+            append(" exception=").append(e.javaClass.name)
+            append(" message=").append(e.message ?: "(none)")
+            append("\n").append(sw.toString().trim())
+        }
+        writeLog(msg)
+    }
+
+    /**
+     * Write a log line to both logcat and the diagnostic file.
+     * The file is appended (not overwritten) so we get the full
      * launch sequence across multiple attempts.
      */
-    private fun writeDiagnosticLog(message: String) {
+    private fun writeLog(message: String) {
         try {
-            android.util.Log.i("PX5_Diag", message)
+            android.util.Log.i("PX5", message)
             val logsDir = getExternalFilesDir("logs") ?: return
             if (!logsDir.exists()) logsDir.mkdirs()
             val logFile = File(logsDir, "px5_diagnostic.log")
-            val timestamp = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date())
-            val line = "[$timestamp] $message\n"
-            logFile.appendText(line)
+            val timestamp = java.text.SimpleDateFormat(
+                "yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US
+            ).format(java.util.Date())
+            logFile.appendText("[$timestamp] $message\n")
         } catch (_: Throwable) {
-            // Swallow — diagnostic logging must never crash the app
+            // Logging must never crash the app
         }
     }
 
     override fun onResume() {
         super.onResume()
-        try {
-            soundManager.startBgMusic()
-        } catch (_: Throwable) {}
+        try { soundManager.startBgMusic() } catch (_: Throwable) {}
     }
 
     override fun onPause() {
         super.onPause()
-        try {
-            soundManager.pauseBgMusic()
-        } catch (_: Throwable) {}
+        try { soundManager.pauseBgMusic() } catch (_: Throwable) {}
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        try {
-            soundManager.release()
-        } catch (_: Throwable) {}
+        try { soundManager.release() } catch (_: Throwable) {}
     }
 }
 
@@ -505,5 +576,6 @@ fun EmulationScreen(
         }
     }
 }
+
 
 
