@@ -1,14 +1,16 @@
-# PX5 Roadmap
+# Experimental-PS5 Roadmap
 
-> A native Android PlayStation 5 emulator focused on incremental implementation, runtime validation, and measurable compatibility progress.
+> A native Android PlayStation 5 emulator focused on incremental
+> implementation, runtime validation, and measurable compatibility
+> progress.
 
-## Core Development
+## Core Development Phases
 
 | Phase | Component | Description | Status |
 |:-----:|-----------|-------------|:------:|
-| 0 | Foundation | Project structure, build system, CI foundation | ✅ |
-| 1 | Android Framework | UI, application lifecycle, Vulkan surface | 🔄 |
-| 2 | FEXCore | FEXCore integration and ARM64/AMD64 execution bridge | ⬜ |
+| 0 | Foundation | Project structure, build system, FEXCore integration | ✅ |
+| 1 | Android Framework | Compose UI, application lifecycle, Vulkan surface | 🔄 |
+| 2 | FEXCore | FEXCore ARM64/x86-64 execution bridge | 🔄 |
 | 3 | PS5 Loader | PS5 ELF/SELF loader and executable validation | ⬜ |
 | 4 | Memory | Virtual memory manager and PS5 memory model | ⬜ |
 | 5 | Kernel HLE | PS5 kernel HLE and syscall layer | ⬜ |
@@ -26,48 +28,84 @@
 | 17 | Release Candidate | Stability, compatibility and regression validation | ⬜ |
 | 18 | Stable v1.0 | Production release | ⬜ |
 
-## Engineering Infrastructure
+## Evidence Engine Integration
 
-The following systems operate alongside the core emulator phases rather than as sequential emulator phases.
+The [agent-evidence-engine](https://github.com/SeaNaxxx/agent-evidence-engine)
+operates alongside the core emulator phases. It is not a sequential
+emulator phase — it is the measurement and validation layer that
+prevents blind development.
+
+### v1 — Evidence Collection (current)
 
 | Component | Purpose | Status |
 |-----------|---------|:------:|
-| `agent-evidence-engine` | Runtime evidence collection and deterministic validation | 🔄 |
 | Project Contract | Machine-readable PX5 build and runtime requirements | ⬜ |
-| Build Probe | Validate Android and native build outputs | ⬜ |
-| Native Loader Probe | Validate native libraries and runtime loading | ⬜ |
-| Vulkan Probe | Validate Vulkan initialization and GPU visibility | ⬜ |
-| Runtime Evidence | Capture structured runtime state from the Android device | ⬜ |
-| Agent Report | Generate compact `agent-report.json` for AI agents | ⬜ |
-| Regression History | Detect behavioral regressions between commits | ⬜ |
-| PR Policy | Block critical runtime regressions | ⬜ |
-| PS5 Probes | ELF, memory, FEX, syscall and GPU validation | ⬜ |
+| Build Probe | Validate Android + native build outputs (APK, ABI, .so files) | ⬜ |
+| Native Loader Probe | Validate native libraries exist in APK AND load at runtime | ⬜ |
+| Vulkan Dummy Probe | Validate Vulkan instance creation + physical device enumeration | ⬜ |
+| Evidence Model | Structured runtime state captured from the Android device | ⬜ |
+| Agent Report | Compact `agent-report.json` with PASS/FAIL/INCONCLUSIVE verdict | ⬜ |
+| PR Policy | Block PRs with P0/P1 runtime failures | ⬜ |
+
+### v2 — Regression History
+
+| Component | Purpose | Status |
+|-----------|---------|:------:|
+| Evidence Database | SQLite store of probe results per commit | ⬜ |
+| Fingerprinting | Content-addressed identification of probe outputs | ⬜ |
+| Regression Detection | "Last known good: commit A → First known bad: commit B" | ⬜ |
+| Probe Diff | "native-loader: PASS → FAIL" between commits | ⬜ |
+
+### v3 — Governance
+
+| Component | Purpose | Status |
+|-----------|---------|:------:|
+| Severity Policy | P0=block, P1=block, P2=warning, P3=informational | ⬜ |
+| Request More Evidence | Engine can run additional probes on demand | ⬜ |
+| Human Report | Compact text report for PR review | ⬜ |
+
+### PS5-Specific Probes (future)
+
+| Probe | Validates |
+|-------|-----------|
+| `elf_probe` | PS5 ELF/SELF format validity |
+| `syscall_probe` | Syscall table coverage |
+| `memory_probe` | Memory contract between PX5 and FEX |
+| `fex_probe` | FEXCore JIT execution |
+| `gpu_probe` | GNM → SPIR-V → Vulkan pipeline |
+| `runtime_probe` | End-to-end guest code execution |
 
 ## Validation Principle
 
-PX5 progress is considered complete only when the implementation is supported by runtime evidence.
+PX5 progress is considered complete only when the implementation is
+supported by **runtime evidence**, not when `BUILD SUCCESSFUL` appears
+in CI logs.
 
-```text
+```
 Source Code
     |
     v
-Build
-    |
-    v
-Install
-    |
-    v
-Runtime
-    |
-    v
-Probes
-    |
-    v
-Evidence
-    |
-    v
-Validation
-    |
-    +---- PASS
-    +---- FAIL
-    +---- INCONCLUSIVE
+Build  ──────► Build Probe ──► Evidence
+    |                              |
+    v                              v
+Install ──────► Native Probe ──► Evidence
+    |                              |
+    v                              v
+Launch  ──────► Vulkan Probe ──► Evidence
+    |                              |
+    v                              v
+Runtime ──────► PS5 Probes ────► Evidence
+                                   |
+                                   v
+                               Policy
+                                   |
+                                   +---- PASS
+                                   +---- FAIL
+                                   +---- INCONCLUSIVE
+                                             |
+                                             v
+                                    agent-report.json
+```
+
+The AI agent **interprets** evidence and suggests fixes.
+The engine **decides** the verdict.
