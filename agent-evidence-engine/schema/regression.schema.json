@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Regression Report",
+  "description": "v2: Detects behavioral regressions between commits",
+  "type": "object",
+  "required": ["detected", "component", "last_good", "first_bad"],
+  "properties": {
+    "detected": { "type": "boolean" },
+    "component": { "type": "string" },
+    "last_good": {
+      "type": "object",
+      "properties": {
+        "commit": { "type": "string" },
+        "timestamp": { "type": "string" }
+      }
+    },
+    "first_bad": {
+      "type": "object",
+      "properties": {
+        "commit": { "type": "string" },
+        "timestamp": { "type": "string" }
+      }
+    },
+    "changed_probes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "probe": { "type": "string" },
+          "from": { "enum": ["PASS", "FAIL", "INCONCLUSIVE"] },
+          "to": { "enum": ["PASS", "FAIL", "INCONCLUSIVE"] }
+        }
+      }
+    }
+  }
+}
