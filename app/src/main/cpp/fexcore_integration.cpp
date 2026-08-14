@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sys/auxv.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -45,16 +46,47 @@ public:
 NullSyscallHandler g_syscallHandler;
 FEXCore::SignalDelegator g_signalDelegator;
 
+// Detect actual CPU features from hardware instead of hardcoding.
+// The previous version hardcoded SupportsAES=true, SupportsCRC=true,
+// SupportsAtomics=true — if the device's CPU doesn't actually support
+// these, FEXCore's JIT would generate ARM64 instructions that trigger
+// SIGILL/SIGSEGV at runtime.
 FEXCore::HostFeatures CreateHostFeatures() {
     FEXCore::HostFeatures features{};
-    features.DCacheLineSize = 64;
-    features.ICacheLineSize = 64;
-    features.SupportsAES = true;
-    features.SupportsCRC = true;
-    features.SupportsAtomics = true;
-    features.SupportsSVE128 = false;
+
+    // Detect cache line size from hardware
+    long cachelinesize = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
+    features.DCacheLineSize = (cachelinesize > 0) ? static_cast<uint32_t>(cachelinesize) : 64;
+    features.ICacheLineSize = features.DCacheLineSize;
+
+    // Read hardware capabilities
+    unsigned long hwcap = getauxval(AT_HWCAP);
+
+    // ARM64 feature bits from <asm/hwcap.h>
+    // HWCAP_AES      = 1 << 3
+    // HWCAP_CRC32    = 1 << 7
+    // HWCAP_ATOMICS  = 1 << 8
+    // HWCAP_FP       = 1 << 0
+    // HWCAP_ASIMD    = 1 << 1
+
+    features.SupportsAES    = (hwcap & (1 << 3)) != 0;  // HWCAP_AES
+    features.SupportsCRC    = (hwcap & (1 << 7)) != 0;  // HWCAP_CRC32
+    features.SupportsAtomics = (hwcap & (1 << 8)) != 0;  // HWCAP_ATOMICS
+
+    // SVE detection
+    // HWCAP_SVE = 1 << 22
+    bool sve_supported = (hwcap & (1 << 22)) != 0;
+    features.SupportsSVE128 = false;  // Don't use SVE even if available — too experimental
     features.SupportsSVE256 = false;
+
     features.HostType = FEXCore::HostFeatures::HostTypeEnum::Linux;
+
+    PX5_LOGI(LogCategory::FEX,
+             "HostFeatures: DCache=%u ICache=%u AES=%d CRC=%d Atomics=%d SVE=%d hwcap=0x%lx",
+             features.DCacheLineSize, features.ICacheLineSize,
+             features.SupportsAES ? 1 : 0, features.SupportsCRC ? 1 : 0,
+             features.SupportsAtomics ? 1 : 0, sve_supported ? 1 : 0, hwcap);
+
     return features;
 }
 
@@ -66,21 +98,46 @@ bool Initialize() {
         return true;
     }
 
+    // Step 1: Detect host features
+    PX5_LOGI(LogCategory::FEX, "Initialize: step 1 — detecting host features");
     const auto features = CreateHostFeatures();
+
+    // Step 2: Create FEXCore context
+    PX5_LOGI(LogCategory::FEX, "Initialize: step 2 — CreateNewContext");
     g_context = FEXCore::Context::Context::CreateNewContext(features);
     if (!g_context) {
-        PX5_LOGE(LogCategory::FEX, "FEXCore Context creation failed");
+        PX5_LOGE(LogCategory::FEX, "Initialize: CreateNewContext returned null");
         return false;
     }
+    PX5_LOGI(LogCategory::FEX, "Initialize: CreateNewContext succeeded");
 
+    // Step 3: Set syscall handler
+    PX5_LOGI(LogCategory::FEX, "Initialize: step 3 — SetSyscallHandler");
     g_context->SetSyscallHandler(&g_syscallHandler);
+
+    // Step 4: Set signal delegator
+    // NOTE: FEXCore uses signal handlers for JIT page-fault handling.
+    // On Android, this can conflict with debuggerd/tombstone.
+    // If this step causes a crash, we can try skipping it.
+    PX5_LOGI(LogCategory::FEX, "Initialize: step 4 — SetSignalDelegator");
     g_context->SetSignalDelegator(&g_signalDelegator);
+
+    // Step 5: Enable HLT exit
+    PX5_LOGI(LogCategory::FEX, "Initialize: step 5 — EnableExitOnHLT");
     g_context->EnableExitOnHLT();
+
+    // Step 6: InitCore — this initializes the JIT compiler
+    // This is the most likely step to cause a SIGSEGV because:
+    //   - It allocates executable memory (mmap PROT_EXEC)
+    //   - It sets up signal handlers for page faults
+    //   - It might use ARM64 instructions based on the host features
+    PX5_LOGI(LogCategory::FEX, "Initialize: step 6 — InitCore");
     if (!g_context->InitCore()) {
-        PX5_LOGE(LogCategory::FEX, "FEXCore Context::InitCore failed");
+        PX5_LOGE(LogCategory::FEX, "Initialize: InitCore returned false");
         g_context.reset();
         return false;
     }
+    PX5_LOGI(LogCategory::FEX, "Initialize: InitCore succeeded");
 
     PX5_LOGI(LogCategory::FEX,
              "FEXCore Context initialized: DCache=%u ICache=%u AES=%d CRC=%d Atomics=%d",
@@ -151,4 +208,4 @@ bool RunGuestCodeTest() {
     return result == 42;
 }
 
-}
+} // namespace PX5::FexCoreIntegration
