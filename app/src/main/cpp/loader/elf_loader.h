@@ -1,39 +1,44 @@
 #ifndef PX5_ELF_LOADER_H
 #define PX5_ELF_LOADER_H
 
+#include <cstdint>
+#include <cstddef>
 #include <string>
 #include <vector>
-#include <cstdint>
 
 namespace PX5 {
 
-struct ElfHeader {
-    uint8_t magic[4];
-    uint8_t bitClass;
-    uint8_t endianness;
-    uint16_t type;
-    uint16_t machine;
-    uint64_t entryPoint;
-    uint64_t phoff;
-    uint64_t shoff;
-};
+// Result of one successful load, used by the execution bridge and the
+// evidence UI. Honesty contract: every field is filled from REAL parsed
+// data; on any parsing/mapping failure the call returns false and `error`
+// explains why (no synthetic segments, no invented addresses).
+struct LoadedElfImage {
+    struct Segment {
+        uint64_t vaddr;
+        size_t   filesz;
+        size_t   memsz;
+        uint32_t flags;         // MemoryFlags bits
+    };
 
-struct ElfSegment {
-    uint32_t type;
-    uint32_t flags;
-    uint64_t offset;
-    uint64_t vaddr;
-    uint64_t paddr;
-    uint64_t filesz;
-    uint64_t memsz;
-    uint64_t align;
+    std::string          path;
+    uint64_t             entryPoint = 0;
+    uint64_t             imageLowVa = ~0ull;
+    uint64_t             imageHighVa = 0;     // program break suggestion
+    std::vector<Segment> segments;
+    bool                 isSelf = false;      // SELF detected & NOT decrypted
+    std::string          error;
+
+    size_t TotalMemSize() const { return imageHighVa - imageLowVa; }
 };
 
 class ElfLoader {
 public:
-    static bool LoadElf(const std::string& filePath, uint64_t& outEntryPoint);
-    static bool LoadSelf(const std::string& filePath, uint64_t& outEntryPoint);
-    static bool ParseHeaders(const std::vector<uint8_t>& buffer, ElfHeader& outHeader, std::vector<ElfSegment>& outSegments);
+    // Parses + maps a real x86-64 ELF into the guest window.
+    static bool LoadElfFile(const std::string& filePath, LoadedElfImage& out);
+
+    // SELF containers: detected honestly. Decryption is Phase-C scope;
+    // we NEVER claim to have loaded an encrypted image.
+    static bool LoadSelf(const std::string& filePath, LoadedElfImage& out);
 };
 
 } // namespace PX5
