@@ -181,12 +181,12 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
     }
 
     case NR_uname: {
-        struct FakeUts { char sysname[65]; char nodename[65]; char release[65];
-                         char version[65]; char machine[65]; char domain[65]; };
+        struct GuestUtsname { char sysname[65]; char nodename[65]; char release[65];
+                               char version[65]; char machine[65]; char domain[65]; };
         void* p = nullptr;
-        if (!GuestToHost(a0, sizeof(FakeUts), &p)) return kErrInval;
-        auto* u = static_cast<FakeUts*>(p);
-        memset(u, 0, sizeof(FakeUts));
+        if (!GuestToHost(a0, sizeof(GuestUtsname), &p)) return kErrInval;
+        auto* u = static_cast<GuestUtsname*>(p);
+        memset(u, 0, sizeof(GuestUtsname));
         strcpy(u->sysname, "Linux");
         strcpy(u->release, "6.6.0-px5-foundation");
         strcpy(u->version, "#1 PX5 HLE bridge");
