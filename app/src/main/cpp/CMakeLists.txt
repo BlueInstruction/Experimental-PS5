@@ -98,25 +98,21 @@ add_library(
         fexcore_integration.cpp
         core/emulator.cpp
         memory/memory.cpp
-        memory/memory_map.cpp
         kernel/syscalls.cpp
         kernel/signals.cpp
-        kernel_hle.cpp
         loader/elf_loader.cpp
         loader/self_loader.cpp
         gpu/vulkan_device.cpp
-        gpu/shader_cache.cpp
-        gnm_vulkan_renderer.cpp
         audio/audio.cpp
         audio_input_native.cpp
         input/controller.cpp
         filesystem/vfs.cpp
         utils/logger.cpp
         utils/linker_ns_bypass.cpp
-        media/media_codec_hle.cpp
-        turnip_hook.cpp)
+        media/media_codec_hle.cpp)
 
 target_include_directories(px5 PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
         ${CMAKE_CURRENT_LIST_DIR}/../../../../third_party/fex/FEXCore/include
         ${CMAKE_CURRENT_BINARY_DIR}/fex/FEXCore/include
         ${CMAKE_CURRENT_BINARY_DIR}/fex/generated)

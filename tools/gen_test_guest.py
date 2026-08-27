@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""
+PX5 Foundation Test Generator
+=============================
+Generates `test_guest.h` containing two embedded x86-64 guest programs:
+
+1. TEST_GUEST_RAW_CODE  - raw machine code blob (no ELF container):
+      write(1, msg, len) -> exit_group(42) -> hlt (safety stop)
+
+2. TEST_GUEST_ELF       - the same program wrapped inside a REAL minimal
+      ELF64 ET_EXEC container with one PT_LOAD segment, so it exercises
+      the full PX5 pipeline: file IO -> ELF header parse -> PT_LOAD
+      segment mapping -> entry bridging into FEXCore -> Linux syscall
+      interception -> captured stdout + exit code.
+
+Both programs prove end-to-end CPU translation evidence honestly:
+   * output must contain "PX5-OK!"   (write() reached our HLE bridge)
+   * exit code must equal 42          (exit_group() captured)
+   * thread must halt cleanly         (hlt after final syscall)
+
+The guest VAs live inside the PX5 memory window, NOT at host-identity
+addresses: PX5 maps segments at p_vaddr literals inside its reserved
+window and bridges RIP/stack pointers through MemoryManager::GetHostPointer.
+
+Usage: python3 tools/gen_test_guest.py
+Output header is committed to the repo; regenerate after editing.
+"""
+import struct
+
+# ---------------------------------------------------------------------------
+# Layout constants shared with the C++ side (see tests/test_guest.h).
+# TEST_GUEST_LOAD_VADDR must sit inside EVERY candidate memory window used by
+# MemoryManager::Initialize (primary window base = 0x100000000, size = 0x10000000).
+# ---------------------------------------------------------------------------
+TEST_GUEST_LOAD_VADDR = 0x140000000  # 5 GiB - inside all candidate windows
+PAYLOAD_FILE_OFF      = 0x80         # payload starts after Ehdr+Phdr
+
+MSG = b"PX5-OK!\n"                   # what the guest writes to fd=1
+
+def gen_machine_code(msg_len):
+    """Emit raw bytes for the guest program (hand-assembled)."""
+    out = bytearray()
+    # mov eax,1        (__NR_write)
+    out += b"\xB8\x01\x00\x00\x00"
+    # mov edi,1        (fd = stdout)
+    out += b"\xBF\x01\x00\x00\x00"
+    # lea rsi,[rip+disp32]  -> points at MSG
+    total_code_len_without_msg = 5 + 5 + 7 + 5 + 2 + 5 + 5 + 2 + 1  # 37
+    msg_off = total_code_len_without_msg
+    disp = msg_off - (5 + 5 + 7)         # rel base = byte AFTER lea
+    out += b"\x48\x8D\x35" + struct.pack("<i", disp)
+    # mov edx,msg_len
+    out += b"\xBA" + struct.pack("<I", msg_len)
+    # syscall
+    out += b"\x0F\x05"
+    # mov eax,231      (__NR_exit_group)
+    out += b"\xB8\xE7\x00\x00\x00"
+    # mov edi,42       (exit code)
+    out += b"\xBF\x2A\x00\x00\x00"
+    # syscall
+    out += b"\x0F\x05"
+    # hlt              (graceful stop via EnableExitOnHLT)
+    out += b"\xF4"
+    assert msg_off == len(out), f"layout drift: {msg_off} != {len(out)}"
+    # Append the message payload right after the code, at absolute
+    # offset msg_off (lea above points exactly here).
+    out += MSG + b"\x00"             # NUL-terminated copy
+    return bytes(out), msg_off
+
+CODE, MSG_OFFSET = gen_machine_code(len(MSG))
+assert CODE[MSG_OFFSET:MSG_OFFSET+len(MSG)] == b"PX5-OK!\n", "lea displacement math wrong"
+
+# ---------------------------------------------------------------------------
+# Minimal ELF64 ET_EXEC wrapper
+# ---------------------------------------------------------------------------
+ehdr = struct.pack(
+    "<16sHHIQQQIHHHHHH",
+    b"\x7fELF\x02\x01\x01\x00" + b"\x00"*8,  # e_ident: ELF64/LE/SYSV
+    2,            # e_type      = ET_EXEC
+    62,           # e_machine   = EM_X86_64
+    1,            # e_version
+    TEST_GUEST_LOAD_VADDR + PAYLOAD_FILE_OFF,  # e_entry
+    64,           # e_phoff
+    0,            # e_shoff
+    0,            # e_flags
+    64,           # e_ehsize
+    56,           # e_phentsize
+    1,            # e_phnum
+    0, 0, 0,      # e_shentsize / e_shnum / e_shstrndx
+)
+phdr = struct.pack(
+    "<IIQQQQQQ",
+    1,                        # p_type   = PT_LOAD
+    7,                        # p_flags  = RWX
+    PAYLOAD_FILE_OFF,         # p_offset
+    TEST_GUEST_LOAD_VADDR,    # p_vaddr
+    TEST_GUEST_LOAD_VADDR,    # p_paddr
+    len(CODE),                # p_filesz
+    len(CODE),                # p_memsz
+    0x1000,                   # p_align
+)
+elf = bytearray(ehdr + phdr)
+elf += b"\x00" * (PAYLOAD_FILE_OFF - len(elf))   # pad to 0x80
+elf += CODE
+
+# ---------------------------------------------------------------------------
+# Emit C++ header
+# ---------------------------------------------------------------------------
+def c_array(name, data, width=16):
+    lines = [f"static constexpr uint8_t {name}[] = {{"]
+    for i in range(0, len(data), width):
+        chunk = ", ".join(f"0x{b:02X}" for b in data[i:i+width])
+        lines.append("    " + chunk + ",")
+    lines[-1] = lines[-1].rstrip(",")
+    lines.append("};")
+    return "\n".join(lines)
+
+header = f"""// AUTO-GENERATED by tools/gen_test_guest.py -- DO NOT EDIT BY HAND.
+// Regenerate: python3 tools/gen_test_guest.py
+#ifndef PX5_TESTS_TEST_GUEST_H
+#define PX5_TESTS_TEST_GUEST_H
+
+#include <cstdint>
+
+// Test guest constants (shared contract with runtime code).
+static constexpr uint64_t TEST_GUEST_LOAD_VADDR = 0x{TEST_GUEST_LOAD_VADDR:X}ULL;
+static constexpr const char* TEST_GUEST_EXPECTED_OUTPUT = "{MSG.decode().rstrip()}";
+static constexpr uint64_t TEST_GUEST_EXPECTED_EXIT_CODE = 42;
+
+// Raw x86-64 machine code: write(1,"PX5-OK!\\n",8); exit_group(42); hlt;
+{c_array("TEST_GUEST_RAW_CODE", CODE)}
+
+// Same program wrapped in a real minimal ELF64 ET_EXEC (PT_LOAD RWX):
+// exercises ELF parse -> segment map -> bridge -> syscalls.
+static constexpr unsigned int TEST_GUEST_ELF_SIZE = {len(elf)};
+{c_array("TEST_GUEST_ELF", elf)}
+
+#endif // PX5_TESTS_TEST_GUEST_H
+"""
+
+with open("app/src/main/cpp/tests/test_guest.h", "w") as f:
+    f.write(header)
+
+print(f"raw code : {len(CODE)} bytes")
+print(f"elf image: {len(elf)} bytes @ vaddr {TEST_GUEST_LOAD_VADDR:#x} "
+      f"entry {TEST_GUEST_LOAD_VADDR+PAYLOAD_FILE_OFF:#x}")
+print("Wrote app/src/main/cpp/tests/test_guest.h")

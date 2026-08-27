@@ -1,186 +1,132 @@
 #include <jni.h>
-#include <string>
+#include <android/log.h>
+
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <filesystem>
+
 #include "core/emulator.h"
 #include "fexcore_integration.h"
 #include "gpu/vulkan_device.h"
 #include "utils/logger.h"
 
-// All native logging infrastructure (utils/crash_handler.{h,cpp},
-// Logger::Initialize, nativeInitLogger JNI, logcat capture thread) has
-// been REMOVED. The Kotlin side (PX5Application.kt) handles all crash
-// logging via Thread.setDefaultUncaughtExceptionHandler — exactly like
-// the old PX5 repo. The native logger.h/.cpp still exist so existing
-// PX5_LOGI/PX5_LOGE macros keep compiling (they just route to Android
-// logcat), but there is no file logger and no native crash handler.
+namespace fs = std::filesystem;
+
+// ---------------------------------------------------------------------------
+// JNI surface v2 (honest contract).
+//
+// REMOVED vs v1: every fake adrenotools/Turnip toggle, thunks/FEX config
+// stubs that always returned false, and the "install" that lied about
+// copying a PKG. ADDED: foundation self-test + raw guest proof + real
+// Vulkan summary.
+// ---------------------------------------------------------------------------
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_px5_emulator_core_FexCoreWrapper_stringFromJNI(
-        JNIEnv* env,
-        jobject /* this */) {
-    std::string info = "PX5 Core Engine: FEXCore ARM64 + Vulkan 1.3 GNM Renderer";
-    return env->NewStringUTF(info.c_str());
+Java_com_px5_emulator_core_FexCoreWrapper_stringFromJNI(JNIEnv* env, jobject) {
+    return env->NewStringUTF(
+        "PX5 Foundation Core: FEXCore ARM64 CPU bridge | REAL Linux syscall "
+        "HLE | Vulkan runtime enumeration");
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_px5_emulator_core_FexCoreWrapper_initializeFexCore(
-        JNIEnv* env,
-        jobject /* this */) {
+Java_com_px5_emulator_core_FexCoreWrapper_initializeFexCore(JNIEnv*, jobject) {
     return PX5::FexCoreIntegration::Initialize() ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_px5_emulator_core_FexCoreWrapper_nativeShutdown(
-        JNIEnv* env,
-        jobject /* this */) {
-    PX5::FexCoreIntegration::Shutdown();
+Java_com_px5_emulator_core_FexCoreWrapper_nativeShutdown(JNIEnv*, jobject) {
+    PX5::Emulator::GetInstance().Shutdown();
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeInstallPkg(
-        JNIEnv* env,
-        jobject /* this */,
-        jstring pkgPathStr,
-        jstring destPathStr) {
+        JNIEnv* env, jobject, jstring pkgPathStr, jstring destPathStr) {
     if (!pkgPathStr || !destPathStr) return JNI_FALSE;
-    const char* pkgPath = env->GetStringUTFChars(pkgPathStr, nullptr);
-    const char* destPath = env->GetStringUTFChars(destPathStr, nullptr);
+    const char* pkg = env->GetStringUTFChars(pkgPathStr, nullptr);
+    const char* dst = env->GetStringUTFChars(destPathStr, nullptr);
 
-    PX5_LOGI(PX5::LogCategory::LOADER, "Installing PKG %s -> %s", pkgPath, destPath);
+    bool ok = false;
+    std::error_code ec;
+    try {
+        fs::create_directories(fs::path(dst).parent_path(), ec);
+        ok = fs::copy_file(pkg, dst, fs::copy_options::overwrite_existing, ec);
+    } catch (...) { ok = false; }
 
-    env->ReleaseStringUTFChars(pkgPathStr, pkgPath);
-    env->ReleaseStringUTFChars(destPathStr, destPath);
-    return JNI_TRUE;
+    PX5_LOGI(PX5::LogCategory::LOADER,
+             "PKG install %s -> %s : %s (%s)", pkg, dst,
+             ok ? "OK" : "FAIL", ec.message().c_str());
+
+    env->ReleaseStringUTFChars(pkgPathStr, pkg);
+    env->ReleaseStringUTFChars(destPathStr, dst);
+    return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadElf(
-        JNIEnv* env,
-        jobject /* this */,
-        jstring elfPathStr) {
-    if (!elfPathStr) return JNI_FALSE;
-    const char* elfPath = env->GetStringUTFChars(elfPathStr, nullptr);
-    bool res = PX5::Emulator::GetInstance().LoadExecutable(elfPath, false);
-    env->ReleaseStringUTFChars(elfPathStr, elfPath);
+Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadElf(JNIEnv* env, jobject,
+                                                        jstring pathStr) {
+    if (!pathStr) return JNI_FALSE;
+    const char* p = env->GetStringUTFChars(pathStr, nullptr);
+    const bool res =
+        PX5::Emulator::GetInstance().LoadExecutable(p, /*isSelf=*/false);
+    env->ReleaseStringUTFChars(pathStr, p);
     return res ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadSelf(
-        JNIEnv* env,
-        jobject /* this */,
-        jstring selfPathStr) {
-    if (!selfPathStr) return JNI_FALSE;
-    const char* selfPath = env->GetStringUTFChars(selfPathStr, nullptr);
-    bool res = PX5::Emulator::GetInstance().LoadExecutable(selfPath, true);
-    env->ReleaseStringUTFChars(selfPathStr, selfPath);
+Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadSelf(JNIEnv* env, jobject,
+                                                         jstring pathStr) {
+    if (!pathStr) return JNI_FALSE;
+    const char* p = env->GetStringUTFChars(pathStr, nullptr);
+    const bool res =
+        PX5::Emulator::GetInstance().LoadExecutable(p, /*isSelf=*/true);
+    env->ReleaseStringUTFChars(pathStr, p);
     return res ? JNI_TRUE : JNI_FALSE;
-}
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadElfPackage(
-        JNIEnv* env,
-        jobject /* this */,
-        jstring elfPathStr) {
-    if (!elfPathStr) return env->NewStringUTF("Error: Null path");
-    const char* elfPath = env->GetStringUTFChars(elfPathStr, nullptr);
-    bool ok = PX5::Emulator::GetInstance().LoadExecutable(elfPath, false);
-    env->ReleaseStringUTFChars(elfPathStr, elfPath);
-    return env->NewStringUTF(ok ? "Successfully loaded ELF" : "Failed to load ELF");
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunCpuConformanceTest(
-        JNIEnv* env,
-        jobject /* this */) {
-    return PX5::FexCoreIntegration::RunGuestCodeTest() ? JNI_TRUE : JNI_FALSE;
+        JNIEnv*, jobject) {
+    return PX5::FexCoreIntegration::RunConformanceTest() ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeMapMemory(
-        JNIEnv* env,
-        jobject /* this */,
-        jlong addr,
-        jlong size,
-        jint flags) {
-    return (jlong)PX5::Emulator::GetInstance().MapMemory((uint64_t)addr, (size_t)size, (uint32_t)flags);
+        JNIEnv*, jobject, jlong addr, jlong size, jint flags) {
+    return static_cast<jlong>(
+        PX5::Emulator::GetInstance().MapMemory(static_cast<uint64_t>(addr),
+                                               static_cast<size_t>(size),
+                                               static_cast<uint32_t>(flags)));
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeUnmapMemory(
-        JNIEnv* env,
-        jobject /* this */,
-        jlong addr,
-        jlong size) {
-    return PX5::Emulator::GetInstance().UnmapMemory((uint64_t)addr, (size_t)size) ? JNI_TRUE : JNI_FALSE;
+        JNIEnv*, jobject, jlong addr, jlong size) {
+    return PX5::Emulator::GetInstance().UnmapMemory(
+               static_cast<uint64_t>(addr),
+               static_cast<size_t>(size)) ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeGetArchitectureSummary(
-        JNIEnv* env,
-        jobject /* this */) {
-    std::string summary = PX5::FexCoreIntegration::GetArchitectureSummary();
-    return env->NewStringUTF(summary.c_str());
+        JNIEnv* env, jobject) {
+    return env->NewStringUTF(
+        PX5::FexCoreIntegration::GetArchitectureSummary().c_str());
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadThunksConfig(
-        JNIEnv* env,
-        jobject /* this */,
-        jstring thunksJsonStr) {
-    if (!thunksJsonStr) return JNI_FALSE;
-    PX5_LOGW(PX5::LogCategory::FEX, "Thunk configuration is outside Phase 2");
-    return JNI_FALSE;
-}
+// --- Foundation evidence additions ----------------------------------------
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadFexConfig(
-        JNIEnv* env,
-        jobject /* this */,
-        jstring fexConfigJsonStr) {
-    if (!fexConfigJsonStr) return JNI_FALSE;
-    PX5_LOGW(PX5::LogCategory::FEX, "FEX configuration is outside Phase 2");
-    return JNI_FALSE;
-}
-
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_px5_emulator_core_FexCoreWrapper_nativeInitAdrenotools(
-        JNIEnv* env,
-        jobject /* this */,
-        jstring driverDirStr,
-        jstring libNameStr,
-        jstring hookLibStr) {
-    const char* driverDir = env->GetStringUTFChars(driverDirStr, nullptr);
-    const char* libName = env->GetStringUTFChars(libNameStr, nullptr);
-    const char* hookLib = env->GetStringUTFChars(hookLibStr, nullptr);
-
-    bool res = PX5::VulkanGpuDevice::GetInstance().InitAdrenotoolsDriver(driverDir, libName, hookLib);
-
-    env->ReleaseStringUTFChars(driverDirStr, driverDir);
-    env->ReleaseStringUTFChars(libNameStr, libName);
-    env->ReleaseStringUTFChars(hookLibStr, hookLib);
-    return res ? JNI_TRUE : JNI_FALSE;
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeRunFoundationSelfTest(
+        JNIEnv* env, jobject) {
+    const std::string report = PX5::Emulator::GetInstance().SelfTestFoundation();
+    return env->NewStringUTF(report.c_str());
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_px5_emulator_core_FexCoreWrapper_nativeGetTurnipDriverInfo(
-        JNIEnv* env,
-        jobject /* this */) {
-    auto caps = PX5::VulkanGpuDevice::GetInstance().GetCapabilities();
-    return env->NewStringUTF(caps.driverName.c_str());
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_px5_emulator_core_FexCoreWrapper_nativeSetTurnipBcnTextureSupport(
-        JNIEnv* env,
-        jobject /* this */,
-        jboolean enabled) {
-    PX5::VulkanGpuDevice::GetInstance().SetBCnTextureSupport(enabled == JNI_TRUE);
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_px5_emulator_core_FexCoreWrapper_nativeSetTurnipPipelineCaching(
-        JNIEnv* env,
-        jobject /* this */,
-        jboolean enabled) {
-    PX5::VulkanGpuDevice::GetInstance().SetPipelineCaching(enabled == JNI_TRUE);
+Java_com_px5_emulator_core_FexCoreWrapper_nativeGetVulkanSummary(JNIEnv* env,
+                                                                 jobject) {
+    auto& gpu = PX5::VulkanGpuDevice::GetInstance();
+    gpu.Initialize();   // idempotent; report current truth either way
+    return env->NewStringUTF(gpu.GetSummaryString().c_str());
 }

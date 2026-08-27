@@ -1,6 +1,17 @@
 #include "emulator.h"
-#include "../fexcore_integration.h"
-#include "../utils/logger.h"
+
+#include "memory/memory.h"
+#include "kernel/syscalls.h"
+#include "gpu/vulkan_device.h"
+#include "filesystem/vfs.h"
+#include "audio/audio.h"
+#include "../tests/test_guest.h"
+#include "utils/logger.h"
+
+#include <unistd.h>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
 
 namespace PX5 {
 
@@ -10,74 +21,93 @@ Emulator& Emulator::GetInstance() {
 }
 
 bool Emulator::Initialize(const std::string& baseDir) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_initialized) return true;
+    if (m_initialized.load()) return true;
 
-    PX5_LOGI(LogCategory::CORE, "PX5 PS5 ARM64 Emulator Core initializing...");
+    PX5_LOGI(LogCategory::CORE, "PX5 foundation core initializing (base=%s)",
+             baseDir.c_str());
 
-    // 1. Initialize Memory Subsystem
-    MemoryManager::GetInstance().Initialize(8192); // 8GB Virtual Address Space
+    if (!MemoryManager::GetInstance().Initialize()) {
+        PX5_LOGE(LogCategory::CORE, "Memory window reservation FAILED");
+        return false;
+    }
 
-    // 2. Initialize Kernel Syscall Table & Signal Handler
-    KernelSyscalls::GetInstance().Initialize();
-    RegisterSignalHandlers();
-
-    // 3. Initialize Virtual File System
     VirtualFileSystem::GetInstance().Initialize(baseDir);
-
-    // 4. Initialize the upstream FEXCore runtime.
-    if (!FexCoreIntegration::Initialize()) return false;
-
-    // 5. Initialize Vulkan Device & Audio
-    VulkanGpuDevice::GetInstance().Initialize();
+    VulkanGpuDevice::GetInstance().Initialize();   // honest; may fail w/ detail
     AudioEngine::GetInstance().Initialize();
 
-    m_initialized = true;
-    PX5_LOGI(LogCategory::CORE, "PX5 Emulator Core initialized successfully.");
+    m_baseDir = baseDir;
+    m_initialized.store(true);
+    PX5_LOGI(LogCategory::CORE, "Foundation core ready. FEXCore is initialized "
+                                "on-demand by the self-test / UI.");
     return true;
 }
 
 void Emulator::Shutdown() {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_initialized) return;
-
+    if (!m_initialized.exchange(false)) return;
     FexCoreIntegration::Shutdown();
     VulkanGpuDevice::GetInstance().Shutdown();
     MemoryManager::GetInstance().Shutdown();
-
-    m_running = false;
-    m_initialized = false;
-    PX5_LOGI(LogCategory::CORE, "PX5 Emulator Core shutdown complete.");
+    m_running.store(false);
+    PX5_LOGI(LogCategory::CORE, "Core shutdown complete");
 }
 
 bool Emulator::LoadExecutable(const std::string& path, bool isSelf) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_initialized) Initialize("/sdcard/PX5");
-
-    bool success = false;
-    if (isSelf) {
-        success = ElfLoader::LoadSelf(path, m_entryPoint);
-    } else {
-        success = ElfLoader::LoadElf(path, m_entryPoint);
+    std::lock_guard<std::mutex> lock(m_runMutex);
+    // Lazy memory init keeps legacy JNI callers working without UI flow.
+    if (!MemoryManager::GetInstance().Initialize()) return false;
+    if (m_baseDir.empty()) {
+        m_baseDir = "/data/local/tmp/px5_fallback";
+        VirtualFileSystem::GetInstance().Initialize(m_baseDir);
     }
 
-    if (success) {
-        m_loadedBinaryPath = path;
-        PX5_LOGI(LogCategory::CORE, "Loaded %s binary into memory: Entry point = 0x%llx", isSelf ? "SELF" : "ELF", (unsigned long long)m_entryPoint);
+    const bool ok = isSelf ? ElfLoader::LoadSelf(path, m_image)
+                           : ElfLoader::LoadElfFile(path, m_image);
+    PX5_LOGI(LogCategory::CORE, "%s load: %s",
+             isSelf ? "SELF" : "ELF", ok ? "OK" : m_image.error.c_str());
+    return ok;
+}
+
+FexCoreIntegration::ExecResult Emulator::ExecuteLoadedGuest() {
+    std::lock_guard<std::mutex> lock(m_runMutex);
+    FexCoreIntegration::ExecResult res;
+    if (m_image.segments.empty() || m_image.entryPoint == 0) {
+        res.error = "no image loaded";
+        return res;
     }
-    return success;
-}
 
-bool Emulator::ReadMemory(uint64_t addr, void* buffer, size_t size) {
-    return MemoryManager::GetInstance().ReadGuestMemory(addr, buffer, size);
-}
+    auto& mm = MemoryManager::GetInstance();
 
-bool Emulator::WriteMemory(uint64_t addr, const void* buffer, size_t size) {
-    return MemoryManager::GetInstance().WriteGuestMemory(addr, buffer, size);
+    // Guest stack INSIDE the canonical window (64 KiB below the image top
+    // region chosen by the loader); host bridge converts it.
+    constexpr uint64_t kStackGuestVa = 0x148000000ULL;   // inside window
+    const size_t pageSize = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    const uint64_t stackLo = kStackGuestVa - pageSize * 16;
+    mm.MapMemory(stackLo, pageSize * 16,
+                 MemoryFlags::PAGE_READ | MemoryFlags::PAGE_WRITE,
+                 "guest_stack");
+
+    void* ripHost = mm.GetHostPointer(m_image.entryPoint);
+    void* spHost  = mm.GetHostPointer(kStackGuestVa - 256);   // arg area headroom
+
+    if (!ripHost || !spHost) {
+        res.error = "host bridge failed for entry/stack";
+        return res;
+    }
+    // Linux _start expects argc=0 at [rsp]; anonymous reservation pages
+    // are already zeroed, so no explicit arg-write needed.
+
+    m_running.store(true);
+    res = FexCoreIntegration::ExecuteAtHostRip(reinterpret_cast<uint64_t>(ripHost),
+                                               reinterpret_cast<uint64_t>(spHost));
+    m_running.store(false);
+
+    // Release the stack region again for reproducibility across runs.
+    mm.UnmapMemory(stackLo, pageSize * 16);
+    return res;
 }
 
 uint64_t Emulator::MapMemory(uint64_t addr, size_t size, uint32_t flags) {
-    return MemoryManager::GetInstance().MapMemory(addr, size, flags, "JNI_Alloc");
+    return MemoryManager::GetInstance().MapMemory(addr, size, flags, "JNI");
 }
 
 bool Emulator::UnmapMemory(uint64_t addr, size_t size) {
@@ -85,9 +115,150 @@ bool Emulator::UnmapMemory(uint64_t addr, size_t size) {
 }
 
 std::string Emulator::GetStatusString() const {
-    if (!m_initialized) return "Uninitialized";
-    if (m_running) return "Running (FEXCore x86_64 -> ARM64)";
-    return "Ready (Bionic Native Core)";
+    if (!m_initialized.load()) return "Uninitialized";
+    if (m_running.load())      return "Running guest (FEXCore x86_64 -> ARM64)";
+    return "Ready (foundation core)";
+}
+
+// ---------------------------------------------------------------------------
+// SelfTestFoundation — the honest end-to-end proof pipeline.
+// ---------------------------------------------------------------------------
+void Emulator::EnsureMemoryWindow(std::vector<std::string>& report,
+                                  bool& ok, bool& fatal) {
+    (void)ok;
+    if (!MemoryManager::GetInstance().Initialize(256)) {
+        report.push_back("[FAIL] 1. Memory window reservation");
+        fatal = true;
+        return;
+    }
+    report.push_back(std::string("[PASS] 1. Memory window | ") +
+                     MemoryManager::GetInstance().GetWindowInfoString());
+}
+
+std::string Emulator::SelfTestFoundation() {
+    std::lock_guard<std::mutex> lock(m_runMutex);
+    std::vector<std::string> lines;
+    const char* verdict = "FAIL";
+
+    auto push = [&](const std::string& s){ lines.push_back(s);
+        PX5_LOGI(LogCategory::CORE, "%s", s.c_str()); };
+
+    bool ok = true, fatal = false;
+
+    // --- Step 1: memory -------------------------------------------------
+    EnsureMemoryWindow(lines, ok, fatal);
+    if (fatal) { goto done; }
+
+    // --- Step 2: Vulkan --------------------------------------------------
+    {
+        auto& gpu = VulkanGpuDevice::GetInstance();
+        const bool vok = gpu.Initialize();
+        lines.push_back(std::string(vok ? "[PASS] 2. Vulkan runtime | "
+                                        : "[FAIL] 2. Vulkan runtime | ") +
+                        gpu.GetSummaryString());
+        // Non-fatal: CI/emulators sometimes lack a real GPU driver.
+    }
+
+    // --- Step 3: FEXCore context ----------------------------------------
+    if (!FexCoreIntegration::Initialize()) {
+        lines.push_back("[FAIL] 3. FEXCore context (see logcat FEX tag)");
+        goto done;
+    }
+    lines.push_back("[PASS] 3. FEXCore context + REAL syscall bridge");
+
+    // --- Step 4: raw blob write/exit/hlt --------------------------------
+    {
+        constexpr uint64_t kRawVa = 0x140000000ULL;              // window anchor
+        constexpr uint64_t kRawStackTop = 0x148000000ULL;         // inside window
+        auto& mm = MemoryManager::GetInstance();
+        const size_t ps = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+
+        mm.MapMemory(kRawVa, sizeof(TEST_GUEST_RAW_CODE),
+                     MemoryFlags::PAGE_READ | MemoryFlags::PAGE_WRITE |
+                     MemoryFlags::PAGE_EXEC, "raw_test");
+        memcpy(mm.GetHostPointer(kRawVa), TEST_GUEST_RAW_CODE,
+               sizeof(TEST_GUEST_RAW_CODE));
+        mm.MapMemory(kRawStackTop - ps * 4, ps * 4,
+                     MemoryFlags::PAGE_READ | MemoryFlags::PAGE_WRITE,
+                     "raw_stack");
+
+        auto r = FexCoreIntegration::ExecuteAtHostRip(
+            reinterpret_cast<uint64_t>(mm.GetHostPointer(kRawVa)),
+            reinterpret_cast<uint64_t>(mm.GetHostPointer(kRawStackTop)));
+
+        const bool rawOk = r.started && r.output.find("PX5-OK!") !=
+                                                       std::string::npos &&
+                           r.exitCode == TEST_GUEST_EXPECTED_EXIT_CODE;
+        if (!rawOk) { ok = false; r.error = "raw run did not meet proof contract"; }
+        lines.push_back(std::string(rawOk ? "[PASS] 4. RAW x86-64 | write+exit42+halt "
+                                          : "[FAIL] 4. RAW x86-64 | ") +
+                        "| out=\"" + r.output.substr(0, 64) + "\"" +
+                        "| exitCode=" + std::to_string(r.exitCode) +
+                        "| " + (r.error.empty() ? "" : r.error));
+        mm.UnmapMemory(kRawVa, sizeof(TEST_GUEST_RAW_CODE));
+        mm.UnmapMemory(kRawStackTop - ps * 4, ps * 4);
+        if (!rawOk) goto done;
+    }
+
+    // --- Step 5: ELF file round-trip through real loader -----------------
+    {
+        auto& mm = MemoryManager::GetInstance();
+        const std::string elfPath = m_baseDir.empty()
+            ? "/data/local/tmp/px5_guest.elf" : m_baseDir + "/px5_guest.elf";
+
+        std::ofstream f(elfPath, std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(TEST_GUEST_ELF),
+                TEST_GUEST_ELF_SIZE);
+        const bool wroteFixture = f.good();
+        f.close();
+        if (!wroteFixture) {
+            lines.push_back("[FAIL] 5. ELF fixture write failed (" + elfPath + ")");
+            goto done;
+        }
+
+        LoadedElfImage img;
+        if (!ElfLoader::LoadElfFile(elfPath, img)) {
+            lines.push_back("[FAIL] 5. REAL loader: " + img.error);
+            goto done;
+        }
+        if (img.entryPoint != TEST_GUEST_LOAD_VADDR + 0x80 ||
+            img.segments.size() != 1) {
+            lines.push_back("[FAIL] 5. loader metadata mismatch");
+            goto done;
+        }
+
+        void* ripHost = mm.GetHostPointer(img.entryPoint);
+        constexpr uint64_t kElfStackTop = 0x148000000ULL;
+        const size_t ps = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+        mm.MapMemory(kElfStackTop - ps * 4, ps * 4,
+                     MemoryFlags::PAGE_READ | MemoryFlags::PAGE_WRITE,
+                     "elf_stack");
+        void* spHost = mm.GetHostPointer(kElfStackTop);
+
+        auto r = FexCoreIntegration::ExecuteAtHostRip(
+            reinterpret_cast<uint64_t>(ripHost),
+            reinterpret_cast<uint64_t>(spHost));
+
+        const bool elfOk =
+            r.started && r.exitCode == 42 &&
+            r.output.find(TEST_GUEST_EXPECTED_OUTPUT) != std::string::npos;
+
+        lines.push_back(std::string(elfOk ? "[PASS] 5. REAL ELF pipeline | parse->map->bridge->JIT->write+exit42 "
+                                          : "[FAIL] 5. REAL ELF pipeline |") +
+                        " out=\"" + r.output.substr(0, 48) + "\"" +
+                        " exit=" + std::to_string(r.exitCode));
+        if (!elfOk) goto done;
+    }
+
+    verdict = "PASS";
+done:
+    lines.push_back(FexCoreIntegration::GetSyscallStatsString());
+    lines.push_back(std::string("VERDICT: ") + verdict);
+
+    std::string report;
+    for (size_t i = 0; i < lines.size(); ++i)
+        report += (i ? "\n" : "") + lines[i];
+    return report;
 }
 
 } // namespace PX5
