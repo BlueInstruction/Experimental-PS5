@@ -19,14 +19,29 @@
 # ============================================================================
 set -euo pipefail
 
-PIN_TAG="FEX-2607"
-PIN_SHA="1cc4b93e7a71c883ec021b71359f136394dc1f3c"
+PIN_TAG="FEX-2608"
+PIN_SHA="e869aa644a16e4332cdc15c1ea0b4d13d482385d"
 UPSTREAM="https://github.com/FEX-Emu/FEX.git"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="${PX5_FEXCORE_ROOT:-$REPO_ROOT/../../deps/FEX}"
+PATCH_DIR="$REPO_ROOT/tools/patches"
+apply_overlay_patches() {
+    local TGT="$1" PATCH
+    for PATCH in "$PATCH_DIR"/fex-*.patch; do
+        [ -e "$PATCH" ] || return 0
+        echo "[fetch_fexcore] applying overlay: $(basename "$PATCH")"
+        git -C "$TGT" apply --check "$PATCH"
+        git -C "$TGT" apply "$PATCH"
+    done
+}
 
 if [ -f "$DEST/.fex-pin" ] && grep -qx "$PIN_SHA" "$DEST/.fex-pin" 2>/dev/null; then
+    # Trust marker only if the overlay patches are actually present.
+    if git -C "$DEST" diff --quiet -- CMakeLists.txt 2>/dev/null \
+       || [ -d "$DEST/.git" ]; then
+        apply_overlay_patches "$DEST" || true
+    fi
     echo "[fetch_fexcore] up to date: $DEST ($PIN_TAG @ ${PIN_SHA:0:12})"
     exit 0
 fi
@@ -45,6 +60,15 @@ case "$GOT" in
         exit 1
         ;;
 esac
+
+# Materialize upstream git submodules (fmt, xxhash, range-v3,
+# unordered_dense, ...). A flat --depth 1 clone does not populate them,
+# while FEX's CMakeLists unconditionally add_subdirectory() each one.
+git -C "$TMP" submodule update --init --quiet
+
+# Repo-owned deltas applied on top of the pristine pinned tree so the
+# engine builds for Android/Bionic without maintaining a fork branch.
+apply_overlay_patches "$TMP"
 
 rm -rf "$DEST"
 mkdir -p "$(dirname "$DEST")"
