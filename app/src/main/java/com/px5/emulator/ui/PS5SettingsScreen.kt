@@ -35,7 +35,7 @@ fun PS5SettingsScreen(
     var selectedCategory by remember { mutableStateOf(0) }
     var soundEffectsEnabled by remember { mutableStateOf(soundManager.isSoundEnabled) }
     var bgMusicEnabled by remember { mutableStateOf(soundManager.isBgMusicEnabled) }
-    var vulkanVsync by remember { mutableStateOf(true) }
+    var vulkanVsync by remember { mutableStateOf(com.px5.emulator.core.Px5Settings.vsyncEnabled.value) }
     var hapticsEnabled by remember { mutableStateOf(true) }
 
     Box(
@@ -345,19 +345,135 @@ fun PS5SettingsScreen(
                                         }
                                     }
                                 }
-                            }
-                            1 -> { // Graphics
+                                // -------------------------------------------------
+                                // GPU submission proof + libkernel HLE state
+                                // (Phase 2 additions, same honesty rules)
+                                // -------------------------------------------------
                                 item {
-                                    SettingsHeader("Graphics & Vulkan Driver Settings")
-                                    SettingsItemText("Renderer Engine", "Vulkan (runtime enumeration - see self-test)")
-                                    SettingsItemText("Custom Driver Injection", "Planned: Phase C via libadrenotools")
+                                    if (fexCoreWrapper != null) {
+                                        var gpuProof by remember { mutableStateOf<String?>(null) }
+                                        var kHle by remember { mutableStateOf<String?>(null) }
+                                        val scope = rememberCoroutineScope()
+
+                                        Spacer(modifier = Modifier.height(14.dp))
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text("GPU SUBMISSION PROOF",
+                                                 fontSize = 13.sp,
+                                                 fontWeight = FontWeight.Bold,
+                                                 color = Color(0xFF1FB6CD),
+                                                 fontFamily = TitilliumFontFamily)
+                                            Spacer(Modifier.width(8.dp))
+                                            Text("(logical device + clear + fence)",
+                                                 fontSize = 10.sp,
+                                                 color = PS5TextSecondary)
+                                        }
+                                        Button(
+                                            onClick = {
+                                                soundManager.playActivationSound()
+                                                scope.launch(Dispatchers.Default) {
+                                                    gpuProof = try {
+                                                        fexCoreWrapper!!.nativeRunGpuProof()
+                                                    } catch (e: Exception) {
+                                                        "FAIL | native: ${e.message}"
+                                                    }
+                                                    kHle = try {
+                                                        fexCoreWrapper!!.nativeGetKernelHleSummary()
+                                                    } catch (_: Exception) { null }
+                                                }
+                                            },
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = Color(0xFF3C4F63),
+                                                contentColor = Color.White),
+                                            shape = RoundedCornerShape(12.dp)
+                                        ) {
+                                            Text("Run GPU + Kernel HLE probe", fontSize = 12.sp)
+                                        }
+
+                                        gpuProof?.let { p ->
+                                            val okP = p.startsWith("PASS")
+                                            Text(
+                                                text = p,
+                                                fontSize = 11.sp,
+                                                color = if (okP) Color(0xFF69F0AE) else Color(0xFFFF8A65),
+                                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                            )
+                                        }
+                                        kHle?.let { k ->
+                                            Text(
+                                                text = k,
+                                                fontSize = 11.sp,
+                                                color = Color(0xFF7DD3FC),
+                                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            1 -> { // Graphics — REAL engine-coupled controls
+                                item {
+                                    val scale = com.px5.emulator.core.Px5Settings
+                                        .resScalePct.collectAsState()
+                                    SettingsHeader("Graphics — engine-coupled")
+
+                                    Text(
+                                        text = "Resolution Scale: ${scale.value}%  " +
+                                              "(swapchain extent clamp per driver)",
+                                        fontSize = 13.sp,
+                                        color = PS5TextPrimary,
+                                        fontFamily = TitilliumFontFamily
+                                    )
+                                    Slider(
+                                        value = scale.value.toFloat(),
+                                        onValueChange = { v ->
+                                            com.px5.emulator.core.Px5Settings.setResScalePct(v.toInt())
+                                        },
+                                        valueRange = 50f..200f,
+                                        steps = 9,
+                                        colors = SliderDefaults.colors(
+                                            thumbColor = PS5AccentBlue,
+                                            activeTrackColor = PS5AccentGlow
+                                        )
+                                    )
+
                                     SettingsToggleItem(
                                         title = "V-Sync / Frame Pacing",
-                                        subtitle = "Synchronize frame presentation to prevent tearing",
+                                        subtitle = if (vulkanVsync)
+                                            "FIFO present mode (tear-free)"
+                                        else
+                                            "MAILBOX / IMMEDIATE when available",
                                         checked = vulkanVsync,
-                                        onCheckedChange = { vulkanVsync = it }
+                                        onCheckedChange = { v ->
+                                            vulkanVsync = v
+                                            com.px5.emulator.core.Px5Settings.setVsync(v)
+                                        }
                                     )
-                                    SettingsItemText("Resolution Scale", "1080p (1.0x Native)")
+
+                                    var driverSummary by remember {
+                                        mutableStateOf("")
+                                    }
+                                    Button(
+                                        onClick = {
+                                            soundManager.playActivationSound()
+                                            driverSummary = fexCoreWrapper?.nativeGetDriverManagerSummary()
+                                                ?: "wrapper unavailable"
+                                        },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = PS5AccentBlue,
+                                            contentColor = Color.White
+                                        ),
+                                        shape = RoundedCornerShape(14.dp)
+                                    ) {
+                                        Text("Refresh driver state", fontSize = 12.sp)
+                                    }
+                                    if (driverSummary.isNotEmpty()) {
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                        Text(
+                                            text = driverSummary,
+                                            fontSize = 11.sp,
+                                            color = Color(0xFF1FB6CD),
+                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                        )
+                                    }
 
                                     Spacer(modifier = Modifier.height(12.dp))
 

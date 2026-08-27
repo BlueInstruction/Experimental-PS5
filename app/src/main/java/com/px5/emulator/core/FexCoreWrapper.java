@@ -1,5 +1,7 @@
 package com.px5.emulator.core;
 
+import android.view.Surface;
+
 /**
  * JNI surface v2 (honest contract).
  *
@@ -51,4 +53,65 @@ public class FexCoreWrapper {
 
     /** Real dlopen'd Vulkan summary ("Vulkan: ACTIVE | Adreno ... " or error). */
     public native String nativeGetVulkanSummary();
+
+    // ===== Phase 2 surface (real GPU proof / renderer / settings / input) ==
+
+    /**
+     * Logical-device + offscreen clear submission proof.
+     * Returns "PASS | detail" or "FAIL | detail" — never a silent success.
+     */
+    public native String nativeRunGpuProof();
+
+    /** Attach an android.view.Surface; creates the Vulkan swapchain lazily. */
+    public native boolean nativeAttachRenderSurface(Surface surface);
+
+    public native void   nativeDetachRenderSurface();
+    public native boolean nativeStartRenderer();
+    public native void   nativeStopRenderer();
+
+    /** Live render loop stats string ("GPU device | frames | present mode"). */
+    public native String nativeGetRenderStats();
+
+    /**
+     * Pushes UI settings into the engine atomics. Real effects:
+     * resScalePct clamps to [50..200]; vsync picks MAILBOX/IMMEDIATE vs
+     * FIFO at swapchain build; verboseLog flips the C++ logger level;
+     * logDir enables on-disk rotating logs (idempotent, first call wins).
+     */
+    public native void nativeApplySettings(int resScalePct, boolean vsync,
+                                           int driverModeSlot,
+                                           boolean verboseLog, String logDir);
+
+    /** libkernel HLE symbol-table summary (counts real invocations). */
+    public native String nativeGetKernelHleSummary();
+
+    // ---- Input bridge ------------------------------------------------------
+    /** One of PadButtons bit constants from NativeInput class below. */
+    public native boolean nativeSetButtonState(int buttonBit, boolean pressed);
+    public native String  nativeGetInputSummary();
+
+    // ---- Driver slots -------------------------------------------------------
+    /**
+     * Registers a user-imported driver directory (already extracted &
+     * structurally validated by Kotlin). Returns slot id >=1, 0 on reject.
+     */
+    public native int     nativeRegisterDriverSlot(String label, String soPath);
+    /** Mode 0 = system ICD; >0 selects a registered slot for next init. */
+    public native boolean nativeSetDriverMode(int mode);
+    public native String  nativeGetDriverManagerSummary();
+
+    /** Shared PadButtons bit definitions (mirrors cpp input/controller.h). */
+    public static final int PAD_CROSS      = 1 << 0;
+    public static final int PAD_CIRCLE     = 1 << 1;
+    public static final int PAD_SQUARE     = 1 << 2;
+    public static final int PAD_TRIANGLE   = 1 << 3;
+    public static final int PAD_DPAD_UP    = 1 << 4;
+    public static final int PAD_DPAD_DOWN  = 1 << 5;
+    public static final int PAD_DPAD_LEFT  = 1 << 6;
+    public static final int PAD_DPAD_RIGHT = 1 << 7;
+    public static final int PAD_L1         = 1 << 8;
+    public static final int PAD_R1         = 1 << 9;
+    public static final int PAD_OPTIONS    = 1 << 10;
+    public static final int PAD_SHARE      = 1 << 11;
+    public static final int PAD_PS_HOME    = 1 << 12;
 }

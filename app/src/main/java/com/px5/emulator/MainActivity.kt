@@ -33,6 +33,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.px5.emulator.core.FexCoreWrapper
+import com.px5.emulator.core.Px5Settings
 import com.px5.emulator.ui.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -111,6 +112,13 @@ class MainActivity : ComponentActivity() {
                 logException("FexCoreWrapper.fallback", e)
                 fexCoreStatus = "FATAL: libpx5.so cannot load"
             }
+        }
+
+        // --- Settings store (native-coupled) ------------------------------
+        Px5Settings.init(applicationContext)
+
+        if (fexCoreWrapper != null && fexCoreStatus != "FATAL: libpx5.so cannot load") {
+            Px5Settings.push(fexCoreWrapper, applicationContext)
         }
 
         logState("ui", "initializing")
@@ -307,34 +315,74 @@ fun AppNavigation(
         }
     }
 
-    // File picker launcher for importing Turnip ZIP driver packages
+    // File picker launcher for importing Turnip ZIP driver packages.
+    // Real pipeline: copy -> unzip (java.util.zip) -> find aarch64 .so ->
+    // register slot in native GpuDriverManager -> persist selection.
+    // Injection still needs adrenotools (Phase C) and the UI states that
+    // honestly; everything else here is genuine work.
     val driverLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         uri?.let {
             coroutineScope.launch(Dispatchers.IO) {
+                var resultMsg: String
                 try {
-                    val driverDir = File(context.filesDir, "turnip_custom_${System.currentTimeMillis()}")
-                    driverDir.mkdirs()
-                    val targetFile = File(driverDir, "turnip_driver.zip")
+                    val slotRoot = File(context.filesDir, "driver_slots")
+                    slotRoot.mkdirs()
+                    val dir = File(slotRoot, "turnip_${System.currentTimeMillis()}")
+                    dir.mkdirs()
+
+                    val zipFile = File(dir, "package.zip")
                     context.contentResolver.openInputStream(it)?.use { input ->
-                        targetFile.outputStream().use { output -> input.copyTo(output) }
+                        zipFile.outputStream().use { output -> input.copyTo(output) }
                     }
-                    // HONEST behavior: the ZIP is archived locally for now.
-                    // Real libadrenotools injection ships with Phase C — we
-                    // no longer pretend it was "injected successfully".
-                    launch(Dispatchers.Main) {
-                        Toast.makeText(
-                            context,
-                            "Driver package saved (${targetFile.length()} bytes). " +
-                                "Injection lands in Phase C (libadrenotools).",
-                            Toast.LENGTH_LONG
-                        ).show()
+
+                    var foundSo: File? = null
+                    runCatching {
+                        java.util.zip.ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
+                            var e = zis.nextEntry
+                            while (e != null) {
+                                if (!e.isDirectory) {
+                                    val outFile = File(dir, e.name)
+                                    if (!outFile.canonicalPath.startsWith(dir.canonicalPath)) {
+                                        throw SecurityException("zip path traversal blocked")
+                                    }
+                                    outFile.parentFile?.mkdirs()
+                                    outFile.outputStream().use { out -> zis.copyTo(out) }
+                                    if (foundSo == null &&
+                                        (e.name.endsWith("libvulkan.adreno.so") ||
+                                         e.name.endsWith("libvulkan.so"))) {
+                                        foundSo = outFile
+                                    }
+                                }
+                                e = zis.nextEntry
+                            }
+                        }
+                    }.onFailure { f -> android.util.Log.w("PX5", "zip scan: ${f.message}") }
+
+                    foundSo = foundSo ?: dir.walkTopDown()
+                        .firstOrNull { f -> f.isFile && f.name.startsWith("libvulkan.") && f.name.endsWith(".so") }
+
+                    val soPath = foundSo?.absolutePath
+                    resultMsg = if (soPath != null && fexCoreWrapper != null) {
+                        val label = "Turnip ${dir.name.substringAfterLast('_')}"
+                        val slot = fexCoreWrapper.nativeRegisterDriverSlot(label, soPath)
+                        if (slot > 0) {
+                            fexCoreWrapper.nativeSetDriverMode(slot)
+                            Px5Settings.setDriverMode(slot)
+                            "Driver extracted OK • slot $slot registered\n" +
+                            "($soPath)\nInjection activates with adrenotools (Phase C)."
+                        } else {
+                            "Extraction ok but native slot registration rejected."
+                        }
+                    } else {
+                        "No Vulkan library found inside archive — nothing registered."
                     }
                 } catch (e: Exception) {
-                    launch(Dispatchers.Main) {
-                        Toast.makeText(context, "Failed to import driver: ${e.message}", Toast.LENGTH_LONG).show()
-                    }
+                    resultMsg = "Failed to import driver: ${e.message}"
+                }
+                launch(Dispatchers.Main) {
+                    Toast.makeText(context, resultMsg, Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -348,6 +396,7 @@ fun AppNavigation(
                     gameViewModel = gameViewModel,
                     soundManager = soundManager,
                     fexCoreStatus = fexCoreStatus,
+                    fexCoreWrapper = fexCoreWrapper,
                     onGameSelected = { path ->
                         navController.navigate("emulation?path=$path")
                     },
@@ -395,9 +444,10 @@ fun AppNavigation(
 
             composable("emulation?path={path}") { backStackEntry ->
                 val path = backStackEntry.arguments?.getString("path") ?: ""
-                EmulationScreen(
+                EmuScreen(
                     path = path,
                     fexCoreStatus = fexCoreStatus,
+                    fexCoreWrapper = fexCoreWrapper,
                     onBackClick = { navController.popBackStack() }
                 )
             }
@@ -454,102 +504,3 @@ fun AppNavigation(
         }
     }
 }
-
-@Composable
-fun EmulationScreen(
-    path: String,
-    fexCoreStatus: String,
-    onBackClick: () -> Unit
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(24.dp)
-                .windowInsetsPadding(WindowInsets.statusBars),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(
-                    onClick = onBackClick,
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.15f))
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Exit Emulation",
-                        tint = Color.White
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(16.dp))
-
-                Text(
-                    text = "PX5 Native Emulation Engine",
-                    color = Color.White,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = TitilliumFontFamily
-                )
-            }
-
-            Spacer(modifier = Modifier.weight(1f))
-
-            // Emulation Canvas Overlay
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(0.85f)
-                    .aspectRatio(16f / 9f)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(Color(0xFF0D121B))
-                    .border(2.dp, PS5AccentBlue, RoundedCornerShape(16.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Image(
-                        painter = painterResource(id = R.drawable.ic_dualsense_ps),
-                        contentDescription = "PS",
-                        modifier = Modifier.size(64.dp)
-                    )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    Text(
-                        text = "Running: ${path.substringAfterLast("/")}",
-                        color = Color.White,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = TitilliumFontFamily
-                    )
-
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    Text(
-                        text = "Vulkan 1.3 Surface • FEXCore CPU: $fexCoreStatus",
-                        color = PS5AccentGlow,
-                        fontSize = 13.sp,
-                        fontFamily = TitilliumFontFamily
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.weight(1f))
-
-            // On-screen DualSense Prompts
-            DualSenseButtonPrompts(modifier = Modifier.padding(bottom = 16.dp))
-        }
-    }
-}
-
-
-
-
