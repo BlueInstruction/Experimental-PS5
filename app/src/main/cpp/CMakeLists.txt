@@ -41,6 +41,30 @@ add_compile_options(
 set(ENABLE_LTO OFF CACHE BOOL "" FORCE)
 add_link_options($<$<COMPILE_LANGUAGE:CXX>:-fuse-ld=lld>)
 
+# ----------------------------------------------------------------------------
+# ABI routing
+# ----------------------------------------------------------------------------
+# arm64-v8a : full guest engine (FEXCore JIT x86-64 -> ARM64).
+# x86_64    : UI smoke-test library only (see stub/ui_smoke_stub.cpp). The CI
+#             Emulator Smoke Test boots an x86_64 AVD; an arm-only APK cannot
+#             even be installed there. We ship a symbol-compatible stub so
+#             Compose surfaces can be validated end-to-end without faking a
+#             CPU backend.
+if(ANDROID_ABI STREQUAL "x86_64")
+    add_library(
+            px5
+            SHARED
+            stub/ui_smoke_stub.cpp
+            gpu/vulkan_device.cpp
+            utils/logger.cpp)
+    find_library(log-lib log)
+    find_library(android-lib android)
+    target_include_directories(px5 PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+    target_compile_features(px5 PRIVATE cxx_std_20)
+    target_link_libraries(px5 ${log-lib} ${android-lib})
+    return()
+endif()
+
 # FEXCore is built from the vendored upstream source. Android-specific options
 # are set before entering FEX's CMake project so no glibc allocator is enabled.
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
@@ -99,10 +123,12 @@ add_library(
         core/emulator.cpp
         memory/memory.cpp
         kernel/syscalls.cpp
+        kernel/sce_kernel_hle.cpp
         kernel/signals.cpp
         loader/elf_loader.cpp
         loader/self_loader.cpp
         gpu/vulkan_device.cpp
+        gpu/driver_manager.cpp
         audio/audio.cpp
         audio_input_native.cpp
         input/controller.cpp
