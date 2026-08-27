@@ -320,13 +320,16 @@ fun AppNavigation(
                     context.contentResolver.openInputStream(it)?.use { input ->
                         targetFile.outputStream().use { output -> input.copyTo(output) }
                     }
-                    fexCoreWrapper.nativeInitAdrenotools(
-                        driverDir.absolutePath,
-                        "Custom Imported Turnip Driver",
-                        "libadrenotools.so"
-                    )
+                    // HONEST behavior: the ZIP is archived locally for now.
+                    // Real libadrenotools injection ships with Phase C — we
+                    // no longer pretend it was "injected successfully".
                     launch(Dispatchers.Main) {
-                        Toast.makeText(context, "Custom Turnip Driver package injected successfully!", Toast.LENGTH_LONG).show()
+                        Toast.makeText(
+                            context,
+                            "Driver package saved (${targetFile.length()} bytes). " +
+                                "Injection lands in Phase C (libadrenotools).",
+                            Toast.LENGTH_LONG
+                        ).show()
                     }
                 } catch (e: Exception) {
                     launch(Dispatchers.Main) {

@@ -3,26 +3,52 @@
 
 #include <cstdint>
 #include <string>
-#include <unordered_map>
 
 namespace PX5 {
 
-using SyscallHandler = uint64_t(*)(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6);
-
-class KernelSyscalls {
-public:
-    static KernelSyscalls& GetInstance();
-
-    void Initialize();
-    uint64_t DispatchSyscall(uint32_t syscallNum, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6);
-
-private:
-    KernelSyscalls() = default;
-    ~KernelSyscalls() = default;
-
-    std::unordered_map<uint32_t, SyscallHandler> m_syscallTable;
+// ---------------------------------------------------------------------------
+// GuestSyscalls — the REAL Linux x86-64 syscall bridge used by FEXCore.
+//
+// Honesty contract (replaces two earlier fake layers):
+//   * The old KernelSyscalls table mixed FreeBSD/PS5 numbers with Linux
+//     host calls and returned 0 for everything.
+//   * FEXCore previously ran with a NullSyscallHandler returning -1:
+//     ANY guest syscall killed execution. Foundation guests could never
+//     do real work (no write, no exit_group).
+//   * This bridge implements a small but genuinely functional set of
+//     Linux x86-64 syscalls, converts guest pointers through the memory
+//     window, captures guest stdout, records exit codes, and logs every
+//     UNIMPLEMENTED number loudly instead of lying about success.
+// ---------------------------------------------------------------------------
+struct GuestSyscallStats {
+    uint64_t totalCalls      = 0;
+    uint64_t handledCalls    = 0;
+    uint64_t unhandledCalls  = 0;
+    uint64_t bytesWritten    = 0;
 };
 
+class GuestSyscalls {
+public:
+    // Dispatch one syscall from guest context.
+    // Args follow x86-64 Linux convention: rdi, rsi, rdx, r10, r8, r9.
+    static uint64_t Dispatch(uint32_t nr,
+                             uint64_t a0 = 0, uint64_t a1 = 0,
+                             uint64_t a2 = 0, uint64_t a3 = 0,
+                             uint64_t a4 = 0, uint64_t a5 = 0);
+
+    // Captured guest stdout (fd 1) / stderr (fd 2) — surfaced to UI evidence.
+    static std::string TakeOutput();
+    static void        AppendOutput(const std::string& s);
+
+    // Exit state recorded by exit/exit_group before the guest halts.
+    static bool        HasExitCode();
+    static uint64_t    ExitCode();
+    static void        ResetRun();          // clear output + exit state
+
+    static const GuestSyscallStats& Stats();
+};
+
+// Kept for continuity: ARM64 fault interceptors used by signals.cpp decls.
 void RegisterSignalHandlers();
 
 } // namespace PX5

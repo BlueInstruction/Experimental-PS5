@@ -66,9 +66,11 @@ fun PS5TurnipDriverSheet(
     }
 
     var selectedDriverId by remember { mutableStateOf("turnip_24_1") }
-    var bcnEnabled by remember { mutableStateOf(true) }
-    var pipelineCacheEnabled by remember { mutableStateOf(true) }
-    var kgslHookEnabled by remember { mutableStateOf(true) }
+    // Honest state: driver loading lands with libadrenotools in Phase C.
+    var vulkanSummary by remember { mutableStateOf("Vulkan runtime: unknown") }
+    LaunchedEffect(Unit) {
+        try { vulkanSummary = fexCoreWrapper.nativeGetVulkanSummary() } catch (_: Exception) {}
+    }
 
     Box(
         modifier = Modifier
@@ -161,11 +163,8 @@ fun PS5TurnipDriverSheet(
                             .clickable {
                                 soundManager.playNavigationSound()
                                 selectedDriverId = profile.id
-                                fexCoreWrapper.nativeInitAdrenotools(
-                                    "/sdcard/PX5/Drivers/${profile.id}",
-                                    profile.name,
-                                    "libadrenotools.so"
-                                )
+                                // NOTE: selection is visual only. Real
+                                // libadrenotools injection ships in Phase C.
                             }
                             .padding(14.dp)
                     ) {
@@ -209,7 +208,24 @@ fun PS5TurnipDriverSheet(
 
             Spacer(modifier = Modifier.height(18.dp))
 
-            // Turnip Driver Toggles
+            Text(
+                text = vulkanSummary,
+                fontSize = 11.sp,
+                color = PS5AccentGlow,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+            Text(
+                text = "Driver injection arrives with Phase C (libadrenotools). " +
+                       "Selections below are informational only.",
+                fontSize = 11.sp,
+                color = Color(0xFFFFB74D),
+                fontFamily = TitilliumFontFamily
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Turnip Driver Toggles (read-only until Phase C)
             Text(
                 text = "libadrenotools & Turnip Engine Settings:",
                 fontSize = 14.sp,
@@ -247,11 +263,9 @@ fun PS5TurnipDriverSheet(
                             )
                         }
                         Switch(
-                            checked = bcnEnabled,
-                            onCheckedChange = {
-                                bcnEnabled = it
-                                fexCoreWrapper.nativeSetTurnipBcnTextureSupport(it)
-                            },
+                            checked = false,
+                            enabled = false,
+                            onCheckedChange = { },
                             colors = SwitchDefaults.colors(
                                 checkedThumbColor = Color.White,
                                 checkedTrackColor = PS5AccentBlue
@@ -264,7 +278,7 @@ fun PS5TurnipDriverSheet(
                         modifier = Modifier.padding(vertical = 8.dp)
                     )
 
-                    // Toggle 2: Vulkan Pipeline Cache
+                    // Toggle 2: Vulkan Pipeline Cache (Phase C)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
@@ -285,11 +299,9 @@ fun PS5TurnipDriverSheet(
                             )
                         }
                         Switch(
-                            checked = pipelineCacheEnabled,
-                            onCheckedChange = {
-                                pipelineCacheEnabled = it
-                                fexCoreWrapper.nativeSetTurnipPipelineCaching(it)
-                            },
+                            checked = false,
+                            enabled = false,
+                            onCheckedChange = { },
                             colors = SwitchDefaults.colors(
                                 checkedThumbColor = Color.White,
                                 checkedTrackColor = PS5AccentBlue
@@ -302,7 +314,7 @@ fun PS5TurnipDriverSheet(
                         modifier = Modifier.padding(vertical = 8.dp)
                     )
 
-                    // Toggle 3: KGSL Hook
+                    // Toggle 3: KGSL Hook (Phase C)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
@@ -323,8 +335,9 @@ fun PS5TurnipDriverSheet(
                             )
                         }
                         Switch(
-                            checked = kgslHookEnabled,
-                            onCheckedChange = { kgslHookEnabled = it },
+                            checked = false,
+                            enabled = false,
+                            onCheckedChange = { },
                             colors = SwitchDefaults.colors(
                                 checkedThumbColor = Color.White,
                                 checkedTrackColor = PS5AccentBlue

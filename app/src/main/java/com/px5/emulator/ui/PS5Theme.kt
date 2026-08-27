@@ -12,17 +12,25 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import com.px5.emulator.R
 
-// PS5 Aesthetic Colors
-val PS5DarkBackground = Color(0xFF0B0E14)
-val PS5DarkSurface = Color(0xFF161C26)
-val PS5CardBackground = Color(0xFF1E2638)
-val PS5AccentBlue = Color(0xFF0070D1)
-val PS5AccentGlow = Color(0xFF2E8CFF)
-val PS5TextPrimary = Color(0xFFFFFFFF)
-val PS5TextSecondary = Color(0xFFA0AABF)
-val PS5TrophyBronze = Color(0xFFCD7F32)
-val PS5TrophySilver = Color(0xFFC0C0C0)
-val PS5TrophyGold = Color(0xFFFFD700)
+// ---------------------------------------------------------------------------
+// PX5 palette — Steam Deck OS dark base with PS5 accent blend.
+//
+// Direction (user brief): "اقرب لتصميم Steam Deck OS مع دمج خفيف مع PS5".
+//   * Deep navy/slate backgrounds  <- Steam Deck
+//   * Elevated warm card surfaces  <- Steam Deck library cards
+//   * PS5 blue stays primary; a teal secondary accents evidence/DIAG panels
+// ---------------------------------------------------------------------------
+val PS5DarkBackground = Color(0xFF0E1218)   // Deck navy (was 0xFF0B0E14)
+val PS5DarkSurface    = Color(0xFF17202B)   // elevated slate surface
+val PS5CardBackground = Color(0xFF1F2A38)   // card layer
+val PS5AccentBlue     = Color(0xFF0070D1)   // PS5 identity blue (kept)
+val PS5AccentGlow     = Color(0xFF2E8CFF)
+val DeckTeal          = Color(0xFF1FB6CD)   // secondary action / diagnostics
+val PS5TextPrimary    = Color(0xFFF2F5FA)
+val PS5TextSecondary  = Color(0xFF9BA7BC)
+val PS5TrophyBronze   = Color(0xFFCD7F32)
+val PS5TrophySilver   = Color(0xFFC0C0C0)
+val PS5TrophyGold     = Color(0xFFFFD700)
 
 // Font families — uses the exact same definitions as the working PX5 repo.
 // The res/font/titillium_web.xml font-family XML (synced from PX5 in this
@@ -87,7 +95,7 @@ val PS5Typography = Typography(
 fun PX5Theme(content: @Composable () -> Unit) {
     val colorScheme = darkColorScheme(
         primary = PS5AccentBlue,
-        secondary = PS5AccentGlow,
+        secondary = DeckTeal,          // Steam-Deck-flavored secondary accent
         background = PS5DarkBackground,
         surface = PS5DarkSurface,
         onBackground = PS5TextPrimary,
