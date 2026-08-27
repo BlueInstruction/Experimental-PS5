@@ -2,6 +2,7 @@
 
 #include "memory/memory.h"
 #include "kernel/syscalls.h"
+#include "kernel/sce_kernel_hle.h"
 #include "gpu/vulkan_device.h"
 #include "filesystem/vfs.h"
 #include "audio/audio.h"
@@ -248,6 +249,107 @@ std::string Emulator::SelfTestFoundation() {
                         " out=\"" + r.output.substr(0, 48) + "\"" +
                         " exit=" + std::to_string(r.exitCode));
         if (!elfOk) goto done;
+    }
+
+    // --- Step 6: ADVANCED ELF v2 — real mmap + memory round-trip --------
+    {
+        auto& mm = MemoryManager::GetInstance();
+        const std::string elfPath = m_baseDir.empty()
+            ? "/data/local/tmp/px5_guest_v2.elf" : m_baseDir + "/px5_guest_v2.elf";
+
+        std::ofstream f(elfPath, std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(TEST_GUEST_ELF_V2),
+                TEST_GUEST_ELF_V2_SIZE);
+        f.close();
+        if (!f.good()) { lines.push_back("[FAIL] 6. ELFv2 fixture write"); goto done; }
+
+        LoadedElfImage img;
+        if (!ElfLoader::LoadElfFile(elfPath, img)) {
+            lines.push_back("[FAIL] 6. ELFv2 load: " + img.error);
+            goto done;
+        }
+
+        const size_t ps = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+        constexpr uint64_t kStackTop2 = 0x148000000ULL;
+        mm.MapMemory(kStackTop2 - ps * 4, ps * 4,
+                     MemoryFlags::PAGE_READ | MemoryFlags::PAGE_WRITE,
+                     "elf2_stack");
+
+        GuestSyscalls::ResetRun();
+        void* ripHost = mm.GetHostPointer(img.entryPoint);
+        void* spHost  = mm.GetHostPointer(kStackTop2 - 256);
+        if (!ripHost || !spHost) {
+            lines.push_back("[FAIL] 6. ELFv2 host bridge missing");
+            goto done;
+        }
+        auto r = FexCoreIntegration::ExecuteAtHostRip(
+            reinterpret_cast<uint64_t>(ripHost),
+            reinterpret_cast<uint64_t>(spHost));
+
+        mm.UnmapMemory(kStackTop2 - ps * 4, ps * 4);
+
+        const bool v2ok =
+            r.started && r.exitCode == TEST_GUEST_V2_EXIT_OK &&
+            r.output.find(TEST_GUEST_V2_EXPECTED_OUTPUT) != std::string::npos;
+        lines.push_back(std::string(
+                v2ok ? "[PASS] 6. ELFv2 REAL mmap round-trip | "
+                     : "[FAIL] 6. ELFv2 mmap | ") +
+                "out=\"" + r.output.substr(0, 40) + "\"" +
+                " exit=" + std::to_string(r.exitCode));
+        if (!v2ok) goto done;
+    }
+
+    // --- Step 7: GPU logical device + offscreen submission proof --------
+    {
+        std::string gpuDetail;
+        const bool gok = VulkanGpuDevice::GetInstance()
+                             .RunOffscreenClearProof(gpuDetail);
+        lines.push_back(std::string(gok ? "[PASS] 7. GPU submission | "
+                                        : "[FAIL] 7. GPU submission | ") +
+                        gpuDetail);
+        if (!gok) goto done;   // honest: real device must submit commands
+    }
+
+    // --- Step 8: libkernel HLE DirectMemory exercise ---------------------
+    {
+        auto& kHle = SceKernelHle::KernelHle::GetInstance();
+        kHle.RegisterAll();
+
+        uint64_t phys = 0;
+        uint64_t rc = kHle.AllocateDirectMemory(0, 0, 4096, 4096,
+                                                reinterpret_cast<uint64_t>(&phys));
+        if (rc != SceKernelHle::SCE_OK) {
+            lines.push_back("[FAIL] 8. libkernel DM allocate rc=" + std::to_string(rc));
+            goto done;
+        }
+        const uint64_t mapped =
+            kHle.MapDirectMemory(0, 4096, 0x3 /*RW*/, 0, phys, 0);
+        bool hleOk = false;
+        auto& mm2 = MemoryManager::GetInstance();
+        if (mapped && mm2.IsValidAddress(mapped, 4)) {
+            constexpr uint32_t kMagic = 0x50583544u;   // "PX5D"
+            uint32_t probe = 0;
+            hleOk = mm2.WriteGuestMemory(mapped, &kMagic, 4) &&
+                    mm2.ReadGuestMemory(mapped, &probe, 4) &&
+                    probe == kMagic;
+            kHle.UnmapDirectMemory(mapped, 4096);
+        }
+        // Exercise the named-symbol path through the captured console too.
+        GuestSyscalls::ResetRun();
+        char tag[] = "SCE-HLE\n";
+        const uint64_t wrc = kHle.InvokeByName("sceKernelWrite",
+                                               /*fd*/1,
+                                               reinterpret_cast<uint64_t>(tag),
+                                               sizeof(tag));
+        hleOk = hleOk && wrc == sizeof(tag) &&
+                GuestSyscalls::TakeOutput().find("SCE-HLE") != std::string::npos;
+
+        lines.push_back(std::string(hleOk ? "[PASS] 8. libkernel HLE | "
+                                          : "[FAIL] 8. libkernel HLE | ") +
+                        kHle.GetSummaryString() +
+                        " phys=0x" + ([&]{ char b[24];
+                            snprintf(b,sizeof(b),"%llx",(unsigned long long)phys); return std::string(b);}()));
+        if (!hleOk) goto done;
     }
 
     verdict = "PASS";

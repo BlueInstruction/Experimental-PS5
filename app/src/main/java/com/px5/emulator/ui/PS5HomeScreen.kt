@@ -36,6 +36,7 @@ import com.px5.emulator.GameEntity
 import com.px5.emulator.GameViewModel
 import com.px5.emulator.R
 import com.px5.emulator.SoundManager
+import com.px5.emulator.core.FexCoreWrapper
 
 @Composable
 fun PS5HomeScreen(
@@ -43,6 +44,7 @@ fun PS5HomeScreen(
     gameViewModel: GameViewModel,
     soundManager: SoundManager,
     fexCoreStatus: String,
+    fexCoreWrapper: FexCoreWrapper? = null,
     onGameSelected: (String) -> Unit,
     onOpenStore: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -202,7 +204,15 @@ fun PS5HomeScreen(
                 }
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Steam-Deck-style live telemetry strip (real JNI polling)
+            EngineStatusStrip(
+                fexCoreWrapper = fexCoreWrapper,
+                cpuStatus = fexCoreStatus
+            )
+
+            Spacer(modifier = Modifier.height(14.dp))
 
             // Game Tile Carousel (Top Row)
             LazyRow(

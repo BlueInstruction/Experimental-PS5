@@ -17,13 +17,14 @@ android {
         versionCode = 1
         versionName = "1.0"
 
-        // FEXCore is a 64-bit-only codebase (it rejects 32-bit pointer sizes
-        // with "Unsupported pointer size 4" at CMake configure time). PS5's CPU
-        // is x86-64 and FEXCore translates x86-64 -> ARM64, so we only need the
-        // arm64-v8a ABI. Building armeabi-v7a / x86 / x86_64 is pointless and
-        // would fail in FEX's platform check.
+        // Two-ABI strategy:
+        //   arm64-v8a = the REAL guest engine (FEXCore JIT x86-64 -> ARM64).
+        //   x86_64    = symbol-compatible UI-smoke library (stub/ui_smoke_stub.cpp)
+        //               so the CI Emulator Smoke Test can install + launch this
+        //               very APK on an x86_64 AVD (arm-only APKs fail with
+        //               INSTALL_FAILED_NO_MATCHING_ABIS there).
         ndk {
-            abiFilters += "arm64-v8a"
+            abiFilters += listOf("arm64-v8a", "x86_64")
         }
 
         // Only build the px5 shared library target. By default AGP asks ninja
