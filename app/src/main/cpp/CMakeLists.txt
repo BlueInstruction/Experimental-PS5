@@ -65,8 +65,17 @@ if(ANDROID_ABI STREQUAL "x86_64")
     return()
 endif()
 
-# FEXCore is built from the vendored upstream source. Android-specific options
-# are set before entering FEX's CMake project so no glibc allocator is enabled.
+# ----------------------------------------------------------------------------
+# Upstream engine sources (FEXCore)
+# ----------------------------------------------------------------------------
+# The upstream FEX-Emu/FEX tree is deliberately NOT vendored inside this repo.
+# It is materialized by tools/fetch_fexcore.sh at a pinned release commit and
+# located through PX5_FEXCORE_ROOT (set by Gradle from environment or by hand):
+#
+#     cmake -DPX5_FEXCORE_ROOT=/path/to/fex ...
+#
+# Android-specific options below are applied BEFORE entering FEX's CMake
+# project so no glibc allocator is enabled.
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(BUILD_FEXCONFIG OFF CACHE BOOL "" FORCE)
 set(BUILD_THUNKS OFF CACHE BOOL "" FORCE)
@@ -77,9 +86,20 @@ set(ENABLE_VIXL_DISASSEMBLER OFF CACHE BOOL "" FORCE)
 set(ENABLE_VIXL_SIMULATOR OFF CACHE BOOL "" FORCE)
 set(ENABLE_ZYDIS OFF CACHE BOOL "" FORCE)
 set(ENABLE_FEXCORE_PROFILER OFF CACHE BOOL "" FORCE)
-list(APPEND CMAKE_MODULE_PATH
-        ${CMAKE_CURRENT_LIST_DIR}/../../../../third_party/fex/Data/CMake)
-add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../../../../third_party/fex
+if(NOT DEFINED PX5_FEXCORE_ROOT)
+    message(FATAL_ERROR
+        "PX5_FEXCORE_ROOT is not set. Upstream FEX sources are not vendored "
+        "inside this repository — run tools/fetch_fexcore.sh first (see "
+        "AGENT.md), or pass -DPX5_FEXCORE_ROOT=<path-to-FEX-tree>.")
+endif()
+if(NOT EXISTS "${PX5_FEXCORE_ROOT}/CMakeLists.txt")
+    message(FATAL_ERROR
+        "PX5_FEXCORE_ROOT (${PX5_FEXCORE_ROOT}) does not contain a FEX "
+        "source tree. Run tools/fetch_fexcore.sh first.")
+endif()
+
+list(APPEND CMAKE_MODULE_PATH ${PX5_FEXCORE_ROOT}/Data/CMake)
+add_subdirectory(${PX5_FEXCORE_ROOT}
                  ${CMAKE_CURRENT_BINARY_DIR}/fex)
 
 # ----------------------------------------------------------------------------
@@ -139,7 +159,7 @@ add_library(
 
 target_include_directories(px5 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
-        ${CMAKE_CURRENT_LIST_DIR}/../../../../third_party/fex/FEXCore/include
+        ${PX5_FEXCORE_ROOT}/FEXCore/include
         ${CMAKE_CURRENT_BINARY_DIR}/fex/FEXCore/include
         ${CMAKE_CURRENT_BINARY_DIR}/fex/generated)
 

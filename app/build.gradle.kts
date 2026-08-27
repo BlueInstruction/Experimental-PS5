@@ -38,6 +38,12 @@ android {
         externalNativeBuild {
             cmake {
                 targets += "px5"
+
+                // Upstream FEX sources live OUTSIDE the repository; they are
+                // materialized by tools/fetch_fexcore.sh at a pinned commit.
+                val fexRoot = System.getenv("PX5_FEXCORE_ROOT")
+                    ?: File(rootProject.projectDir, "../../deps/FEX").absolutePath
+                arguments += "-DPX5_FEXCORE_ROOT=$fexRoot"
             }
         }
     }

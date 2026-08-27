@@ -11,6 +11,8 @@ jobs:
   build-apk:
     name: Build Debug APK
     runs-on: ubuntu-latest
+    env:
+      PX5_FEXCORE_ROOT: ${{ github.workspace }}/../deps/FEX
 
     steps:
     - name: Checkout
@@ -31,6 +33,9 @@ jobs:
       uses: gradle/actions/setup-gradle@v3
       with:
         gradle-version: '8.9'
+
+    - name: Fetch pinned FEXCore sources
+      run: ./tools/fetch_fexcore.sh
 
     - name: Clean build cache and intermediates
       run: |
