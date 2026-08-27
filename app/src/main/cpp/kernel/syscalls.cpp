@@ -7,6 +7,7 @@
 #include <ctime>
 #include <algorithm>
 #include <mutex>
+#include <sys/mman.h>
 #include <sys/uio.h>
 #include <unistd.h>
 #include <android/log.h>
@@ -147,10 +148,11 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
     }
 
     case NR_mprotect:
-    case NR_madvise:                         // advisory no-op in window model
+    case NR_madvise: {                       // advisory no-op in window model
         std::lock_guard<std::mutex> lk(g_stateMutex);
         g_stats.handledCalls++;
         return 0;
+    }
 
     case NR_exit:
     case NR_exit_group: {
@@ -183,7 +185,7 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
                          char version[65]; char machine[65]; char domain[65]; };
         void* p = nullptr;
         if (!GuestToHost(a0, sizeof(FakeUts), &p)) return kErrInval;
-        FakeUts* u = static_cast<FakeUts*>(p);
+        auto* u = static_cast<FakeUts*>(p);
         memset(u, 0, sizeof(FakeUts));
         strcpy(u->sysname, "Linux");
         strcpy(u->release, "6.6.0-px5-foundation");
@@ -205,7 +207,7 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
         return 0;
     }
 
-    case NR_futex:                            // single-threaded guests only
+    case NR_futex:                           // single-threaded guests only
     case NR_sched_getaffinity: {
         std::lock_guard<std::mutex> lk(g_stateMutex);
         g_stats.handledCalls++;

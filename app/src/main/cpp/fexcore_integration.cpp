@@ -14,6 +14,9 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <sys/auxv.h>
+#include <sys/sysconf.h>
+#include <unistd.h>
 
 #include "kernel/syscalls.h"
 #include "memory/memory.h"
@@ -52,18 +55,16 @@ public:
     }
 
     FEXCore::HLE::ExecutableRangeInfo QueryGuestExecutableRange(
-            FEXCore::Core::InternalThreadState*, uint64_t Address) override {
-        const auto& mm = MemoryManagerBridge();
-        (void)Address;
-        return {mm.guestBase, mm.windowSize, false};
+            FEXCore::Core::InternalThreadState*, uint64_t) override {
+        // Mirror MemoryManager's canonical foundation window (documented
+        // contract in memory.h). Writable=false keeps recompile pressure low;
+        // foundation guests never self-modify.
+        return {kCanonicalGuestBase, kCanonicalWindowSize, false};
     }
 
 private:
-    struct { uint64_t guestBase; uint64_t windowSize; } MemoryManagerBridge() const {
-        // Avoid pulling memory.h internals here: the constants mirror
-        // MemoryManager's canonical foundation window (documented contract).
-        return {0x140000000ULL, 0x10000000ULL};
-    }
+    static constexpr uint64_t kCanonicalGuestBase = 0x140000000ULL;
+    static constexpr uint64_t kCanonicalWindowSize = 0x10000000ULL;
 };
 
 RealSyscallHandler g_syscallHandler;
