@@ -131,27 +131,19 @@ jobs:
             # Also try the external files dir path directly
             adb pull /sdcard/Android/data/com.px5.emulator/files/logs device_crash_logs/external 2>/dev/null || true
 
+            # NOTE: android-emulator-runner executes this script line-by-line
+            # through sh -c, so every construct must be a self-contained ONE
+            # physical line (multi-line if blocks fail with exit code 2).
             echo "=== Checking for crash signatures in logcat ==="
-            if grep -q "FATAL EXCEPTION" android_system_logs.txt; then
-              echo "!!! FATAL EXCEPTION DETECTED in logcat !!!"
-              grep -A 50 "FATAL EXCEPTION" android_system_logs.txt | head -80
-              echo "!!! MARKING BUILD AS FAILED — app crashes on launch !!!"
-              exit 1
-            fi
+            if grep -q "FATAL EXCEPTION" android_system_logs.txt; then echo "!!! FATAL EXCEPTION DETECTED !!!"; grep -A 50 "FATAL EXCEPTION" android_system_logs.txt | head -80; exit 1; fi
 
-            if grep -q "Could not load font" android_system_logs.txt; then
-              echo "!!! Font loading error detected !!!"
-              grep -A 30 "Could not load font" android_system_logs.txt | head -50
-              exit 1
-            fi
+            if grep -q "Could not load font" android_system_logs.txt; then echo "!!! Font loading error detected !!!"; grep -A 30 "Could not load font" android_system_logs.txt | head -50; exit 1; fi
 
-            if grep -q "Resources\\\$NotFoundException" android_system_logs.txt; then
-              echo "!!! Resource not found error detected !!!"
-              grep -A 30 "Resources\\\$NotFoundException" android_system_logs.txt | head -50
-              exit 1
-            fi
+            if grep -q "Resources\\\$NotFoundException" android_system_logs.txt; then echo "!!! Resource not found error detected !!!"; grep -A 30 "Resources\\\$NotFoundException" android_system_logs.txt | head -50; exit 1; fi
 
-            echo "=== No crash signatures detected — app launched successfully ==="
+            adb shell pidof com.px5.emulator || { echo "APP PROCESS NOT FOUND after 15 s - treating as crash"; exit 1; }
+
+            echo "=== No crash signatures detected - app launched successfully ==="
 
       - name: Upload logcat as artifact
         if: always()
