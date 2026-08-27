@@ -20,6 +20,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.px5.emulator.SoundManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 @Composable
 fun PS5SettingsScreen(
@@ -221,7 +223,7 @@ fun PS5SettingsScreen(
                                                 soundManager.playActivationSound()
                                                 try {
                                                     val pass = wrapper.nativeRunCpuConformanceTest()
-                                                    testResult = if (pass) "PASSED: RAX=0x52 (MOV RAX, 0x42 + ADD RAX, 0x10) via ARM64 JIT" else "FAILED"
+                                                    testResult = if (pass) "PASSED: RAX=42 (mov eax,40; add eax,2; hlt) via ARM64 JIT" else "FAILED — see logcat (FEX tag)"
                                                 } catch (e: Exception) {
                                                     testResult = "Error running test: ${e.message}"
                                                 }
@@ -249,12 +251,106 @@ fun PS5SettingsScreen(
                                         }
                                     }
                                 }
+
+                                // -------------------------------------------------
+                                // REAL Foundation Evidence (Steam-Deck-style card)
+                                // Runs the 5-step honest proof pipeline.
+                                // -------------------------------------------------
+                                item {
+                                    if (fexCoreWrapper != null) {
+                                        var running by remember { mutableStateOf(false) }
+                                        var report by remember { mutableStateOf<String?>(null) }
+                                        val scope = rememberCoroutineScope()
+
+                                        Spacer(modifier = Modifier.height(18.dp))
+
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                text = "FOUNDATION SELF-TEST",
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFF1FB6CD), // Steam Deck teal accent
+                                                fontFamily = TitilliumFontFamily
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = "(no fakes - evidence only)",
+                                                fontSize = 10.sp,
+                                                color = PS5TextSecondary,
+                                                fontFamily = TitilliumFontFamily
+                                            )
+                                        }
+
+                                        Spacer(modifier = Modifier.height(8.dp))
+
+                                        Button(
+                                            enabled = !running,
+                                            onClick = {
+                                                soundManager.playActivationSound()
+                                                running = true
+                                                scope.launch(Dispatchers.Default) {
+                                                    val rep = try {
+                                                        fexCoreWrapper!!.nativeRunFoundationSelfTest()
+                                                    } catch (e: Exception) {
+                                                        "[FAIL] native: ${e.message}"
+                                                    }
+                                                    report = rep
+                                                    running = false
+                                                }
+                                            },
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = Color(0xFF1FB6CD),
+                                                contentColor = Color.Black
+                                            ),
+                                            shape = RoundedCornerShape(14.dp)
+                                        ) {
+                                            Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("Run Foundation Proof Pipeline", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                        }
+
+                                        report?.let { rep ->
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            val passed = rep.contains("VERDICT: PASS")
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(12.dp))
+                                                    .background(Color.Black.copy(alpha = 0.55f))
+                                                    .border(
+                                                        1.dp,
+                                                        if (passed) Color(0xFF69F0AE).copy(alpha = 0.6f)
+                                                        else Color(0xFFFF5252).copy(alpha = 0.6f),
+                                                        RoundedCornerShape(12.dp)
+                                                    )
+                                                    .padding(12.dp)
+                                            ) {
+                                                Column {
+                                                    rep.split('\n').forEach { line ->
+                                                        val color = when {
+                                                            line.startsWith("[PASS]") || line.startsWith("VERDICT: PASS") -> Color(0xFF69F0AE)
+                                                            line.startsWith("[FAIL]") || line.startsWith("VERDICT: FAIL") -> Color(0xFFFF5252)
+                                                            else -> PS5TextSecondary
+                                                        }
+                                                        Text(
+                                                            text = line,
+                                                            fontSize = 11.sp,
+                                                            color = color,
+                                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                                            modifier = Modifier.padding(vertical = 1.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             1 -> { // Graphics
                                 item {
                                     SettingsHeader("Graphics & Vulkan Driver Settings")
-                                    SettingsItemText("Renderer Engine", "Vulkan 1.3 Native Only (Rule 5)")
-                                    SettingsItemText("Active Driver Hook", "Turnip Mesa v24.1.0-devel (libadrenotools)")
+                                    SettingsItemText("Renderer Engine", "Vulkan (runtime enumeration - see self-test)")
+                                    SettingsItemText("Custom Driver Injection", "Planned: Phase C via libadrenotools")
                                     SettingsToggleItem(
                                         title = "V-Sync / Frame Pacing",
                                         subtitle = "Synchronize frame presentation to prevent tearing",
