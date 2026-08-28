@@ -56,6 +56,8 @@ if(ANDROID_ABI STREQUAL "x86_64")
             SHARED
             stub/ui_smoke_stub.cpp
             gpu/vulkan_device.cpp
+            gpu/driver_manager.cpp
+            utils/crash_handler.cpp
             utils/logger.cpp)
     find_library(log-lib log)
     find_library(android-lib android)
