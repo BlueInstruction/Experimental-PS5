@@ -14,6 +14,7 @@
 #include "core/emulator.h"
 #include "fexcore_integration.h"
 #include "gpu/vulkan_device.h"
+#include "core/settings.h"
 #include "utils/logger.h"
 
 namespace fs = std::filesystem;
@@ -287,7 +288,6 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeGetVulkanSummary(JNIEnv* env,
 #include "kernel/sce_kernel_hle.h"
 #include "gpu/driver_manager.h"
 #include "utils/crash_handler.h"
-#include "core/settings.h"
 
 #include <android/native_window_jni.h>
 
