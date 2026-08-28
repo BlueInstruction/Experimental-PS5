@@ -180,6 +180,18 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGpuProof(
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeSetButtonState(
         JNIEnv*, jobject, jint, jboolean) { return JNI_FALSE; }
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeSetLeftStick(
+        JNIEnv*, jobject, jfloat, jfloat) { return JNI_FALSE; }
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeSetRightStick(
+        JNIEnv*, jobject, jfloat, jfloat) { return JNI_FALSE; }
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeSetTriggers(
+        JNIEnv*, jobject, jfloat, jfloat) { return JNI_FALSE; }
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeSetTouchpad(
+        JNIEnv*, jobject, jboolean) { return JNI_FALSE; }
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeGetInputSummary(
         JNIEnv* env, jobject) {

@@ -41,7 +41,7 @@ fun PS5SearchScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(PS5DarkBackground)
+            .background(px5Colors().background)
     ) {
         Column(
             modifier = Modifier
@@ -59,12 +59,12 @@ fun PS5SearchScreen(
                     modifier = Modifier
                         .size(44.dp)
                         .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.08f))
+                        .background(px5Colors().control)
                 ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                         contentDescription = "Back",
-                        tint = PS5TextPrimary
+                        tint = px5Colors().text
                     )
                 }
 
@@ -76,28 +76,28 @@ fun PS5SearchScreen(
                     placeholder = {
                         Text(
                             text = "Search your games...",
-                            color = PS5TextSecondary,
+                            color = px5Colors().textSecondary,
                             fontFamily = TitilliumFontFamily
                         )
                     },
                     leadingIcon = {
-                        Icon(imageVector = Icons.Default.Search, contentDescription = "Search", tint = PS5TextPrimary)
+                        Icon(imageVector = Icons.Default.Search, contentDescription = "Search", tint = px5Colors().text)
                     },
                     trailingIcon = if (searchQuery.isNotEmpty()) {
                         {
                             IconButton(onClick = { searchQuery = "" }) {
-                                Icon(imageVector = Icons.Default.Close, contentDescription = "Clear", tint = PS5TextPrimary)
+                                Icon(imageVector = Icons.Default.Close, contentDescription = "Clear", tint = px5Colors().text)
                             }
                         }
                     } else null,
                     singleLine = true,
                     colors = TextFieldDefaults.colors(
-                        focusedContainerColor = Color.White.copy(alpha = 0.12f),
-                        unfocusedContainerColor = Color.White.copy(alpha = 0.08f),
+                        focusedContainerColor = px5Colors().controlStrong,
+                        unfocusedContainerColor = px5Colors().control,
                         focusedIndicatorColor = Color.Transparent,
                         unfocusedIndicatorColor = Color.Transparent,
-                        focusedTextColor = PS5TextPrimary,
-                        unfocusedTextColor = PS5TextPrimary
+                        focusedTextColor = px5Colors().text,
+                        unfocusedTextColor = px5Colors().text
                     ),
                     shape = RoundedCornerShape(24.dp),
                     modifier = Modifier.weight(1f)
@@ -110,7 +110,7 @@ fun PS5SearchScreen(
                 text = "Results (${filteredGames.size})",
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold,
-                color = PS5TextPrimary,
+                color = px5Colors().text,
                 fontFamily = TitilliumFontFamily
             )
 
@@ -123,7 +123,7 @@ fun PS5SearchScreen(
                 ) {
                     Text(
                         text = "No matching games found.",
-                        color = PS5TextSecondary,
+                        color = px5Colors().textSecondary,
                         fontSize = 16.sp,
                         fontFamily = TitilliumFontFamily
                     )
@@ -151,7 +151,7 @@ private fun SearchResultCard(
     onClick: () -> Unit
 ) {
     Card(
-        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.06f)),
+        colors = CardDefaults.cardColors(containerColor = px5Colors().card),
         shape = RoundedCornerShape(16.dp),
         modifier = Modifier
             .fillMaxWidth()
@@ -181,7 +181,7 @@ private fun SearchResultCard(
                 } else {
                     Text(
                         text = game.name.take(2).uppercase(),
-                        color = PS5TextPrimary,
+                        color = px5Colors().text,
                         fontWeight = FontWeight.Bold,
                         fontSize = 20.sp,
                         fontFamily = TitilliumFontFamily
@@ -196,7 +196,7 @@ private fun SearchResultCard(
                     text = game.name,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold,
-                    color = PS5TextPrimary,
+                    color = px5Colors().text,
                     fontFamily = TitilliumFontFamily
                 )
                 Spacer(modifier = Modifier.height(2.dp))
@@ -207,14 +207,14 @@ private fun SearchResultCard(
                         append(" • ").append(formatBytes(game.sizeBytes))
                     },
                     fontSize = 12.sp,
-                    color = PS5TextSecondary,
+                    color = px5Colors().textSecondary,
                     fontFamily = TitilliumFontFamily
                 )
             }
 
             Button(
                 onClick = onClick,
-                colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black),
+                colors = ButtonDefaults.buttonColors(containerColor = px5Colors().text, contentColor = px5Colors().background),
                 shape = RoundedCornerShape(20.dp),
                 contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp)
             ) {

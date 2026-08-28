@@ -69,8 +69,8 @@ fun PS5TurnipDriverSheet(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
-            .background(Color(0xFF141A24))
-            .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
+            .background(px5Colors().sheet)
+            .border(1.dp, px5Colors().hairline, RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
             .padding(24.dp)
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
@@ -82,7 +82,7 @@ fun PS5TurnipDriverSheet(
                 Icon(
                     imageVector = Icons.Default.Memory,
                     contentDescription = null,
-                    tint = PS5AccentGlow,
+                    tint = px5Colors().accentGlow,
                     modifier = Modifier.size(26.dp)
                 )
                 Spacer(modifier = Modifier.width(10.dp))
@@ -91,13 +91,13 @@ fun PS5TurnipDriverSheet(
                         text = "GPU Driver Manager",
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Bold,
-                        color = PS5TextPrimary,
+                        color = px5Colors().text,
                         fontFamily = TitilliumFontFamily
                     )
                     Text(
                         text = "System Adreno ICD + imported Turnip drivers (libadrenotools)",
                         fontSize = 12.sp,
-                        color = PS5TextSecondary,
+                        color = px5Colors().textSecondary,
                         fontFamily = TitilliumFontFamily
                     )
                 }
@@ -106,12 +106,12 @@ fun PS5TurnipDriverSheet(
                     modifier = Modifier
                         .size(36.dp)
                         .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.1f))
+                        .background(px5Colors().control)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "Close",
-                        tint = PS5TextPrimary,
+                        tint = px5Colors().text,
                         modifier = Modifier.size(18.dp)
                     )
                 }
@@ -198,9 +198,9 @@ fun PS5TurnipDriverSheet(
             if (slots.isEmpty()) {
                 Text(
                     text = "No imported drivers yet. Import a Turnip/Mesa driver package " +
-                            "(a zip containing libvulkan_adreno.so) to add one.",
+                            "(vulkan.turnip.so, libvulkan.so, libvulkan_adreno.so — arm64-v8a).",
                     fontSize = 12.sp,
-                    color = PS5TextSecondary,
+                    color = px5Colors().textSecondary,
                     fontFamily = TitilliumFontFamily,
                     modifier = Modifier.padding(vertical = 8.dp)
                 )
@@ -250,11 +250,11 @@ private fun DriverRow(
             .clip(RoundedCornerShape(12.dp))
             .background(
                 if (selected) PS5AccentBlue.copy(alpha = 0.28f)
-                else Color.White.copy(alpha = 0.05f)
+                else px5Colors().card
             )
             .border(
                 width = if (selected) 1.5.dp else 1.dp,
-                color = if (selected) PS5AccentGlow else Color.White.copy(alpha = 0.12f),
+                color = if (selected) px5Colors().accentGlow else px5Colors().controlStrong,
                 shape = RoundedCornerShape(12.dp)
             )
             .clickable(enabled = enabled, onClick = onSelect)
@@ -264,7 +264,7 @@ private fun DriverRow(
             Icon(
                 imageVector = Icons.Default.Check,
                 contentDescription = "Active",
-                tint = PS5AccentGlow,
+                tint = px5Colors().accentGlow,
                 modifier = Modifier.size(20.dp)
             )
             Spacer(Modifier.width(10.dp))
@@ -274,13 +274,13 @@ private fun DriverRow(
                 text = title,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
-                color = PS5TextPrimary,
+                color = px5Colors().text,
                 fontFamily = TitilliumFontFamily
             )
             Text(
                 text = subtitle,
                 fontSize = 11.sp,
-                color = PS5TextSecondary,
+                color = px5Colors().textSecondary,
                 fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                 maxLines = 2
             )
@@ -290,7 +290,7 @@ private fun DriverRow(
                 Icon(
                     imageVector = Icons.Default.Delete,
                     contentDescription = "Remove driver",
-                    tint = PS5TextSecondary,
+                    tint = px5Colors().textSecondary,
                     modifier = Modifier.size(18.dp)
                 )
             }
@@ -311,7 +311,7 @@ private fun MonoSummary(text: String) {
         Text(
             text = text,
             fontSize = 11.sp,
-            color = Color(0xFF7DD3FC),
+            color = px5Colors().infoMono,
             fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
         )
     }

@@ -55,6 +55,7 @@ fun PS5SettingsScreen(
     onImportFolderClick: () -> Unit = {},
     onScanGamesClick: () -> Unit = {},
     onOpenTurnipManagerClick: () -> Unit = {},
+    onOpenLogsClick: () -> Unit = {},
     onBackClick: () -> Unit
 ) {
     var selectedCategory by remember { mutableStateOf(0) }
@@ -71,7 +72,7 @@ fun PS5SettingsScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(PS5DarkBackground)
+            .background(px5Colors().background)
     ) {
         Column(
             modifier = Modifier
@@ -92,12 +93,12 @@ fun PS5SettingsScreen(
                     modifier = Modifier
                         .size(44.dp)
                         .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.1f))
+                        .background(px5Colors().control)
                 ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                         contentDescription = "Back",
-                        tint = PS5TextPrimary
+                        tint = px5Colors().text
                     )
                 }
                 Spacer(modifier = Modifier.width(16.dp))
@@ -105,7 +106,7 @@ fun PS5SettingsScreen(
                     text = "Settings",
                     fontSize = 26.sp,
                     fontWeight = FontWeight.Bold,
-                    color = PS5TextPrimary,
+                    color = px5Colors().text,
                     fontFamily = TitilliumFontFamily
                 )
             }
@@ -148,7 +149,8 @@ fun PS5SettingsScreen(
                             onImportFileClick = onImportFileClick,
                             onImportFolderClick = onImportFolderClick,
                             onScanGamesClick = onScanGamesClick,
-                            onOpenTurnipManagerClick = onOpenTurnipManagerClick
+                            onOpenTurnipManagerClick = onOpenTurnipManagerClick,
+                            onOpenLogsClick = onOpenLogsClick
                         )
                     }
                 } else {
@@ -181,7 +183,8 @@ fun PS5SettingsScreen(
                             onImportFileClick = onImportFileClick,
                             onImportFolderClick = onImportFolderClick,
                             onScanGamesClick = onScanGamesClick,
-                            onOpenTurnipManagerClick = onOpenTurnipManagerClick
+                            onOpenTurnipManagerClick = onOpenTurnipManagerClick,
+                            onOpenLogsClick = onOpenLogsClick
                         )
                     }
                 }
@@ -199,14 +202,15 @@ private fun SettingsPanel(
     onImportFileClick: () -> Unit,
     onImportFolderClick: () -> Unit,
     onScanGamesClick: () -> Unit,
-    onOpenTurnipManagerClick: () -> Unit
+    onOpenTurnipManagerClick: () -> Unit,
+    onOpenLogsClick: () -> Unit
 ) {
     Card(
-        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.04f)),
+        colors = CardDefaults.cardColors(containerColor = px5Colors().card),
         shape = RoundedCornerShape(18.dp),
         modifier = Modifier
             .fillMaxSize()
-            .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(18.dp))
+            .border(1.dp, px5Colors().hairline, RoundedCornerShape(18.dp))
     ) {
         LazyColumn(
             modifier = Modifier
@@ -216,11 +220,11 @@ private fun SettingsPanel(
         ) {
             when (category) {
                 0 -> systemSection(fexCoreStatus, fexCoreWrapper, soundManager)
-                1 -> graphicsSection(fexCoreWrapper, soundManager, onOpenTurnipManagerClick)
+                1 -> graphicsSection()
                 2 -> audioSection(soundManager)
                 3 -> storageSection(onImportFileClick, onImportFolderClick, onScanGamesClick)
-                4 -> driversSection(onOpenTurnipManagerClick)
-                5 -> diagnosticsSection(soundManager)
+                4 -> driversSection(fexCoreWrapper, onOpenTurnipManagerClick)
+                5 -> diagnosticsSection(soundManager, onOpenLogsClick)
             }
         }
     }
@@ -237,6 +241,31 @@ private fun LazyListScope.systemSection(
 ) {
     item {
         SettingsHeader("System")
+
+        // ---- Appearance (theme + shell orientation) ------------------------
+        SettingsSubHeader("Appearance")
+        val themeMode by Px5Settings.themeMode.collectAsState()
+        SettingsSegmented(
+            label = "Theme",
+            options = listOf("Dark", "Light", "System"),
+            selectedIndex = themeMode,
+            onSelect = { i ->
+                Px5Settings.setThemeMode(i)
+                soundManager.playNavigationSound()
+            }
+        )
+        val orientationMode by Px5Settings.orientationMode.collectAsState()
+        SettingsSegmented(
+            label = "Screen orientation",
+            options = listOf("System", "Landscape", "Portrait"),
+            selectedIndex = orientationMode,
+            onSelect = { i ->
+                Px5Settings.setOrientationMode(i)
+                soundManager.playNavigationSound()
+            }
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
         val appInfo = androidx.compose.ui.platform.LocalContext.current
             .packageManager.getPackageInfo(
                 androidx.compose.ui.platform.LocalContext.current.packageName, 0
@@ -290,7 +319,7 @@ private fun LazyListScope.systemSection(
                 Text(
                     text = res,
                     fontSize = 12.sp,
-                    color = if (res.startsWith("PASSED")) Color(0xFF69F0AE) else Color(0xFFFF5252),
+                    color = if (res.startsWith("PASSED")) px5Colors().success else px5Colors().danger,
                     fontWeight = FontWeight.Bold,
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                     modifier = Modifier.padding(top = 6.dp)
@@ -321,7 +350,7 @@ private fun LazyListScope.systemSection(
                     }
                 },
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = DeckTeal, contentColor = Color.Black
+                    containerColor = px5Colors().teal, contentColor = Color.Black
                 ),
                 shape = RoundedCornerShape(12.dp)
             ) {
@@ -339,14 +368,14 @@ private fun LazyListScope.systemSection(
 }
 
 // ---------------------------------------------------------------------------
-// 1 — Graphics: engine-coupled controls (real effects)
+// 1 — Graphics: engine-coupled controls (real effects).
+//
+// Driver management deliberately lives ONLY in the "GPU Drivers" tab —
+// the previous build duplicated the manager entry here and in the driver
+// tab, which read as two different controls fighting over one setting.
 // ---------------------------------------------------------------------------
 
-private fun LazyListScope.graphicsSection(
-    fexCoreWrapper: FexCoreWrapper?,
-    soundManager: SoundManager,
-    onOpenTurnipManagerClick: () -> Unit
-) {
+private fun LazyListScope.graphicsSection() {
     item {
         val scale = Px5Settings.resScalePct.collectAsState()
         val vsync = Px5Settings.vsyncEnabled.collectAsState()
@@ -356,12 +385,12 @@ private fun LazyListScope.graphicsSection(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text("Resolution scale", fontSize = 14.sp, color = PS5TextPrimary, fontFamily = TitilliumFontFamily, fontWeight = FontWeight.SemiBold)
-            Text("${scale.value}%", fontSize = 14.sp, color = PS5AccentGlow, fontFamily = TitilliumFontFamily, fontWeight = FontWeight.Bold)
+            Text("Resolution scale", fontSize = 14.sp, color = px5Colors().text, fontFamily = TitilliumFontFamily, fontWeight = FontWeight.SemiBold)
+            Text("${scale.value}%", fontSize = 14.sp, color = px5Colors().accentGlow, fontFamily = TitilliumFontFamily, fontWeight = FontWeight.Bold)
         }
         Text(
             "Swapchain extent clamp per driver",
-            fontSize = 12.sp, color = PS5TextSecondary, fontFamily = TitilliumFontFamily
+            fontSize = 12.sp, color = px5Colors().textSecondary, fontFamily = TitilliumFontFamily
         )
         Slider(
             value = scale.value.toFloat(),
@@ -369,7 +398,7 @@ private fun LazyListScope.graphicsSection(
             valueRange = 50f..200f,
             steps = 9,
             colors = SliderDefaults.colors(
-                thumbColor = PS5AccentBlue, activeTrackColor = PS5AccentGlow
+                thumbColor = PS5AccentBlue, activeTrackColor = px5Colors().accentGlow
             )
         )
         Spacer(modifier = Modifier.height(8.dp))
@@ -380,42 +409,11 @@ private fun LazyListScope.graphicsSection(
             checked = vsync.value,
             onCheckedChange = { v -> Px5Settings.setVsync(v) }
         )
-    }
-    item {
-        var driverSummary by remember { mutableStateOf("") }
-        Button(
-            onClick = {
-                soundManager.playActivationSound()
-                driverSummary = fexCoreWrapper?.nativeGetDriverManagerSummary()
-                    ?: "engine library unavailable"
-            },
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color.White.copy(alpha = 0.10f), contentColor = Color.White
-            ),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-            Spacer(Modifier.width(6.dp))
-            Text("Refresh driver state", fontSize = 12.sp)
-        }
-        if (driverSummary.isNotEmpty()) MonoReportBox(driverSummary)
-    }
-    item {
-        Button(
-            onClick = {
-                soundManager.playActivationSound()
-                onOpenTurnipManagerClick()
-            },
-            colors = ButtonDefaults.buttonColors(
-                containerColor = PS5AccentBlue, contentColor = Color.White
-            ),
-            shape = RoundedCornerShape(14.dp),
-            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp)
-        ) {
-            Icon(Icons.Default.Memory, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Text("Manage GPU drivers (Turnip)", fontWeight = FontWeight.Bold, fontFamily = TitilliumFontFamily)
-        }
+        Text(
+            text = "GPU driver selection and import live in the GPU Drivers tab.",
+            fontSize = 12.sp, color = px5Colors().textSecondary, fontFamily = TitilliumFontFamily,
+            modifier = Modifier.padding(top = 6.dp)
+        )
     }
 }
 
@@ -448,7 +446,7 @@ private fun LazyListScope.audioSection(soundManager: SoundManager) {
         )
         Text(
             text = "In-game audio output lands with the HLE audio path (Phase C).",
-            fontSize = 12.sp, color = PS5TextSecondary, fontFamily = TitilliumFontFamily
+            fontSize = 12.sp, color = px5Colors().textSecondary, fontFamily = TitilliumFontFamily
         )
     }
 }
@@ -503,7 +501,7 @@ private fun LazyListScope.storageSection(
         Spacer(Modifier.height(8.dp))
         Button(
             onClick = onImportFolderClick,
-            colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.10f), contentColor = Color.White),
+            colors = ButtonDefaults.buttonColors(containerColor = px5Colors().control, contentColor = px5Colors().text),
             shape = RoundedCornerShape(12.dp)
         ) {
             Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -513,7 +511,7 @@ private fun LazyListScope.storageSection(
         Spacer(Modifier.height(8.dp))
         Button(
             onClick = onScanGamesClick,
-            colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.10f), contentColor = Color.White),
+            colors = ButtonDefaults.buttonColors(containerColor = px5Colors().control, contentColor = px5Colors().text),
             shape = RoundedCornerShape(12.dp)
         ) {
             Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -523,7 +521,7 @@ private fun LazyListScope.storageSection(
         Text(
             text = "The scan looks for eboot.bin dump folders and .pkg/.iso files in Download, " +
                     "PX5/Games and other readable locations. Nothing is modified or moved.",
-            fontSize = 12.sp, color = PS5TextSecondary, fontFamily = TitilliumFontFamily,
+            fontSize = 12.sp, color = px5Colors().textSecondary, fontFamily = TitilliumFontFamily,
             modifier = Modifier.padding(top = 8.dp)
         )
     }
@@ -533,7 +531,10 @@ private fun LazyListScope.storageSection(
 // 4 — GPU Drivers
 // ---------------------------------------------------------------------------
 
-private fun LazyListScope.driversSection(onOpenTurnipManagerClick: () -> Unit) {
+private fun LazyListScope.driversSection(
+    fexCoreWrapper: FexCoreWrapper?,
+    onOpenTurnipManagerClick: () -> Unit
+) {
     item {
         SettingsHeader("GPU drivers")
         SettingsItemText(
@@ -552,18 +553,66 @@ private fun LazyListScope.driversSection(onOpenTurnipManagerClick: () -> Unit) {
             Text("Open driver manager", fontWeight = FontWeight.Bold, fontFamily = TitilliumFontFamily)
         }
     }
+    item {
+        // The single "refresh driver state" control (was duplicated in the
+        // Graphics tab). Reports the engine's own summary, including the
+        // driverVerified= mapping proof.
+        var driverSummary by remember { mutableStateOf("") }
+        Button(
+            onClick = {
+                driverSummary = fexCoreWrapper?.nativeGetDriverManagerSummary()
+                    ?: "engine library unavailable"
+            },
+            colors = ButtonDefaults.buttonColors(
+                containerColor = px5Colors().control, contentColor = px5Colors().text
+            ),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("Refresh driver state", fontSize = 12.sp)
+        }
+        if (driverSummary.isNotEmpty()) MonoReportBox(driverSummary)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // 5 — Diagnostics: real crash logs (kept from the honest foundation)
 // ---------------------------------------------------------------------------
 
-private fun LazyListScope.diagnosticsSection(soundManager: SoundManager) {
+private fun LazyListScope.diagnosticsSection(
+    soundManager: SoundManager,
+    onOpenLogsClick: () -> Unit
+) {
     item {
         val context = androidx.compose.ui.platform.LocalContext.current
         var logText by remember { mutableStateOf(com.px5.emulator.PX5Application.getCrashLogs(context)) }
+        val verbose = Px5Settings.verboseLogging.collectAsState()
 
         SettingsHeader("Diagnostics")
+
+        // Live viewer over the three REAL sinks: app diagnostic log,
+        // native rotating engine log (px5_main.log), crash dumps.
+        Button(
+            onClick = {
+                soundManager.playNavigationSound()
+                onOpenLogsClick()
+            },
+            colors = ButtonDefaults.buttonColors(containerColor = PS5AccentBlue, contentColor = Color.White),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Icon(Icons.Default.Article, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("Open live log viewer", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        SettingsToggleItem(
+            title = "Verbose engine logging",
+            subtitle = "Higher detail in px5_main.log (log level)",
+            checked = verbose.value,
+            onCheckedChange = { v -> Px5Settings.setVerbose(v) }
+        )
+
         SettingsItemText(
             "Log location",
             (context.getExternalFilesDir(null)?.resolve("logs")?.absolutePath
@@ -571,7 +620,7 @@ private fun LazyListScope.diagnosticsSection(soundManager: SoundManager) {
         )
         Text(
             text = "Captured crashes and uncaught exceptions:",
-            fontSize = 12.sp, color = PS5TextSecondary, fontFamily = TitilliumFontFamily
+            fontSize = 12.sp, color = px5Colors().textSecondary, fontFamily = TitilliumFontFamily
         )
         Spacer(modifier = Modifier.height(8.dp))
         Box(
@@ -580,7 +629,7 @@ private fun LazyListScope.diagnosticsSection(soundManager: SoundManager) {
                 .height(220.dp)
                 .clip(RoundedCornerShape(12.dp))
                 .background(Color.Black.copy(alpha = 0.6f))
-                .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
+                .border(1.dp, px5Colors().hairline, RoundedCornerShape(12.dp))
                 .padding(12.dp)
         ) {
             LazyColumn(modifier = Modifier.fillMaxSize()) {
@@ -588,7 +637,7 @@ private fun LazyListScope.diagnosticsSection(soundManager: SoundManager) {
                     Text(
                         text = logText.ifBlank { "(no crash logs recorded)" },
                         fontSize = 11.sp,
-                        color = Color(0xFFFF8A80),
+                        color = px5Colors().danger,
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                     )
                 }
@@ -613,11 +662,11 @@ private fun LazyListScope.diagnosticsSection(soundManager: SoundManager) {
                     logText = com.px5.emulator.PX5Application.getCrashLogs(context)
                     soundManager.playActivationSound()
                 },
-                border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.3f))
+                border = androidx.compose.foundation.BorderStroke(1.dp, px5Colors().hairline)
             ) {
-                Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.White)
+                Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp), tint = px5Colors().text)
                 Spacer(Modifier.width(6.dp))
-                Text("Clear", fontSize = 12.sp, color = Color.White)
+                Text("Clear", fontSize = 12.sp, color = px5Colors().text)
             }
         }
     }
@@ -641,7 +690,7 @@ private fun SettingsCategoryTab(
             .background(if (isSelected) PS5AccentBlue.copy(alpha = 0.3f) else Color.Transparent)
             .border(
                 width = if (isSelected) 1.5.dp else 0.dp,
-                color = if (isSelected) PS5AccentGlow else Color.Transparent,
+                color = if (isSelected) px5Colors().accentGlow else Color.Transparent,
                 shape = RoundedCornerShape(14.dp)
             )
             .clickable { onClick() }
@@ -651,7 +700,7 @@ private fun SettingsCategoryTab(
             Icon(
                 imageVector = icon,
                 contentDescription = title,
-                tint = if (isSelected) PS5AccentGlow else PS5TextPrimary,
+                tint = if (isSelected) px5Colors().accentGlow else px5Colors().text,
                 modifier = Modifier.size(20.dp)
             )
             Spacer(modifier = Modifier.width(12.dp))
@@ -659,7 +708,7 @@ private fun SettingsCategoryTab(
                 text = title,
                 fontSize = 14.sp,
                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                color = if (isSelected) PS5TextPrimary else PS5TextSecondary,
+                color = if (isSelected) px5Colors().text else px5Colors().textSecondary,
                 fontFamily = TitilliumFontFamily
             )
         }
@@ -677,10 +726,10 @@ private fun SettingsChip(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .clip(RoundedCornerShape(20.dp))
-            .background(if (isSelected) PS5AccentBlue.copy(alpha = 0.35f) else Color.White.copy(alpha = 0.06f))
+            .background(if (isSelected) PS5AccentBlue.copy(alpha = 0.35f) else px5Colors().card)
             .border(
                 width = if (isSelected) 1.2.dp else 0.dp,
-                color = if (isSelected) PS5AccentGlow else Color.Transparent,
+                color = if (isSelected) px5Colors().accentGlow else Color.Transparent,
                 shape = RoundedCornerShape(20.dp)
             )
             .clickable { onClick() }
@@ -689,7 +738,7 @@ private fun SettingsChip(
         Icon(
             imageVector = icon,
             contentDescription = null,
-            tint = if (isSelected) PS5AccentGlow else PS5TextSecondary,
+            tint = if (isSelected) px5Colors().accentGlow else px5Colors().textSecondary,
             modifier = Modifier.size(16.dp)
         )
         Spacer(modifier = Modifier.width(6.dp))
@@ -697,7 +746,7 @@ private fun SettingsChip(
             text = title,
             fontSize = 12.sp,
             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-            color = if (isSelected) PS5TextPrimary else PS5TextSecondary,
+            color = if (isSelected) px5Colors().text else px5Colors().textSecondary,
             fontFamily = TitilliumFontFamily
         )
     }
@@ -709,10 +758,70 @@ private fun SettingsHeader(title: String) {
         text = title,
         fontSize = 20.sp,
         fontWeight = FontWeight.Bold,
-        color = PS5TextPrimary,
+        color = px5Colors().text,
         fontFamily = TitilliumFontFamily,
         modifier = Modifier.padding(bottom = 6.dp)
     )
+}
+
+/**
+ * Labeled segmented option row — the Dolphin/Eden-style exclusive-choice
+ * control. Used for Theme and Screen orientation; selection persists via
+ * Px5Settings.
+ */
+@Composable
+private fun SettingsSegmented(
+    label: String,
+    options: List<String>,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp)
+    ) {
+        Text(
+            text = label,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = px5Colors().text,
+            fontFamily = TitilliumFontFamily
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(px5Colors().control)
+                .border(1.dp, px5Colors().hairline, RoundedCornerShape(12.dp))
+        ) {
+            options.forEachIndexed { i, opt ->
+                val selected = i == selectedIndex
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(
+                            if (selected) PS5AccentBlue.copy(alpha = 0.55f)
+                            else Color.Transparent
+                        )
+                        .clickable { onSelect(i) }
+                        .padding(vertical = 10.dp)
+                ) {
+                    Text(
+                        text = opt,
+                        fontSize = 12.sp,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                        color = if (selected) Color.White else px5Colors().textSecondary,
+                        fontFamily = TitilliumFontFamily,
+                        maxLines = 1
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -722,7 +831,7 @@ private fun SettingsSubHeader(title: String, hint: String = "") {
             text = title,
             fontSize = 14.sp,
             fontWeight = FontWeight.Bold,
-            color = DeckTeal,
+            color = px5Colors().teal,
             fontFamily = TitilliumFontFamily
         )
         if (hint.isNotBlank()) {
@@ -730,7 +839,7 @@ private fun SettingsSubHeader(title: String, hint: String = "") {
             Text(
                 text = "($hint)",
                 fontSize = 11.sp,
-                color = PS5TextSecondary,
+                color = px5Colors().textSecondary,
                 fontFamily = TitilliumFontFamily
             )
         }
@@ -746,16 +855,16 @@ private fun SettingsItemText(label: String, value: String, mono: Boolean = false
     ) {
         Text(
             text = label, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
-            color = PS5TextPrimary, fontFamily = TitilliumFontFamily
+            color = px5Colors().text, fontFamily = TitilliumFontFamily
         )
         Text(
             text = value,
             fontSize = 12.sp,
-            color = PS5TextSecondary,
+            color = px5Colors().textSecondary,
             fontFamily = if (mono) androidx.compose.ui.text.font.FontFamily.Monospace else TitilliumFontFamily
         )
         Spacer(modifier = Modifier.height(4.dp))
-        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+        HorizontalDivider(color = px5Colors().control)
     }
 }
 
@@ -775,11 +884,11 @@ private fun SettingsToggleItem(
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
-                color = PS5TextPrimary, fontFamily = TitilliumFontFamily
+                color = px5Colors().text, fontFamily = TitilliumFontFamily
             )
             Text(
                 text = subtitle, fontSize = 12.sp,
-                color = PS5TextSecondary, fontFamily = TitilliumFontFamily
+                color = px5Colors().textSecondary, fontFamily = TitilliumFontFamily
             )
         }
         Switch(
@@ -804,8 +913,8 @@ private fun MonoReportBox(text: String, passAware: Boolean = false) {
             .border(
                 1.dp,
                 when {
-                    passAware && passed -> Color(0xFF69F0AE).copy(alpha = 0.6f)
-                    passAware -> Color(0xFFFF5252).copy(alpha = 0.6f)
+                    passAware && passed -> px5Colors().success.copy(alpha = 0.6f)
+                    passAware -> px5Colors().danger.copy(alpha = 0.6f)
                     else -> PS5AccentBlue.copy(alpha = 0.4f)
                 },
                 RoundedCornerShape(10.dp)
@@ -815,9 +924,9 @@ private fun MonoReportBox(text: String, passAware: Boolean = false) {
         Column {
             text.split('\n').forEach { line ->
                 val color = when {
-                    line.startsWith("[PASS]") || line.startsWith("VERDICT: PASS") -> Color(0xFF69F0AE)
-                    line.startsWith("[FAIL]") || line.startsWith("VERDICT: FAIL") -> Color(0xFFFF5252)
-                    else -> PS5TextSecondary
+                    line.startsWith("[PASS]") || line.startsWith("VERDICT: PASS") -> px5Colors().success
+                    line.startsWith("[FAIL]") || line.startsWith("VERDICT: FAIL") -> px5Colors().danger
+                    else -> px5Colors().textSecondary
                 }
                 Text(
                     text = line,

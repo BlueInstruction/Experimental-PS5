@@ -96,6 +96,14 @@ public class FexCoreWrapper {
     // ---- Input bridge ------------------------------------------------------
     /** One of PadButtons bit constants from NativeInput class below. */
     public native boolean nativeSetButtonState(int buttonBit, boolean pressed);
+    /** Analog left stick, normalized [-1..1]. Real atomics, real readback. */
+    public native boolean nativeSetLeftStick(float lx, float ly);
+    /** Analog right stick, normalized [-1..1]. */
+    public native boolean nativeSetRightStick(float rx, float ry);
+    /** Analog triggers L2/R2, normalized [0..1]. */
+    public native boolean nativeSetTriggers(float l2, float r2);
+    /** Clickable touchpad button state. */
+    public native boolean nativeSetTouchpad(boolean pressed);
     public native String  nativeGetInputSummary();
 
     // ---- Driver slots -------------------------------------------------------

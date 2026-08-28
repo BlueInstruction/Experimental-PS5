@@ -45,6 +45,7 @@ import com.px5.emulator.GameViewModel
 import com.px5.emulator.R
 import com.px5.emulator.SoundManager
 import com.px5.emulator.core.FexCoreWrapper
+import com.px5.emulator.core.Px5Settings
 import java.text.DateFormat
 import java.util.Date
 
@@ -81,6 +82,20 @@ fun PS5HomeScreen(
     var selectedIndex by remember { mutableStateOf(0) }
     var showControlCenter by remember { mutableStateOf(false) }
 
+    val context = androidx.compose.ui.platform.LocalContext.current
+
+    // One-tap orientation flip from the game hub (portrait <-> landscape).
+    // Persists the forced mode; "System" default remains available in
+    // Settings → System → Appearance.
+    val onRotate = {
+        soundManager.playNavigationSound()
+        val landscapeNow = context.resources.configuration.orientation ==
+                android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        Px5Settings.setOrientationMode(if (landscapeNow) 2 else 1)
+        (context as? android.app.Activity)?.let { Px5Settings.applyOrientation(it) }
+        Unit
+    }
+
     val displayedList = remember(games, selectedTab) {
         if (selectedTab == 0) games else emptyList()
     }
@@ -89,7 +104,7 @@ fun PS5HomeScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(PS5DarkBackground)
+            .background(px5Colors().background)
     ) {
         // Ambient backdrop
         Crossfade(
@@ -104,7 +119,7 @@ fun PS5HomeScreen(
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
-                    alpha = 0.35f
+                    alpha = px5Colors().backdropAlpha
                 )
             }
         }
@@ -115,9 +130,9 @@ fun PS5HomeScreen(
                 .background(
                     Brush.verticalGradient(
                         colors = listOf(
-                            Color.Black.copy(alpha = 0.5f),
-                            Color(0xFF0B0E14).copy(alpha = 0.85f),
-                            Color(0xFF0B0E14)
+                            px5Colors().fadeTop,
+                            px5Colors().fadeBottom.copy(alpha = 0.85f),
+                            px5Colors().fadeBottom
                         )
                     )
                 )
@@ -142,18 +157,16 @@ fun PS5HomeScreen(
                 onProfileClick = {
                     soundManager.playNavigationSound()
                     showControlCenter = true
-                }
+                },
+                onRotateClick = onRotate
             )
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Engine telemetry strip (real JNI polling)
-            EngineStatusStrip(
-                fexCoreWrapper = fexCoreWrapper,
-                cpuStatus = fexCoreStatus
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
+            // NOTE: no engine telemetry chips here. The CPU BRIDGE / VULKAN
+            // strip used to sit on the home screen and ate portrait space
+            // while duplicating the Control Center's Engine Status card —
+            // that card is now the single home of Vulkan ACTIVE state.
 
             BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                 val isLandscape = maxWidth > 700.dp
@@ -194,7 +207,7 @@ fun PS5HomeScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.6f))
+                    .background(px5Colors().scrim)
                     .clickable { showControlCenter = false },
                 contentAlignment = Alignment.BottomCenter
             ) {
@@ -341,7 +354,7 @@ private fun EmptyLibraryState(
         Icon(
             imageVector = Icons.Default.FolderOpen,
             contentDescription = null,
-            tint = PS5TextSecondary,
+            tint = px5Colors().textSecondary,
             modifier = Modifier.size(56.dp)
         )
         Spacer(modifier = Modifier.height(14.dp))
@@ -349,7 +362,7 @@ private fun EmptyLibraryState(
             text = "Your library is empty",
             fontSize = 22.sp,
             fontWeight = FontWeight.Bold,
-            color = PS5TextPrimary,
+            color = px5Colors().text,
             fontFamily = TitilliumFontFamily
         )
         Spacer(modifier = Modifier.height(8.dp))
@@ -357,7 +370,7 @@ private fun EmptyLibraryState(
             text = "Add a PS5 game: a decrypted dump folder (eboot.bin + param.json), " +
                     "a .pkg, or an .elf file. Covers are taken from the game's sce_sys icons.",
             fontSize = 13.sp,
-            color = PS5TextSecondary,
+            color = px5Colors().textSecondary,
             fontFamily = TitilliumFontFamily,
             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             modifier = Modifier.padding(horizontal = 24.dp)
@@ -377,8 +390,8 @@ private fun EmptyLibraryState(
             Button(
                 onClick = onImportFolderClick,
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color.White.copy(alpha = 0.12f),
-                    contentColor = Color.White
+                    containerColor = px5Colors().controlStrong,
+                    contentColor = px5Colors().text
                 ),
                 shape = RoundedCornerShape(20.dp)
             ) {
@@ -417,7 +430,7 @@ private fun GameDetailPanel(
                         .width(72.dp)
                         .height(102.dp)
                         .clip(RoundedCornerShape(10.dp))
-                        .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(10.dp))
+                        .border(1.dp, px5Colors().hairline, RoundedCornerShape(10.dp))
                 )
                 Spacer(modifier = Modifier.width(16.dp))
             }
@@ -427,7 +440,7 @@ private fun GameDetailPanel(
                     text = game.name,
                     fontSize = 30.sp,
                     fontWeight = FontWeight.Bold,
-                    color = PS5TextPrimary,
+                    color = px5Colors().text,
                     fontFamily = TitilliumFontFamily,
                     maxLines = 2,
                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
@@ -439,7 +452,7 @@ private fun GameDetailPanel(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = game.titleId,
-                            color = PS5TextSecondary,
+                            color = px5Colors().textSecondary,
                             fontSize = 13.sp,
                             fontFamily = TitilliumFontFamily,
                             fontWeight = FontWeight.SemiBold
@@ -455,12 +468,12 @@ private fun GameDetailPanel(
                     modifier = Modifier
                         .size(44.dp)
                         .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.1f))
+                        .background(px5Colors().control)
                 ) {
                     Icon(
                         imageVector = Icons.Default.MoreVert,
                         contentDescription = "More",
-                        tint = PS5TextPrimary
+                        tint = px5Colors().text
                     )
                 }
                 DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
@@ -507,8 +520,8 @@ private fun GameDetailPanel(
         Button(
             onClick = onPlay,
             colors = ButtonDefaults.buttonColors(
-                containerColor = Color.White,
-                contentColor = Color.Black
+                containerColor = px5Colors().text,
+                contentColor = px5Colors().background
             ),
             shape = RoundedCornerShape(24.dp),
             contentPadding = PaddingValues(horizontal = 32.dp, vertical = 14.dp)
@@ -533,14 +546,14 @@ private fun FormatBadge(format: String) {
         modifier = Modifier
             .clip(RoundedCornerShape(6.dp))
             .background(PS5AccentBlue.copy(alpha = 0.25f))
-            .border(1.dp, PS5AccentGlow.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+            .border(1.dp, px5Colors().accentGlow.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
             .padding(horizontal = 8.dp, vertical = 3.dp)
     ) {
         Text(
             text = format,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
-            color = PS5AccentGlow,
+            color = px5Colors().accentGlow,
             fontFamily = TitilliumFontFamily
         )
     }
@@ -552,14 +565,14 @@ private fun DetailLine(label: String, value: String, mono: Boolean = false) {
         Text(
             text = label,
             fontSize = 13.sp,
-            color = PS5TextSecondary,
+            color = px5Colors().textSecondary,
             fontFamily = TitilliumFontFamily,
             modifier = Modifier.width(110.dp)
         )
         Text(
             text = value,
             fontSize = 13.sp,
-            color = PS5TextPrimary,
+            color = px5Colors().text,
             fontFamily = if (mono) androidx.compose.ui.text.font.FontFamily.Monospace else TitilliumFontFamily,
             modifier = Modifier.weight(1f)
         )

@@ -44,11 +44,13 @@ import com.px5.emulator.core.FexCoreWrapper
 import com.px5.emulator.core.Px5Settings
 import com.px5.emulator.ui.EmuScreen
 import com.px5.emulator.ui.PS5HomeScreen
+import com.px5.emulator.ui.PS5LogsScreen
 import com.px5.emulator.ui.PS5SearchScreen
 import com.px5.emulator.ui.PS5SettingsScreen
 import com.px5.emulator.ui.PS5TurnipDriverSheet
 import com.px5.emulator.ui.PX5Theme
 import com.px5.emulator.ui.TitilliumFontFamily
+import com.px5.emulator.ui.px5Colors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.File
@@ -130,6 +132,8 @@ class MainActivity : ComponentActivity() {
 
         // --- Settings store (native-coupled) ------------------------------
         Px5Settings.init(applicationContext)
+        // Honor the persisted shell orientation (system / landscape / portrait).
+        Px5Settings.applyOrientation(this)
 
         // --- Runtime context wiring (crash handler + driver dirs) ---------
         // Uses the SAME wrapper instance created above. The previous code
@@ -336,9 +340,20 @@ fun AppNavigation(
         }
     }
 
-    // File picker launcher for importing Turnip ZIP driver packages.
-    // Real pipeline: copy -> unzip (java.util.zip) -> find the Vulkan .so ->
-    // register slot in native GpuDriverManager -> persist slot -> activate.
+    // File picker launcher for importing GPU driver ZIP packages.
+    //
+    // Real pipeline: copy -> unzip (incl. one nested level) -> locate the
+    // Vulkan driver library -> prove it is an AArch64 shared object ->
+    // normalize its name to "libvulkan_adreno.so" (the exact soname
+    // GpuDriverManager/adrenotools loads from the slot dir) -> register
+    // slot in the native GpuDriverManager -> persist slot -> activate.
+    //
+    // Why the name scan is broad: driver packages in the wild name the
+    // driver differently per build system — Mesa's Android build emits
+    // "vulkan.turnip.so", some vendors ship "libvulkan.so.1", older
+    // AdrenoTools packs use "libvulkan_adreno.so" and Skyline-era packs
+    // "libvulkan.so". Matching the filename family, then validating the
+    // ELF header, accepts all of them without ever trusting a lie.
     val driverLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
@@ -354,53 +369,124 @@ fun AppNavigation(
                     val zipFile = File(dir, "package.zip")
                     context.contentResolver.openInputStream(it)?.use { input ->
                         zipFile.outputStream().use { output -> input.copyTo(output) }
-                    }
+                    } ?: throw IllegalStateException("cannot open selected file")
 
-                    var foundSo: File? = null
-                    runCatching {
-                        java.util.zip.ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
-                            var e = zis.nextEntry
-                            while (e != null) {
-                                if (!e.isDirectory) {
-                                    val outFile = File(dir, e.name)
-                                    if (!outFile.canonicalPath.startsWith(dir.canonicalPath)) {
-                                        throw SecurityException("zip path traversal blocked")
+                    val seenNames = mutableListOf<String>()
+
+                    fun extractZip(zf: File, into: File): Boolean {
+                        var any = false
+                        runCatching {
+                            java.util.zip.ZipInputStream(zf.inputStream().buffered()).use { zis ->
+                                var e = zis.nextEntry
+                                while (e != null) {
+                                    if (!e.isDirectory) {
+                                        val outFile = File(into, e.name)
+                                        if (!outFile.canonicalPath.startsWith(into.canonicalPath)) {
+                                            throw SecurityException("zip path traversal blocked")
+                                        }
+                                        outFile.parentFile?.mkdirs()
+                                        outFile.outputStream().use { out -> zis.copyTo(out) }
+                                        seenNames += e.name
+                                        if (e.name.lowercase().endsWith(".zip")) {
+                                            // one nested level (some packs wrap the driver)
+                                            extractZip(outFile, into)
+                                            outFile.delete()
+                                        }
+                                        any = true
                                     }
-                                    outFile.parentFile?.mkdirs()
-                                    outFile.outputStream().use { out -> zis.copyTo(out) }
-                                    if (foundSo == null &&
-                                        (e.name.endsWith("libvulkan.adreno.so") ||
-                                         e.name.endsWith("libvulkan.so"))
-                                    ) {
-                                        foundSo = outFile
+                                    e = zis.nextEntry
+                                }
+                            }
+                        }.onFailure { f -> android.util.Log.w("PX5", "zip scan: ${f.message}") }
+                        return any
+                    }
+                    extractZip(zipFile, dir)
+                    zipFile.delete()
+
+                    // Candidate 1: any shared object whose name belongs to
+                    // the Vulkan driver family (covers vulkan.turnip.so,
+                    // libvulkan.so, libvulkan.so.1, libvulkan_adreno.so,
+                    // libvulkan.adreno.so, ...). Largest file wins ties.
+                    val vulkanLib = Regex("(?i)(?:lib)?vulkan[^/]*\\.so(\\.\\d+)*$")
+                    val byName = dir.walkTopDown()
+                        .filter { it.isFile && vulkanLib.containsMatchIn(it.name) }
+                        .maxByOrNull { it.length() }
+
+                    // Candidate 2: a lone AArch64 ELF .so under another name.
+                    val soFiles = dir.walkTopDown()
+                        .filter { it.isFile && it.name.endsWith(".so") }
+                        .toList()
+                    val aarch64Elf = { f: File ->
+                        runCatching {
+                            f.inputStream().use { s ->
+                                val h = ByteArray(20)
+                                var n = 0
+                                while (n < 20) {
+                                    val r = s.read(h, n, 20 - n)
+                                    if (r < 0) break
+                                    n += r
+                                }
+                                if (n != 20) return@runCatching false
+                                h[0] == 0x7f.toByte() && h[1] == 'E'.code.toByte() &&
+                                        h[2] == 'L'.code.toByte() && h[3] == 'F'.code.toByte() &&
+                                        // e_machine at offset 18, little-endian = 183 (AArch64)
+                                        ((h[18].toInt() and 0xFF) or (h[19].toInt() shl 8)) == 183
+                            }
+                        }.getOrDefault(false)
+                    }
+                    val soloElf = soFiles
+                        .filter { it.name != "package.zip" && aarch64Elf(it) }
+                        .toList()
+                        .singleOrNull()
+
+                    val foundSo = byName?.takeIf { aarch64Elf(it) } ?: soloElf
+
+                    resultMsg = when {
+                        byName != null && soloElf == null && !aarch64Elf(byName) ->
+                            "${byName.name} is not an arm64-v8a shared object — rejected."
+                        foundSo == null -> {
+                            // Honest failure + real archive evidence so the
+                            // user can tell exactly what was inside.
+                            val listing = seenNames.take(6).joinToString(", ")
+                                .ifEmpty { "(unreadable or empty archive)" }
+                            "No Vulkan driver library found in the archive — nothing registered.\n" +
+                                    "Contents seen: $listing\n" +
+                                    "Expected a Turnip/Mesa package (vulkan.turnip.so, libvulkan.so, " +
+                                    "libvulkan_adreno.so) for arm64-v8a."
+                        }
+                        !aarch64Elf(foundSo) ->
+                            "${foundSo.name} is not an arm64-v8a shared object — rejected."
+                        else -> {
+                            // Normalize: adrenotools opens the slot dir with
+                            // soname "libvulkan_adreno.so"; whatever the pack
+                            // called it, the loader must find that name.
+                            val sonameLib = File(dir, "libvulkan_adreno.so")
+                            if (foundSo.absolutePath != sonameLib.absolutePath) {
+                                foundSo.copyTo(sonameLib, overwrite = true)
+                            }
+                            val wrapper = fexCoreWrapper
+                            when {
+                                wrapper == null ->
+                                    "Driver extracted but the engine library is unavailable."
+                                else -> {
+                                    val label = "Turnip ${dir.name.removePrefix("turnip_")}"
+                                    val slot = wrapper.nativeRegisterDriverSlot(
+                                        label, sonameLib.absolutePath
+                                    )
+                                    if (slot > 0) {
+                                        wrapper.nativeSetDriverMode(slot)
+                                        Px5Settings.setDriverMode(slot)
+                                        DriverSlotStore.append(
+                                            context, DriverSlotStore.Slot(label, sonameLib.absolutePath)
+                                        )
+                                        "Driver installed • slot $slot active.\n" +
+                                                "${foundSo.name} -> ${sonameLib.absolutePath}"
+                                    } else {
+                                        "Extraction ok but native slot registration rejected."
                                     }
                                 }
-                                e = zis.nextEntry
                             }
                         }
-                    }.onFailure { f -> android.util.Log.w("PX5", "zip scan: ${f.message}") }
-
-                    foundSo = foundSo ?: dir.walkTopDown()
-                        .firstOrNull { f -> f.isFile && f.name.startsWith("libvulkan.") && f.name.endsWith(".so") }
-
-                    val soPath = foundSo?.absolutePath
-                    val wrapper = fexCoreWrapper
-                    resultMsg = if (soPath != null && wrapper != null) {
-                        val slotName = File(soPath).parentFile?.name ?: dir.name
-                        val label = "Turnip $slotName"
-                        val slot = wrapper.nativeRegisterDriverSlot(label, soPath)
-                        if (slot > 0) {
-                            wrapper.nativeSetDriverMode(slot)
-                            Px5Settings.setDriverMode(slot)
-                            DriverSlotStore.append(context, DriverSlotStore.Slot(label, soPath))
-                            "Driver installed • slot $slot active.\n$soPath"
-                        } else {
-                            "Extraction ok but native slot registration rejected."
-                        }
-                    } else if (soPath != null) {
-                        "Driver extracted but the engine library is unavailable."
-                    } else {
-                        "No Vulkan library found inside archive — nothing registered."
                     }
                 } catch (e: Exception) {
                     resultMsg = "Failed to import driver: ${e.message}"
@@ -460,8 +546,13 @@ fun AppNavigation(
                     },
                     onScanGamesClick = { scanStorage() },
                     onOpenTurnipManagerClick = { showTurnipManagerSheet = true },
+                    onOpenLogsClick = { navController.navigate("logs") },
                     onBackClick = { navController.popBackStack() }
                 )
+            }
+
+            composable("logs") {
+                PS5LogsScreen(onBackClick = { navController.popBackStack() })
             }
 
             composable("emulation?path={path}") { backStackEntry ->
@@ -520,7 +611,7 @@ private fun ImportStatusCard(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
-            .background(Color(0xFF141A24).copy(alpha = 0.96f))
+            .background(px5Colors().sheet.copy(alpha = 0.97f))
             .padding(16.dp)
     ) {
         Column {
@@ -528,13 +619,13 @@ private fun ImportStatusCard(
                 text = if (busy) "Importing…" else "Import finished",
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
-                color = if (busy) Color(0xFF7DD3FC) else Color(0xFF69F0AE),
+                color = if (busy) px5Colors().infoMono else px5Colors().success,
                 fontFamily = TitilliumFontFamily
             )
             Text(
                 text = text,
                 fontSize = 12.sp,
-                color = Color.White.copy(alpha = 0.85f),
+                color = px5Colors().text.copy(alpha = 0.85f),
                 fontFamily = TitilliumFontFamily,
                 modifier = Modifier.padding(top = 6.dp, bottom = 8.dp)
             )
@@ -542,8 +633,8 @@ private fun ImportStatusCard(
                 Button(
                     onClick = onDismiss,
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = Color.White.copy(alpha = 0.12f),
-                        contentColor = Color.White
+                        containerColor = px5Colors().controlStrong,
+                        contentColor = px5Colors().text
                     ),
                     shape = RoundedCornerShape(10.dp)
                 ) {

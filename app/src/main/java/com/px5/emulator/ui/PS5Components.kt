@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
@@ -77,6 +78,7 @@ fun PS5TopHeader(
     onSearchClick: () -> Unit,
     onSettingsClick: () -> Unit,
     onProfileClick: () -> Unit,
+    onRotateClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -105,17 +107,34 @@ fun PS5TopHeader(
             horizontalArrangement = Arrangement.spacedBy(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // Orientation flip — mirrors the game-hub reference layout: a
+            // one-tap portrait/landscape switch, persisted by Px5Settings.
+            IconButton(
+                onClick = onRotateClick,
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(px5Colors().control)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ScreenRotation,
+                    contentDescription = "Rotate screen",
+                    tint = px5Colors().text,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
             IconButton(
                 onClick = onSearchClick,
                 modifier = Modifier
                     .size(40.dp)
                     .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.08f))
+                    .background(px5Colors().control)
             ) {
                 Icon(
                     imageVector = Icons.Default.Search,
                     contentDescription = "Search",
-                    tint = PS5TextPrimary,
+                    tint = px5Colors().text,
                     modifier = Modifier.size(20.dp)
                 )
             }
@@ -125,12 +144,12 @@ fun PS5TopHeader(
                 modifier = Modifier
                     .size(40.dp)
                     .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.08f))
+                    .background(px5Colors().control)
             ) {
                 Icon(
                     imageVector = Icons.Default.Settings,
                     contentDescription = "Settings",
-                    tint = PS5TextPrimary,
+                    tint = px5Colors().text,
                     modifier = Modifier.size(20.dp)
                 )
             }
@@ -147,7 +166,7 @@ fun PS5TopHeader(
                 Icon(
                     imageVector = Icons.Default.Person,
                     contentDescription = "Profile",
-                    tint = PS5TextPrimary,
+                    tint = px5Colors().text,
                     modifier = Modifier.padding(8.dp)
                 )
             }
@@ -169,7 +188,7 @@ private fun HeaderTabItem(
             text = title,
             fontSize = 20.sp,
             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-            color = if (isSelected) PS5TextPrimary else PS5TextSecondary,
+            color = if (isSelected) px5Colors().text else px5Colors().textSecondary,
             fontFamily = TitilliumFontFamily
         )
         Spacer(modifier = Modifier.height(4.dp))
@@ -242,7 +261,7 @@ fun PX5GameCardTile(
                 )
                 .border(
                     width = if (active) 2.5.dp else 1.dp,
-                    color = if (active) PS5TextPrimary else Color.White.copy(alpha = 0.15f),
+                    color = if (active) px5Colors().text else px5Colors().hairline,
                     shape = RoundedCornerShape(12.dp)
                 )
                 .clickable(
@@ -260,7 +279,7 @@ fun PX5GameCardTile(
                     Icon(
                         imageVector = Icons.Default.Add,
                         contentDescription = "Add Game",
-                        tint = PS5TextPrimary,
+                        tint = px5Colors().text,
                         modifier = Modifier.size(42.dp)
                     )
                     Spacer(Modifier.height(8.dp))
@@ -268,7 +287,7 @@ fun PX5GameCardTile(
                         text = "Add Game",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = PS5TextSecondary,
+                        color = px5Colors().textSecondary,
                         fontFamily = TitilliumFontFamily
                     )
                 }
@@ -298,7 +317,7 @@ fun PX5GameCardTile(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = game.format,
-                            color = PS5TextSecondary,
+                            color = px5Colors().textSecondary,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
                             fontFamily = TitilliumFontFamily
@@ -312,7 +331,7 @@ fun PX5GameCardTile(
 
         Text(
             text = if (isAddTile) " " else game.name,
-            color = if (active) PS5TextPrimary else PS5TextSecondary,
+            color = if (active) px5Colors().text else px5Colors().textSecondary,
             fontSize = 12.sp,
             fontWeight = FontWeight.SemiBold,
             fontFamily = TitilliumFontFamily,
@@ -348,7 +367,7 @@ fun PX5GameGridTile(
                 )
                 .border(
                     width = 1.dp,
-                    color = Color.White.copy(alpha = 0.15f),
+                    color = px5Colors().hairline,
                     shape = RoundedCornerShape(12.dp)
                 )
                 .clickable(onClick = onClick),
@@ -362,14 +381,14 @@ fun PX5GameGridTile(
                     Icon(
                         imageVector = Icons.Default.Add,
                         contentDescription = "Add Game",
-                        tint = PS5TextPrimary,
+                        tint = px5Colors().text,
                         modifier = Modifier.size(36.dp)
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(
                         text = "Add",
                         fontSize = 12.sp,
-                        color = PS5TextSecondary,
+                        color = px5Colors().textSecondary,
                         fontFamily = TitilliumFontFamily
                     )
                 }
@@ -398,7 +417,7 @@ fun PX5GameGridTile(
 
         Text(
             text = if (isAddTile) " " else game.name,
-            color = PS5TextSecondary,
+            color = px5Colors().textSecondary,
             fontSize = 12.sp,
             fontFamily = TitilliumFontFamily,
             maxLines = 1,

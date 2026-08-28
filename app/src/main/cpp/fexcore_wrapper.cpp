@@ -242,6 +242,37 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeSetButtonState(
     return JNI_TRUE;
 }
 
+// Analog axes from the on-screen sticks; values are normalized [-1..1]
+// (triggers [0..1]) and land in the same lock-free atomics a real
+// controller endpoint would feed.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeSetLeftStick(
+        JNIEnv*, jobject, jfloat lx, jfloat ly) {
+    PX5::InputManager::GetInstance().SetLeftStick(lx, ly);
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeSetRightStick(
+        JNIEnv*, jobject, jfloat rx, jfloat ry) {
+    PX5::InputManager::GetInstance().SetRightStick(rx, ry);
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeSetTriggers(
+        JNIEnv*, jobject, jfloat l2, jfloat r2) {
+    PX5::InputManager::GetInstance().SetTriggers(l2, r2);
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeSetTouchpad(
+        JNIEnv*, jobject, jboolean pressed) {
+    PX5::InputManager::GetInstance().TouchpadPressed(pressed == JNI_TRUE);
+    return JNI_TRUE;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeGetInputSummary(
         JNIEnv* env, jobject) {

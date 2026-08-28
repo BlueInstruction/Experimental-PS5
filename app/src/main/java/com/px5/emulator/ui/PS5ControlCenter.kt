@@ -47,8 +47,8 @@ fun PS5ControlCenterSheet(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
-            .background(Color(0xFF141A24))
-            .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
+            .background(px5Colors().sheet)
+            .border(1.dp, px5Colors().hairline, RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
             .padding(28.dp)
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
@@ -61,7 +61,7 @@ fun PS5ControlCenterSheet(
                     text = "Control Center",
                     fontSize = 22.sp,
                     fontWeight = FontWeight.Bold,
-                    color = PS5TextPrimary,
+                    color = px5Colors().text,
                     fontFamily = TitilliumFontFamily
                 )
 
@@ -72,12 +72,12 @@ fun PS5ControlCenterSheet(
                     modifier = Modifier
                         .size(36.dp)
                         .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.1f))
+                        .background(px5Colors().control)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "Close",
-                        tint = PS5TextPrimary,
+                        tint = px5Colors().text,
                         modifier = Modifier.size(18.dp)
                     )
                 }
@@ -136,7 +136,7 @@ fun PS5ControlCenterSheet(
 
             // System Status Card — real engine state only
             Card(
-                colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.05f)),
+                colors = CardDefaults.cardColors(containerColor = px5Colors().card),
                 shape = RoundedCornerShape(16.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
@@ -145,21 +145,21 @@ fun PS5ControlCenterSheet(
                         text = "Engine Status",
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold,
-                        color = PS5AccentGlow,
+                        color = px5Colors().accentGlow,
                         fontFamily = TitilliumFontFamily
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
                         text = "CPU bridge: $fexCoreStatus",
                         fontSize = 12.sp,
-                        color = PS5TextPrimary,
+                        color = px5Colors().text,
                         fontFamily = TitilliumFontFamily
                     )
                     if (vulkanLine.isNotBlank()) {
                         Text(
                             text = vulkanLine,
                             fontSize = 12.sp,
-                            color = PS5TextSecondary,
+                            color = px5Colors().textSecondary,
                             fontFamily = TitilliumFontFamily
                         )
                     }
@@ -167,7 +167,7 @@ fun PS5ControlCenterSheet(
                         Text(
                             text = driverLine,
                             fontSize = 11.sp,
-                            color = PS5TextSecondary,
+                            color = px5Colors().textSecondary,
                             fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                         )
                     }
@@ -190,10 +190,10 @@ private fun ControlCenterTile(
         modifier = modifier
             .height(100.dp)
             .clip(RoundedCornerShape(16.dp))
-            .background(if (isActive) PS5AccentBlue.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.06f))
+            .background(if (isActive) PS5AccentBlue.copy(alpha = 0.25f) else px5Colors().card)
             .border(
                 1.dp,
-                if (isActive) PS5AccentGlow else Color.White.copy(alpha = 0.15f),
+                if (isActive) px5Colors().accentGlow else px5Colors().hairline,
                 RoundedCornerShape(16.dp)
             )
             .clickable { onClick() }
@@ -203,7 +203,7 @@ private fun ControlCenterTile(
             Icon(
                 imageVector = iconVector,
                 contentDescription = title,
-                tint = if (isActive) PS5AccentGlow else PS5TextPrimary,
+                tint = if (isActive) px5Colors().accentGlow else px5Colors().text,
                 modifier = Modifier.size(24.dp)
             )
             Spacer(modifier = Modifier.weight(1f))
@@ -211,13 +211,13 @@ private fun ControlCenterTile(
                 text = title,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
-                color = PS5TextPrimary,
+                color = px5Colors().text,
                 fontFamily = TitilliumFontFamily
             )
             Text(
                 text = statusText,
                 fontSize = 11.sp,
-                color = PS5TextSecondary,
+                color = px5Colors().textSecondary,
                 fontFamily = TitilliumFontFamily
             )
         }

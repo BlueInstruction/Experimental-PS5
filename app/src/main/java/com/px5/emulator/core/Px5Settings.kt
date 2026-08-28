@@ -28,6 +28,19 @@ object Px5Settings {
     private val _driverMode = MutableStateFlow(0)     // 0 = system ICD
     val driverMode: StateFlow<Int> = _driverMode
 
+    // ---- Appearance / shell (UI-only, not pushed to native) ---------------
+    /** 0 = Dark (default), 1 = Light, 2 = Follow system. */
+    private val _themeMode = MutableStateFlow(0)
+    val themeMode: StateFlow<Int> = _themeMode
+
+    /** 0 = follow system, 1 = force landscape, 2 = force portrait. */
+    private val _orientationMode = MutableStateFlow(0)
+    val orientationMode: StateFlow<Int> = _orientationMode
+
+    /** Show the on-screen DualSense pad on the emulation stage. */
+    private val _showTouchPad = MutableStateFlow(true)
+    val showTouchPad: StateFlow<Boolean> = _showTouchPad
+
     private var prefs: SharedPreferences? = null
 
     fun init(context: Context) {
@@ -37,6 +50,19 @@ object Px5Settings {
         _vsyncEnabled.value  = prefs?.getBoolean("vsync", true) ?: true
         _verboseLogging.value= prefs?.getBoolean("verbose", false) ?: false
         _driverMode.value    = prefs?.getInt("driverMode", 0) ?: 0
+        _themeMode.value     = prefs?.getInt("themeMode", 0) ?: 0
+        _orientationMode.value = prefs?.getInt("orientationMode", 0) ?: 0
+        _showTouchPad.value  = prefs?.getBoolean("showTouchPad", true) ?: true
+    }
+
+    /** Applies the persisted orientation mode to the host activity. */
+    fun applyOrientation(activity: android.app.Activity) {
+        when (_orientationMode.value) {
+            1 -> activity.requestedOrientation =
+                android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
+            2 -> activity.requestedOrientation =
+                android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
+        }
     }
 
     fun setResScalePct(v: Int) {
@@ -62,6 +88,21 @@ object Px5Settings {
         _driverMode.value = mode.coerceAtLeast(0)
         prefs?.edit()?.putInt("driverMode", _driverMode.value)?.apply()
         push()
+    }
+
+    fun setThemeMode(mode: Int) {
+        _themeMode.value = mode.coerceIn(0, 2)
+        prefs?.edit()?.putInt("themeMode", _themeMode.value)?.apply()
+    }
+
+    fun setOrientationMode(mode: Int) {
+        _orientationMode.value = mode.coerceIn(0, 2)
+        prefs?.edit()?.putInt("orientationMode", _orientationMode.value)?.apply()
+    }
+
+    fun setShowTouchPad(on: Boolean) {
+        _showTouchPad.value = on
+        prefs?.edit()?.putBoolean("showTouchPad", on)?.apply()
     }
 
     /**
