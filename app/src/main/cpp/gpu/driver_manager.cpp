@@ -4,7 +4,12 @@
 #include <dlfcn.h>
 #include <libgen.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <android/linker.h>
+#include <android/dlext.h>
 #include <cstring>
+#include <cerrno>
 #include <cstdlib>
 #include <algorithm>
 
@@ -31,6 +36,83 @@ std::string PathForMapsCheck(const std::string& path) {
     std::string out(r);
     free(r);
     return out;
+}
+
+// One-line inventory of the slot directory: name(size) pairs, the loaded
+// soname starred. A driver package missing a bundled dependency (libc++_
+// shared.so, libz.so, ...) is visible here without any logcat.
+void LogSlotInventory(const std::string& dir, const std::string& soname) {
+    DIR* d = opendir(dir.c_str());
+    if (!d) {
+        PX5_LOGE(LogCategory::GPU,
+                 "Slot dir unreadable: %s (errno=%d)", dir.c_str(), errno);
+        return;
+    }
+    std::string inv;
+    int files = 0, shown = 0;
+    struct dirent* e;
+    while ((e = readdir(d)) != nullptr) {
+        if (e->d_name[0] == '.') continue;
+        std::string full = dir + (dir.back() == '/' ? "" : "/") + e->d_name;
+        struct stat st{};
+        if (stat(full.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        ++files;
+        if (shown++ < 12) {
+            char sz[24];
+            snprintf(sz, sizeof sz, "%zu", static_cast<size_t>(st.st_size));
+            if (!inv.empty()) inv += ", ";
+            inv += std::string(e->d_name) + "(" + sz + "B)";
+            if (soname == e->d_name) inv += "*";
+        }
+    }
+    closedir(d);
+    PX5_LOGI(LogCategory::GPU,
+             "Slot inventory (%d files%s): %s", files,
+             shown < files ? ", first 12 shown" : "",
+             inv.c_str());
+}
+
+// Replicates what the adrenotools hook does internally — an isolated,
+// system-sharing linker namespace whose search path is the driver dir —
+// and reports the REAL linker error for the driver soname. Runs only on
+// the failure path, so a future adrenotools null can never again leave us
+// guessing between "package problem" and "hook plumbing problem".
+void NamespaceDlopenProbe(const std::string& dir, const std::string& soname) {
+    const std::string dirSlash = dir.back() == '/' ? dir : dir + "/";
+    struct android_namespace_t* ns = android_create_namespace(
+            "px5-driver-diag",
+            dirSlash.c_str(),          // ld_library_path: bundled deps resolve
+            nullptr,
+            ANDROID_NAMESPACE_TYPE_SHARED,   // share the parent's system libs
+            dirSlash.c_str(),          // permitted path for app-files dir
+            nullptr);                  // parent = caller namespace
+    if (!ns) {
+        PX5_LOGE(LogCategory::GPU,
+                 "DiagNS probe: android_create_namespace failed: %s",
+                 dlerror());
+        return;
+    }
+    android_dlextinfo info{};
+    info.flags = ANDROID_DLEXT_USE_NAMESPACE;
+    info.library_namespace = ns;
+    const std::string path = dirSlash + soname;
+    void* h = android_dlopen_ext(path.c_str(), RTLD_NOW, &info);
+    if (h) {
+        PX5_LOGI(LogCategory::GPU,
+                 "DiagNS probe: '%s' dlopens FINE in its own namespace — "
+                 "the package is loadable; adrenotools failed in its own "
+                 "hook plumbing. Full story stays in this log.",
+                 soname.c_str());
+        dlclose(h);
+    } else {
+        // dlerror() clears its message after the first read — capture once.
+        const char* err = dlerror();
+        PX5_LOGE(LogCategory::GPU,
+                 "DiagNS probe: driver itself fails to load: %s — if a "
+                 "DT_NEEDED library is named there, it is missing from the "
+                 "driver package (see slot inventory above)",
+                 err ? err : "(dlerror empty)");
+    }
 }
 
 } // namespace
@@ -109,6 +191,18 @@ void* GpuDriverManager::OpenHostVulkanLibrary(int dlopenMode) {
     PX5_LOGI(LogCategory::GPU,
              "Loading custom driver '%s' via adrenotools from %s (soname=%s)",
              slot.label.c_str(), dirForTools.c_str(), soname.c_str());
+    // ROOT CAUSE #2 (found by source-reading the pinned fork, driver.cpp
+    // lines 41-44): adrenotools returns nullptr IMMEDIATELY when a non-null
+    // userMappingHandle is passed without ADRENOTOOLS_DRIVER_GPU_MAPPING_
+    // IMPORT in featureFlags. v1.4 passed &m_mappingHandle with only
+    // ADRENOTOOLS_DRIVER_CUSTOM — every call therefore died at that gate,
+    // BEFORE the hook libs were even dlopened, which is exactly why the
+    // device log showed null with hookImpl/hookMain/driverSo all present.
+    // The corresponding logcat line ("ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT
+    // present but no user mapping handle found") is misleadingly worded in
+    // the fork; the contract is: no flag -> no handle. We do not use GPU
+    // mapping import yet, so pass nullptr. m_mappingHandle stays reserved
+    // for the Phase-C mapped-memory work, where the flag is set properly.
     void* handle = adrenotools_open_libvulkan(
             dlopenMode,
             ADRENOTOOLS_DRIVER_CUSTOM,
@@ -117,7 +211,7 @@ void* GpuDriverManager::OpenHostVulkanLibrary(int dlopenMode) {
             dirForTools.c_str(),
             soname.c_str(),
             nullptr,               // fileRedirectDir unused for now
-            &m_mappingHandle);
+            nullptr);              // userMappingHandle: null without the flag
     if (handle) {
         PX5_LOGI(LogCategory::GPU,
                  "Custom driver loaded through linker-namespace hook");
@@ -137,8 +231,7 @@ void* GpuDriverManager::OpenHostVulkanLibrary(int dlopenMode) {
         const bool haveDriver = access(driverSo.c_str(), F_OK) == 0;
         PX5_LOGE(LogCategory::GPU,
                  "adrenotools_open_libvulkan returned null for '%s' "
-                 "(dir=%s soname=%s) — hookImpl=%s hookMain=%s driverSo=%s "
-                 "(adrenotools logs its own reason to logcat tag 'adrenotools')",
+                 "(dir=%s soname=%s) — hookImpl=%s hookMain=%s driverSo=%s",
                  slot.label.c_str(), dirForTools.c_str(), soname.c_str(),
                  haveImpl ? "yes" : "MISSING",
                  haveMain ? "yes" : "MISSING",
@@ -149,6 +242,13 @@ void* GpuDriverManager::OpenHostVulkanLibrary(int dlopenMode) {
                      "build did not package them; custom drivers cannot load "
                      "until the build ships libhook_impl.so + libmain_hook.so",
                      m_hookLibDir.c_str());
+        } else if (haveDriver) {
+            // All files exist, so the null came from deeper. Produce the
+            // two facts that separate a bad package from hook plumbing:
+            // what the slot dir actually contains, and whether the driver
+            // soname loads in a properly-built linker namespace at all.
+            LogSlotInventory(slot.dir, soname);
+            NamespaceDlopenProbe(slot.dir, soname);
         }
     }
     SetActiveMode(0);   // honest fallback, reflected in summaries

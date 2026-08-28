@@ -201,8 +201,13 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGpuProof(
 }
 extern "C" JNIEXPORT void JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeInitRuntimeContext(
-        JNIEnv*, jobject, jstring, jstring, jstring, jstring) {
+        JNIEnv*, jobject, jstring, jstring, jstring, jstring, jstring) {
     // Smoke ABI: no crash-handler/driver-dir wiring needed (no engine).
+}
+extern "C" JNIEXPORT void JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeLogEvent(
+        JNIEnv*, jobject, jstring, jstring) {
+    // Smoke ABI: event passthrough is a no-op (no engine streams).
 }
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeGetVulkanSummary(

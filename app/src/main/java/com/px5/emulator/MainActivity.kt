@@ -198,11 +198,25 @@ class MainActivity : ComponentActivity() {
                     ?: filesDir.resolve("logs").absolutePath
                 java.io.File(logsDir).mkdirs()
                 PhysicalControllerBridge.wrapper = wrapper
+                // Build identity goes into the NATIVE streams as well — the
+                // 2026-08-29 paste proved the engine-log side had no idea
+                // which APK produced it.
+                val hookDir = applicationInfo.nativeLibraryDir
+                val haveImplNative = File(hookDir, "libhook_impl.so").isFile
+                val haveMainNative = File(hookDir, "libmain_hook.so").isFile
+                val buildIdentity =
+                    "v${BuildConfig.VERSION_NAME} vc${BuildConfig.VERSION_CODE} " +
+                    "sha=${BuildConfig.GIT_SHA} " +
+                    "fexcore=${BuildConfig.FEXCORE_PIN.replace(" ", "")} " +
+                    "api=${android.os.Build.VERSION.SDK_INT} " +
+                    "abi=${android.os.Build.SUPPORTED_ABIS.firstOrNull()} " +
+                    "hooks=${if (haveImplNative && haveMainNative) "packaged" else "impl=$haveImplNative,main=$haveMainNative"}"
                 wrapper.nativeInitRuntimeContext(
                     logsDir,
                     applicationInfo.nativeLibraryDir,
                     cacheDir.absolutePath,
-                    filesDir.absolutePath
+                    filesDir.absolutePath,
+                    buildIdentity
                 )
                 logState("runtime", "context_ready")
 

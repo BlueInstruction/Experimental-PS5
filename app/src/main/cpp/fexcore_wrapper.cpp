@@ -479,7 +479,8 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeInitRuntimeContext(
         JNIEnv* env, jobject,
         jstring jLogsDir, jstring jHookLibDir,
-        jstring jTmpLibDir, jstring jDriverRootDir) {
+        jstring jTmpLibDir, jstring jDriverRootDir,
+        jstring jIdentity) {
     auto toStr = [env](jstring s) -> std::string {
         if (!s) return {};
         const char* c = env->GetStringUTFChars(s, nullptr);
@@ -491,6 +492,7 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeInitRuntimeContext(
     const std::string hookDir  = toStr(jHookLibDir);
     const std::string tmpDir   = toStr(jTmpLibDir);
     const std::string rootDir  = toStr(jDriverRootDir);
+    const std::string identity = toStr(jIdentity);
 
     PX5::CrashHandler::Install(logsDir);
     PX5::GpuDriverManager::GetInstance().SetRuntimeDirs(hookDir, tmpDir, rootDir);
@@ -500,8 +502,44 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeInitRuntimeContext(
     if (!logsDir.empty()) {
         PX5::DiagBridge::Enable(logsDir + "/px5_diagnostic.log");
     }
+    // Build identity in the NATIVE stream too. The 2026-08-29 paste proved
+    // that users may paste the engine log (px5_main.log / native bridged
+    // lines) while the Kotlin identity line only ever reached the app-log
+    // side — leaving the paste unidentifiable. Now every stream answers
+    // "which APK produced this?" on its own.
+    if (!identity.empty()) {
+        PX5_LOGI(PX5::LogCategory::CORE, "build identity: %s",
+                 identity.c_str());
+    }
     PX5_LOGI(PX5::LogCategory::CORE,
              "Runtime context wired: crash reports + driver dirs ready");
+}
+
+// Single Kotlin->native event passthrough for boot-critical moments.
+// Purpose: the game-boot path previously logged only into the Kotlin event
+// file, so a paste of the engine log showed NOTHING between app start and
+// process death ("no logs when running the game"). Events routed through
+// here land in px5_main.log AND the bridged diagnostic stream.
+extern "C" JNIEXPORT void JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeLogEvent(
+        JNIEnv* env, jobject, jstring jCategory, jstring jMessage) {
+    auto toStr = [env](jstring s) -> std::string {
+        if (!s) return {};
+        const char* c = env->GetStringUTFChars(s, nullptr);
+        std::string out = c ? c : "";
+        if (c) env->ReleaseStringUTFChars(s, c);
+        return out;
+    };
+    const std::string cat = toStr(jCategory);
+    const std::string msg = toStr(jMessage);
+    if (msg.empty()) return;
+    const PX5::LogCategory category = (cat == "gameBoot")
+        ? PX5::LogCategory::LOADER : PX5::LogCategory::CORE;
+    if (cat.empty()) {
+        PX5_LOGI(category, "%s", msg.c_str());
+    } else {
+        PX5_LOGI(category, "[%s] %s", cat.c_str(), msg.c_str());
+    }
 }
 
 // JNI_OnLoad runs at System.loadLibrary("px5") time — before any UI code.

@@ -43,9 +43,21 @@ public class FexCoreWrapper {
      * One-time runtime wiring (call in Application/MainActivity onCreate):
      *  - installs the native crash handler writing px5_crash.log
      *  - hands driver-loader directories to GpuDriverManager (adrenotools)
+     *  - stamps the build identity into the NATIVE log streams too, so any
+     *    pasted slice of any log file answers "which APK produced this?"
      */
     public native void nativeInitRuntimeContext(String logsDir, String hookLibDir,
-                                                String tmpLibDir, String driverRootDir);
+                                                String tmpLibDir, String driverRootDir,
+                                                String buildIdentity);
+
+    /**
+     * Kotlin->native event passthrough for boot-critical moments. Writes a
+     * INFO line into px5_main.log and the bridged diagnostic stream, so the
+     * engine-log side of a paste shows the game-boot path even if the
+     * process dies before anything else logs. category "gameBoot" routes to
+     * the LOADER log category; anything else goes to CORE.
+     */
+    public native void nativeLogEvent(String category, String message);
 
     // Memory window tests (validated against canonical window now)
     public native long nativeMapMemory(long addr, long size, int flags);

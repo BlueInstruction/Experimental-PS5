@@ -113,6 +113,23 @@ fun EmuScreen(
     LaunchedEffect(Unit) {
         com.px5.emulator.core.PX5EventLog.event("gameBoot", "screen_entered",
                 "path=$path stub=${isStubAbi}")
+        // Same facts into the NATIVE log stream: a paste of the engine log
+        // must show the game-boot path even if the process dies right after.
+        try {
+            val bootDir = java.io.File(path)
+            val eboot = if (bootDir.isDirectory)
+                bootDir.listFiles()?.firstOrNull { it.isFile && it.name.equals("eboot.bin", true) }
+            else null
+            fexCoreWrapper?.nativeLogEvent("gameBoot",
+                    "screen_entered game=${game?.name ?: "?"} titleId=${game?.titleId ?: "?"} " +
+                    "format=${game?.format ?: "?"} size=${game?.sizeBytes ?: 0L} " +
+                    "eboot=" + (when {
+                        eboot != null -> "present(${eboot.length()}B)"
+                        bootDir.isDirectory -> "ABSENT"
+                        bootDir.isFile -> "file(${bootDir.length()}B)"
+                        else -> "path-missing"
+                    }))
+        } catch (_: Throwable) {}
         if (!isStubAbi) {
             launch(Dispatchers.Default) {
                 gpuProof = try {
@@ -286,6 +303,8 @@ fun EmuScreen(
                             }
                             com.px5.emulator.core.PX5EventLog.event("gameBoot",
                                     "elf_load_started", "target=$target")
+                            fexCoreWrapper?.nativeLogEvent("gameBoot",
+                                    "elf_load_started target=$target")
                             loadResult = if (target.isBlank()) {
                                 com.px5.emulator.core.PX5EventLog.event("gameBoot",
                                         "elf_load_failed", "reason=no eboot.bin in folder")
@@ -296,10 +315,14 @@ fun EmuScreen(
                                     com.px5.emulator.core.PX5EventLog.event("gameBoot",
                                             "elf_load", "target=${target.substringAfterLast('/')}",
                                             result = ok.toString())
+                                    fexCoreWrapper.nativeLogEvent("gameBoot",
+                                            "elf_load result=$ok target=${target.substringAfterLast('/')}")
                                     if (ok) "LOADED: $target mapped into guest window"
                                     else "LOAD FAILED: loader rejected $target (see logcat)"
                                 } catch (t: Throwable) {
                                     com.px5.emulator.core.PX5EventLog.exception("gameBoot.elfLoad", t)
+                                    fexCoreWrapper.nativeLogEvent("gameBoot",
+                                            "elf_load EXCEPTION ${t.javaClass.simpleName}: ${t.message}")
                                     "LOAD FAILED: ${t.message}"
                                 }
                             }
