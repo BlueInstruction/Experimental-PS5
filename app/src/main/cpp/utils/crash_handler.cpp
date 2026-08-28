@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <unwind.h>
 #include <sys/uio.h>
+#include <sys/mman.h>
 
 namespace PX5 {
 
@@ -45,22 +46,43 @@ const char* SignalName(int sig) {
 // The single write path. Async-signal-safety: only open/write/dprintf are
 // used inside the handler; the backtrace call is best-effort (bionic's
 // implementation is unwind-based and does not take locks we hold).
+//
+// Naming contract with the Kotlin log store (PX5Application.listCrashLogs
+// reads "px5_crash_*.log", the live viewer tails "px5_crash_latest.log"):
+// the native report writes BOTH a timestamped file and refreshes latest,
+// otherwise real native crashes stay invisible in the Logs screen (this
+// is why the 2026-08-28 device crashes left no visible evidence).
 void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {   // NOLINT(bugprone-easily-swappable-parameters)
     char path[512];
-    snprintf(path, sizeof(path), "%s/px5_crash.log",
-             g_logsDir.empty() ? "/data/local/tmp" : g_logsDir.c_str());
-
-    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd < 0) {
-        fd = STDERR_FILENO;  // never lose the report entirely
-    }
-
-    char line[256];
-    auto append = [&](const char* s) { write(fd, s, strlen(s)); };
-
+    char latestPath[512];
     time_t now = time(nullptr);
     struct tm tmv{};
     localtime_r(&now, &tmv);
+    char stamp[32];
+    strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", &tmv);
+    snprintf(path, sizeof(path), "%s/px5_crash_%s.log",
+             g_logsDir.empty() ? "/data/local/tmp" : g_logsDir.c_str(), stamp);
+    snprintf(latestPath, sizeof(latestPath), "%s/px5_crash_latest.log",
+             g_logsDir.empty() ? "/data/local/tmp" : g_logsDir.c_str());
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    int latestFd = open(latestPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0 && latestFd < 0) {
+        fd = STDERR_FILENO;  // never lose the report entirely
+    } else if (fd < 0) {
+        fd = latestFd;       // at least the tail the UI reads
+        latestFd = -1;
+    }
+
+    char line[256];
+    auto appendTo = [&](int target, const char* s) {
+        if (target >= 0) write(target, s, strlen(s));
+    };
+    auto append = [&](const char* s) {
+        appendTo(fd, s);
+        appendTo(latestFd, s);
+    };
+
     snprintf(line, sizeof(line), "\n==== PX5 CRASH %04d-%02d-%02d %02d:%02d:%02d ====\n",
              tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
              tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
@@ -120,7 +142,11 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {   // NOLINT(bugpro
     append(Logger::GetCurrentLogFilePath().c_str());
     append("\n");
     fsync(fd);
-    if (fd != STDERR_FILENO) close(fd);
+    if (fd >= 0 && fd != STDERR_FILENO) close(fd);
+    if (latestFd >= 0 && latestFd != STDERR_FILENO) {
+        fsync(latestFd);
+        close(latestFd);
+    }
 }
 
 void Handler(int sig, siginfo_t* info, void* uctx) {
@@ -146,6 +172,27 @@ void CrashHandler::Install(const std::string& logsDir) {
 
     g_logsDir = logsDir;
 
+    // SA_ONSTACK without sigaltstack is a lie: on a real stack overflow the
+    // handler would fault again on the dead stack. Allocate an honest one.
+    // leaked deliberately — it must outlive every thread that may crash.
+    static const size_t kAltStackSize = 256 * 1024;
+    void* altStackMem = mmap(nullptr, kAltStackSize,
+                             PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (altStackMem != MAP_FAILED) {
+        stack_t ss{};
+        ss.ss_sp = altStackMem;
+        ss.ss_size = kAltStackSize;
+        ss.ss_flags = 0;
+        if (sigaltstack(&ss, nullptr) != 0) {
+            PX5_LOGW(LogCategory::CORE,
+                     "CrashHandler: sigaltstack failed errno=%d", errno);
+        }
+    } else {
+        PX5_LOGW(LogCategory::CORE,
+                 "CrashHandler: alt stack mmap failed errno=%d", errno);
+    }
+
     struct sigaction sa{};
     sa.sa_sigaction = Handler;
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
@@ -159,7 +206,8 @@ void CrashHandler::Install(const std::string& logsDir) {
         }
     }
     PX5_LOGI(LogCategory::CORE,
-             "CrashHandler installed: reports -> %s/px5_crash.log",
+             "CrashHandler installed: reports -> %s/px5_crash_<timestamp>.log"
+             " (+ px5_crash_latest.log)",
              logsDir.c_str());
 }
 

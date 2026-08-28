@@ -1,10 +1,15 @@
 #include <jni.h>
 #include <android/log.h>
 
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <filesystem>
+#include <functional>
+#include <string>
+#include <unistd.h>
+#include <sys/wait.h>
 
 #include "core/emulator.h"
 #include "fexcore_integration.h"
@@ -84,10 +89,102 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadSelf(JNIEnv* env, jobject,
     return res ? JNI_TRUE : JNI_FALSE;
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
+// --- Foundation evidence additions ----------------------------------------
+
+namespace {
+
+// Runs `work` in a fork()ed child and returns its honest report.
+//
+// WHY: a JIT defect must kill the TEST, not the app. The 2026-08-28 device
+// logs show both proof buttons terminating the whole process right after
+// "Guest thread created" — the Kotlin try/catch cannot catch a native
+// signal. With this wrapper:
+//   * the child inherits the crash handler, so a fault still writes a full
+//     register dump (px5_crash_<timestamp>.log + px5_crash_latest.log);
+//   * the parent survives and reports the real wait status (exit code or
+//     signal) back to the UI;
+//   * the child's own report line comes back through a pipe.
+std::string RunIsolated(const char* name,
+                        const std::function<std::string()>& work) {
+    std::fflush(nullptr);
+
+    int fds[2];
+    if (pipe(fds) != 0) {
+        return std::string(name) + ": pipe() failed (errno=" +
+               std::to_string(errno) + ")";
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]); close(fds[1]);
+        return std::string(name) + ": fork failed (errno=" +
+               std::to_string(errno) + ")";
+    }
+    if (pid == 0) {
+        // Child: only this test runs here. No JNI, no shared state writes.
+        close(fds[0]);
+        std::string rep;
+        try {
+            rep = work();
+        } catch (const std::exception& e) {
+            rep = std::string("FAILED — native exception: ") + e.what();
+        } catch (...) {
+            rep = "FAILED — native exception (unknown)";
+        }
+        ssize_t n = write(fds[1], rep.data(), rep.size());
+        (void)n;
+        close(fds[1]);
+        _exit(0);
+    }
+
+    // Parent: drain the child report, then read the honest exit status.
+    close(fds[1]);
+    std::string rep;
+    char buf[512];
+    ssize_t n;
+    while ((n = read(fds[0], buf, sizeof buf)) > 0) rep.append(buf, static_cast<size_t>(n));
+    close(fds[0]);
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        return std::string(name) + ": waitpid failed (errno=" +
+               std::to_string(errno) + ")";
+    }
+    if (WIFSIGNALED(status)) {
+        const int sig = WTERMSIG(status);
+        std::string out = std::string(name) + ": CRASHED in isolated child (signal " +
+                          std::to_string(sig) + ")\n";
+        out += rep.empty()
+            ? std::string("full register dump was written to the crash log "
+                          "(Settings > Diagnostics > Logs)")
+            : ("partial report before death: " + rep);
+        return out;
+    }
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+        return std::string(name) + ": child exited with code " +
+               std::to_string(WEXITSTATUS(status)) + " | " +
+               (rep.empty() ? "(no report)" : rep);
+    }
+    if (rep.empty()) rep = "(child produced no report)";
+    return rep;
+}
+
+} // namespace
+
+extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunCpuConformanceTest(
-        JNIEnv*, jobject) {
-    return PX5::FexCoreIntegration::RunConformanceTest() ? JNI_TRUE : JNI_FALSE;
+        JNIEnv* env, jobject) {
+    // Fork-isolated: a JIT fault reports evidence instead of killing the app.
+    const std::string report = RunIsolated(
+        "FEXCore JIT conformance",
+        []() -> std::string {
+            const bool ok = PX5::FexCoreIntegration::RunConformanceTest();
+            return ok
+                ? "PASSED — guest blob (mov eax,40; add eax,2; hlt) executed "
+                  "on the ARM64 JIT and reached its HLT exit"
+                : "FAILED — guest blob did not run cleanly (see engine log)";
+        });
+    return env->NewStringUTF(report.c_str());
 }
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -119,8 +216,57 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeGetArchitectureSummary(
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunFoundationSelfTest(
         JNIEnv* env, jobject) {
-    const std::string report = PX5::Emulator::GetInstance().SelfTestFoundation();
+    // Fork-isolated like the conformance test: evidence over fatal crashes.
+    const std::string report = RunIsolated(
+        "foundation proof pipeline",
+        []() -> std::string {
+            return PX5::Emulator::GetInstance().SelfTestFoundation();
+        });
     return env->NewStringUTF(report.c_str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeGetEngineCounters(
+        JNIEnv* env, jobject) {
+    return env->NewStringUTF(
+        PX5::FexCoreIntegration::GetEngineCounters().c_str());
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeApplyEngineConfigOverride(
+        JNIEnv* env, jobject, jstring jKey, jstring jValue) {
+    if (!jKey || !jValue) return JNI_FALSE;
+    const char* k = env->GetStringUTFChars(jKey, nullptr);
+    const char* v = env->GetStringUTFChars(jValue, nullptr);
+    const bool ok = PX5::FexCoreIntegration::ApplyEngineConfigOverride(
+        k ? k : "", v ? v : "");
+    if (k) env->ReleaseStringUTFChars(jKey, k);
+    if (v) env->ReleaseStringUTFChars(jValue, v);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+// Kotlin level ids: 0=none 1=error 2=warn 3=info 4=debug 5=trace.
+// Level 4/5 also clear the verbose flag dependency — the explicit selector
+// is the master gate from the moment it is first used.
+extern "C" JNIEXPORT void JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeSetLogLevel(
+        JNIEnv*, jobject, jint level) {
+    using namespace PX5;
+    EngineSettings::logLevel.store(level);
+    Logger::SetMinLevel(
+        level <= 0 ? static_cast<LogLevel>(6)   // none: drop everything
+                   : static_cast<LogLevel>(level - 1)); // error..trace
+    PX5_LOGI(LogCategory::SETTINGS, "log level set to %d", level);
+}
+
+// Kotlin present-mode ids: 0=auto 1=FIFO 2=FIFO_RELAXED 3=MAILBOX
+// 4=IMMEDIATE 5=FIFO_LATEST_READY. Validation against the device's
+// supported modes happens at swapchain creation (vulkan_device.cpp) —
+// an unsupported explicit choice falls back loudly, never silently.
+extern "C" JNIEXPORT void JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeSetPresentMode(
+        JNIEnv*, jobject, jint mode) {
+    PX5::EngineSettings::presentMode.store(mode < 0 ? 0 : (mode > 5 ? 0 : mode));
 }
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -208,8 +354,13 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeApplySettings(
 
     GpuDriverManager::GetInstance().SetActiveMode(EngineSettings::driverMode.load());
 
-    if (verboseLog) Logger::SetMinLevel(LogLevel::DEBUG);
-    else            Logger::SetMinLevel(LogLevel::INFO);
+    // The explicit level selector (nativeSetLogLevel) is the master gate;
+    // the legacy verbose boolean only widens INFO to DEBUG when no explicit
+    // level has been chosen yet (levelDefault sentinel -1).
+    if (EngineSettings::logLevel.load() < 0) {
+        if (verboseLog) Logger::SetMinLevel(LogLevel::DEBUG);
+        else            Logger::SetMinLevel(LogLevel::INFO);
+    }
 
     if (logDirJ) {
         const char* d = env->GetStringUTFChars(logDirJ, nullptr);
@@ -283,13 +434,17 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeGetInputSummary(
 // ---- Driver slots --------------------------------------------------------
 extern "C" JNIEXPORT jint JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRegisterDriverSlot(
-        JNIEnv* env, jobject, jstring labelJ, jstring soPathJ) {
+        JNIEnv* env, jobject, jstring labelJ, jstring soPathJ,
+        jstring sonameJ) {
     const char* l = env->GetStringUTFChars(labelJ, nullptr);
     const char* s = env->GetStringUTFChars(soPathJ, nullptr);
+    const char* n = sonameJ ? env->GetStringUTFChars(sonameJ, nullptr) : nullptr;
     const uint32_t id = PX5::GpuDriverManager::GetInstance()
-                            .RegisterSlot(l ? l : "", s ? s : "");
+                            .RegisterSlot(l ? l : "", s ? s : "",
+                                          (n && *n) ? n : "libvulkan_adreno.so");
     env->ReleaseStringUTFChars(labelJ, l);
     env->ReleaseStringUTFChars(soPathJ, s);
+    if (n) env->ReleaseStringUTFChars(sonameJ, n);
     return static_cast<jint>(id);
 }
 

@@ -16,6 +16,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <unordered_set>
 #include <sys/auxv.h>
 #include <sys/mman.h>
@@ -183,6 +184,17 @@ public:
                  (unsigned long long)m_unalignedCount,
                  m_protectedPages.size());
         return buf;
+    }
+
+    // Live counter accessors for the engine counters panel (real values,
+    // including zeroes — see the class contract above).
+    uint64_t CounterPagesProtected()  const { return m_pagesProtected; }
+    uint64_t CounterFaults()          const { return m_faultCount; }
+    uint64_t CounterInvalidations()   const { return m_invalidateCount; }
+    uint64_t CounterUnalignedRepairs()const { return m_unalignedCount; }
+    size_t   LiveProtectedCount() {
+        std::lock_guard<std::mutex> lk(m_pageMutex);
+        return m_protectedPages.size();
     }
 
 private:
@@ -582,8 +594,14 @@ bool RunConformanceTest() {
                  "conformance_stack");
     void* stackHost = mm.GetHostPointer(stackVA);
 
+    // Guest stacks grow DOWN. The stack pointer handed to FEXCore must be the
+    // TOP edge of the mapping, not its bottom: SP = bottom meant the very
+    // first host-side guest-stack touch landed one page below the mapping
+    // (unmapped) — the 12:34:12 device crash signature.
+    const uint64_t stackTopVA = stackVA + pageSize;
+
     ExecResult r = ExecuteAtHostRip(reinterpret_cast<uint64_t>(hostPtr),
-                                    reinterpret_cast<uint64_t>(stackHost));
+                                    stackTopVA);
     mm.UnmapMemory(kTestVA, codeSize);
     mm.UnmapMemory(stackVA, pageSize);
 
@@ -603,6 +621,82 @@ std::string GetArchitectureSummary() {
         ? "FEXCore " PX5_FEXCORE_PIN " initialized | REAL syscall bridge "
           "ACTIVE | SMC mtrack + fault routing armed"
         : "FEXCore " PX5_FEXCORE_PIN " not initialized";
+}
+
+std::string GetEngineCounters() {
+    // Real counters only — every number here is read from live engine state
+    // at call time. Zeroes are reported, not hidden (they are evidence too).
+    const auto& sys = GuestSyscalls::Stats();
+    auto& smc = SmcManager::GetInstance();
+    auto& mm = MemoryManager::GetInstance();
+
+    char buf[512];
+    snprintf(buf, sizeof(buf),
+             "engine: %s\n"
+             "syscalls: total=%llu handled=%llu unhandled=%llu bytesOut=%llu\n"
+             "SMC: pagesProtected=%llu faults=%llu invalidations=%llu "
+             "unalignedRepairs=%llu liveProtected=%zu\n"
+             "memory: %s\n"
+             "guestThreads: lastRun=%s",
+             IsInitialized() ? "initialized" : "not initialized",
+             (unsigned long long)sys.totalCalls,
+             (unsigned long long)sys.handledCalls,
+             (unsigned long long)sys.unhandledCalls,
+             (unsigned long long)sys.bytesWritten,
+             (unsigned long long)smc.CounterPagesProtected(),
+             (unsigned long long)smc.CounterFaults(),
+             (unsigned long long)smc.CounterInvalidations(),
+             (unsigned long long)smc.CounterUnalignedRepairs(),
+             smc.LiveProtectedCount(),
+             mm.GetWindowInfoString().c_str(),
+             g_execThread ? "active" : "idle");
+    return buf;
+}
+
+bool ApplyEngineConfigOverride(const std::string& key, const std::string& value) {
+    // Whitelisted bridge into FEXCore's real layered config. The keys mirror
+    // FEX's own FEX_* environment options (Source/Common/Config.cpp) and
+    // FEXCore::Config::Set() is the same public entry the env layer uses —
+    // just called directly. Requires Config::Initialize() (the global Meta
+    // layer) and MUST precede CreateNewContext(): FEX_CONFIG_OPT members in
+    // ContextImpl read the layered store at context construction.
+    if (g_context) {
+        PX5_LOGW(LogCategory::FEX,
+                 "engine config override '%s' ignored — engine already "
+                 "initialized; takes effect on next engine start",
+                 key.c_str());
+        return false;
+    }
+    if (!g_configInitialized) {
+        FEXCore::Config::Initialize();
+        g_configInitialized = true;
+    }
+    namespace FC = FEXCore::Config;
+    std::string_view v = value;
+        if      (key == "TSOEnabled")            FC::Set(FC::CONFIG_TSOENABLED, v);
+        else if (key == "VectorTSOEnabled")      FC::Set(FC::CONFIG_VECTORTSOENABLED, v);
+        else if (key == "HalfBarrierTSOEnabled") FC::Set(FC::CONFIG_HALFBARRIERTSOENABLED, v);
+        else if (key == "MemcpySetTSOEnabled")   FC::Set(FC::CONFIG_MEMCPYSETTSOENABLED, v);
+        else if (key == "X87ReducedPrecision")   FC::Set(FC::CONFIG_X87REDUCEDPRECISION, v);
+        else if (key == "Multiblock")            FC::Set(FC::CONFIG_MULTIBLOCK, v);
+        else if (key == "MaxInst")               FC::Set(FC::CONFIG_MAXINST, v);
+        else if (key == "HostFeatures")          FC::Set(FC::CONFIG_HOSTFEATURES, v);
+        else if (key == "SmallTSCScale")         FC::Set(FC::CONFIG_SMALLTSCSCALE, v);
+        else if (key == "SMCChecks")             FC::Set(FC::CONFIG_SMCCHECKS, v);
+        else if (key == "VolatileMetadata")      FC::Set(FC::CONFIG_VOLATILEMETADATA, v);
+        else if (key == "MonoHacks")             FC::Set(FC::CONFIG_MONOHACKS, v);
+        else if (key == "HideHypervisorBit")     FC::Set(FC::CONFIG_HIDEHYPERVISORBIT, v);
+        else if (key == "DisableL2Cache")        FC::Set(FC::CONFIG_DISABLEL2CACHE, v);
+        else if (key == "DynamicL1Cache")        FC::Set(FC::CONFIG_DYNAMICL1CACHE, v);
+        else {
+            PX5_LOGW(LogCategory::FEX,
+                     "engine config override rejected: unknown key '%s'",
+                     key.c_str());
+            return false;
+        }
+    PX5_LOGI(LogCategory::FEX, "engine config override applied: %s=%s",
+             key.c_str(), value.c_str());
+    return true;
 }
 
 std::string GetSyscallStatsString() {

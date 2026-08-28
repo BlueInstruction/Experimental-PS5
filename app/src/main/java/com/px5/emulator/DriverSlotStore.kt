@@ -17,7 +17,8 @@ import java.io.File
  */
 object DriverSlotStore {
 
-    data class Slot(val label: String, val soPath: String)
+    data class Slot(val label: String, val soPath: String,
+                    val soname: String = "libvulkan_adreno.so")
 
     private const val PREFS = "px5_engine_settings"
     private const val KEY_SLOTS = "driverSlots"
@@ -29,14 +30,22 @@ object DriverSlotStore {
             val o = arr.optJSONObject(i) ?: return@mapNotNull null
             val label = o.optString("label", "")
             val soPath = o.optString("soPath", "")
-            if (label.isNotBlank() && soPath.isNotBlank()) Slot(label, soPath) else null
+            // Older saves predate meta.json support: they always shipped the
+            // normalized soname, so that is the correct default here.
+            val soname = o.optString("soname", "libvulkan_adreno.so")
+                .ifBlank { "libvulkan_adreno.so" }
+            if (label.isNotBlank() && soPath.isNotBlank())
+                Slot(label, soPath, soname) else null
         }
     }.getOrDefault(emptyList())
 
     fun save(context: Context, slots: List<Slot>) {
         val arr = JSONArray()
         slots.forEach { s ->
-            arr.put(org.json.JSONObject().put("label", s.label).put("soPath", s.soPath))
+            arr.put(org.json.JSONObject()
+                .put("label", s.label)
+                .put("soPath", s.soPath)
+                .put("soname", s.soname))
         }
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putString(KEY_SLOTS, arr.toString()).apply()
@@ -53,7 +62,9 @@ object DriverSlotStore {
         // Drop entries pointing at files that vanished (cleared cache etc.)
         if (live.size != load(context).size) save(context, live)
         live.forEachIndexed { index, slot ->
-            runCatching { wrapper.nativeRegisterDriverSlot(slot.label, slot.soPath) }
+            runCatching {
+                wrapper.nativeRegisterDriverSlot(slot.label, slot.soPath, slot.soname)
+            }
                 .onSuccess { id ->
                     if (id.toInt() != index + 1) {
                         android.util.Log.w(

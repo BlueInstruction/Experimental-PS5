@@ -28,8 +28,13 @@ public:
     static GpuDriverManager& GetInstance();
 
     // Returns the assigned slot id (>=1), or 0 on rejection.
+    // soname = the exact file name inside dir the loader must open —
+    // normally meta.json's "libraryName" (vulkan.ad0863.so,
+    // libvulkan_freedreno.so, ...), or the normalized libvulkan_adreno.so
+    // when a package carries no meta.json. The loader never guesses.
     uint32_t RegisterSlot(const std::string& label,
-                          const std::string& soAbsolutePath);
+                          const std::string& soAbsolutePath,
+                          const std::string& soname);
 
     // Drops every registered slot and falls back to the system ICD.
     // Used by the UI when the user removes an imported driver: slots are
@@ -73,7 +78,12 @@ private:
     int         m_verifyState = 0;
     std::string m_verifyDetail;
 
-    struct Slot { std::string label; std::string soPath; std::string dir; };
+    struct Slot {
+        std::string label;
+        std::string soPath;
+        std::string dir;
+        std::string soname;   // exact file name the loader opens
+    };
 
     std::vector<Slot> m_slots;
     uint32_t m_active = 0;

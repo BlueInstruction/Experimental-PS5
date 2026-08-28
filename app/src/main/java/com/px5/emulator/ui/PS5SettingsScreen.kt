@@ -27,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.px5.emulator.SoundManager
+import com.px5.emulator.core.FexCorePresets
 import com.px5.emulator.core.FexCoreWrapper
 import com.px5.emulator.core.Px5Settings
 import kotlinx.coroutines.Dispatchers
@@ -220,7 +221,7 @@ private fun SettingsPanel(
         ) {
             when (category) {
                 0 -> systemSection(fexCoreStatus, fexCoreWrapper, soundManager)
-                1 -> graphicsSection()
+                1 -> graphicsSection(fexCoreWrapper, soundManager)
                 2 -> audioSection(soundManager)
                 3 -> storageSection(onImportFileClick, onImportFolderClick, onScanGamesClick)
                 4 -> driversSection(fexCoreWrapper, onOpenTurnipManagerClick)
@@ -264,6 +265,20 @@ private fun LazyListScope.systemSection(
                 soundManager.playNavigationSound()
             }
         )
+
+        // Engine log level — the real logger gate (Logger::SetMinLevel).
+        // "Auto" keeps the legacy verbose-toggle behavior.
+        val logLevel by Px5Settings.logLevel.collectAsState()
+        SettingsSegmented(
+            label = "Engine log level",
+            options = listOf("Auto", "None", "Error", "Warn", "Info", "Debug", "Trace"),
+            selectedIndex = logLevel + 1,
+            onSelect = { i ->
+                Px5Settings.setLogLevel(i - 1)
+                fexCoreWrapper?.nativeSetLogLevel(i - 1)
+                soundManager.playNavigationSound()
+            }
+        )
         Spacer(modifier = Modifier.height(8.dp))
 
         val appInfo = androidx.compose.ui.platform.LocalContext.current
@@ -278,6 +293,7 @@ private fun LazyListScope.systemSection(
         fexCoreWrapper?.let { wrapper ->
             var archSummary by remember { mutableStateOf("") }
             var testResult by remember { mutableStateOf<String?>(null) }
+            val scope = rememberCoroutineScope()
             LaunchedEffect(Unit) {
                 try {
                     archSummary = wrapper.nativeGetArchitectureSummary()
@@ -287,23 +303,34 @@ private fun LazyListScope.systemSection(
             }
 
             if (archSummary.isNotBlank()) {
-                SettingsSubHeader("Architecture subsystems")
+                SettingsSubHeader("Engine status")
                 MonoReportBox(archSummary)
+            }
+
+            // Live engine counters — real numbers read from the running
+            // engine (syscalls, SMC faults/invalidations, memory window,
+            // thread state). Zeroes are kept on purpose: they are evidence.
+            var counters by remember { mutableStateOf("") }
+            LaunchedEffect(Unit) {
+                try { counters = wrapper.nativeGetEngineCounters() } catch (_: Exception) {}
+            }
+            if (counters.isNotBlank()) {
+                SettingsSubHeader("Engine counters")
+                MonoReportBox(counters)
             }
 
             Spacer(modifier = Modifier.height(10.dp))
             Button(
                 onClick = {
                     soundManager.playActivationSound()
-                    try {
-                        val pass = wrapper.nativeRunCpuConformanceTest()
-                        testResult = if (pass) {
-                            "PASSED: RAX=42 (mov eax,40; add eax,2; hlt) via ARM64 JIT"
-                        } else {
-                            "FAILED — see logcat (FEX tag)"
+                    testResult = "running in isolated child…"
+                    scope.launch(Dispatchers.Default) {
+                        val rep = try {
+                            wrapper.nativeRunCpuConformanceTest()
+                        } catch (e: Exception) {
+                            "FAILED — ${e.message}"
                         }
-                    } catch (e: Exception) {
-                        testResult = "Error running test: ${e.message}"
+                        testResult = rep
                     }
                 },
                 colors = ButtonDefaults.buttonColors(
@@ -319,7 +346,11 @@ private fun LazyListScope.systemSection(
                 Text(
                     text = res,
                     fontSize = 12.sp,
-                    color = if (res.startsWith("PASSED")) px5Colors().success else px5Colors().danger,
+                    color = when {
+                        res.startsWith("PASSED") -> px5Colors().success
+                        res.startsWith("SKIPPED") -> px5Colors().textSecondary
+                        else -> px5Colors().danger
+                    },
                     fontWeight = FontWeight.Bold,
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                     modifier = Modifier.padding(top = 6.dp)
@@ -365,6 +396,45 @@ private fun LazyListScope.systemSection(
             report?.let { rep -> MonoReportBox(rep, passAware = true) }
         }
     }
+    item {
+        // ---- FEXCore presets — configuration only -----------------------
+        // The preset is DATA (FexCorePresets.kt). Application happens through
+        // FexCoreWrapper.nativeApplyEngineConfigOverride → FEXCore::Config
+        // before the context exists; verification happens in the counters
+        // panel and engine log, never in a toggle's wishful checked state.
+        SettingsHeader("FEXCore presets")
+        val presetName by Px5Settings.enginePresetName.collectAsState()
+        val overrides by Px5Settings.engineOverrides.collectAsState()
+        SettingsSegmented(
+            label = "Active preset",
+            options = listOf("Safe", "Balanced", "Perf", "Debug"),
+            selectedIndex = when (presetName) {
+                "Safe (correctness)" -> 0
+                "Balanced" -> 1
+                "Performance" -> 2
+                "Debug / bring-up" -> 3
+                else -> 1
+            },
+            onSelect = { i ->
+                val preset = FexCorePresets.BUILT_INS[i]
+                val applied = Px5Settings.setEnginePreset(preset.name, preset.overrides)
+                // Best effort now; native honestly rejects when the engine
+                // is already live (the log says "takes effect next start").
+                applied.forEach { (k, v) ->
+                    fexCoreWrapper?.nativeApplyEngineConfigOverride(k, v)
+                }
+                soundManager.playNavigationSound()
+            }
+        )
+        Text(
+            text = "Overrides go through FEXCore's real config layer and take effect at engine start. Active overrides:",
+            fontSize = 12.sp, color = px5Colors().textSecondary, fontFamily = TitilliumFontFamily
+        )
+        MonoReportBox(
+            overrides.entries.joinToString("\n") { "${it.key}=${it.value}" }
+                .ifEmpty { "(no overrides — engine defaults apply)" }
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -375,7 +445,10 @@ private fun LazyListScope.systemSection(
 // tab, which read as two different controls fighting over one setting.
 // ---------------------------------------------------------------------------
 
-private fun LazyListScope.graphicsSection() {
+private fun LazyListScope.graphicsSection(
+    fexCoreWrapper: FexCoreWrapper?,
+    soundManager: SoundManager
+) {
     item {
         val scale = Px5Settings.resScalePct.collectAsState()
         val vsync = Px5Settings.vsyncEnabled.collectAsState()
@@ -408,6 +481,25 @@ private fun LazyListScope.graphicsSection() {
             else "MAILBOX / IMMEDIATE when available",
             checked = vsync.value,
             onCheckedChange = { v -> Px5Settings.setVsync(v) }
+        )
+
+        // Present mode — explicit selection, validated against the device's
+        // supported modes at swapchain build (unsupported choices fall back
+        // loudly in the log; the render HUD shows the real mode in use).
+        val presentMode by Px5Settings.presentMode.collectAsState()
+        SettingsSegmented(
+            label = "Present mode",
+            options = listOf("Auto", "FIFO", "FIFO_RELAXED", "MAILBOX", "IMMEDIATE", "LATEST_READY"),
+            selectedIndex = presentMode,
+            onSelect = { i ->
+                Px5Settings.setPresentMode(i)
+                fexCoreWrapper?.nativeSetPresentMode(i)
+                soundManager.playNavigationSound()
+            }
+        )
+        Text(
+            text = "Modes the device does not report fall back automatically — the HUD shows the real mode.",
+            fontSize = 12.sp, color = px5Colors().textSecondary, fontFamily = TitilliumFontFamily
         )
         Text(
             text = "GPU driver selection and import live in the GPU Drivers tab.",

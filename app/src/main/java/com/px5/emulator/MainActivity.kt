@@ -2,6 +2,8 @@ package com.px5.emulator
 
 import android.net.Uri
 import android.os.Bundle
+import android.view.KeyEvent
+import android.view.MotionEvent
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -61,6 +63,21 @@ class MainActivity : ComponentActivity() {
     private var fexCoreWrapper: FexCoreWrapper? = null
     private var fexCoreStatus: String = "Uninitialized"
 
+    // Physical gamepad pass-through (handheld Android consoles + BT pads).
+    // Routed before Compose so the emulation stage never sees volume-style
+    // system interference; only active while EmuScreen is on screen.
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (PhysicalControllerBridge.enabled &&
+            PhysicalControllerBridge.handleKey(event)) return true
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        if (PhysicalControllerBridge.enabled &&
+            PhysicalControllerBridge.handleMotion(event)) return true
+        return super.dispatchGenericMotionEvent(event)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -80,20 +97,39 @@ class MainActivity : ComponentActivity() {
             logException("SoundManager.init", e)
         }
 
+        // --- Settings store (native-coupled) ------------------------------
+        // Must run BEFORE initializeFexCore: FEXCore config overrides read
+        // the layered store at context creation, so the preset has to be in
+        // place first. The old order (settings after engine init) silently
+        // discarded every preset on cold start.
+        Px5Settings.init(applicationContext)
+        // Honor the persisted shell orientation (system / landscape / portrait).
+        Px5Settings.applyOrientation(this)
+
         // --- FEXCore ---
-        // initializeFexCore() causes native SIGSEGV on this device.
-        // The crash happens inside FEXCore's InitCore() which sets up
-        // the JIT compiler. This is a known issue that needs investigation
-        // in the FEXCore source (possibly signal handler conflict with
-        // Android's debuggerd, or memory mapping issue).
-        //
-        // For now, we load the library (to prove it links) but skip
-        // the runtime initialization. The UI works without FEXCore.
+        // initializeFexCore() runs the full engine bring-up. On the one
+        // device class that faulted here (2026-08-28 logs), the crash was
+        // inside guest execution — NOT InitCore — and is now contained by
+        // the fork-isolated test harness (see nativeRunCpuConformanceTest).
         logState("fex", "loading_library")
         try {
             fexCoreWrapper = FexCoreWrapper()
             logState("fex", "library_loaded")
             logEvent("FEXCore", "library_loaded", "libpx5.so")
+
+            // FEXCore preset + diagnostics gates go in BEFORE the context
+            // exists. Failures are logged by the native side and do not
+            // block startup (honest: a rejected key stays rejected).
+            try {
+                Px5Settings.engineOverrides.value.forEach { (k, v) ->
+                    fexCoreWrapper?.nativeApplyEngineConfigOverride(k, v)
+                }
+                val lvl = Px5Settings.logLevel.value
+                if (lvl >= 0) fexCoreWrapper?.nativeSetLogLevel(lvl)
+                fexCoreWrapper?.nativeSetPresentMode(Px5Settings.presentMode.value)
+            } catch (e: Throwable) {
+                logException("FEXCore.applyPreset", e)
+            }
 
             logState("fex", "initializing_runtime")
             logEvent("FEXCore", "initializeRuntime", "called")
@@ -130,11 +166,6 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // --- Settings store (native-coupled) ------------------------------
-        Px5Settings.init(applicationContext)
-        // Honor the persisted shell orientation (system / landscape / portrait).
-        Px5Settings.applyOrientation(this)
-
         // --- Runtime context wiring (crash handler + driver dirs) ---------
         // Uses the SAME wrapper instance created above. The previous code
         // built a throwaway FexCoreWrapper() here, which double-installed
@@ -145,6 +176,7 @@ class MainActivity : ComponentActivity() {
                 val logsDir = getExternalFilesDir("logs")?.absolutePath
                     ?: filesDir.resolve("logs").absolutePath
                 java.io.File(logsDir).mkdirs()
+                PhysicalControllerBridge.wrapper = wrapper
                 wrapper.nativeInitRuntimeContext(
                     logsDir,
                     applicationInfo.nativeLibraryDir,
@@ -403,12 +435,59 @@ fun AppNavigation(
                     extractZip(zipFile, dir)
                     zipFile.delete()
 
-                    // Candidate 1: any shared object whose name belongs to
-                    // the Vulkan driver family (covers vulkan.turnip.so,
-                    // libvulkan.so, libvulkan.so.1, libvulkan_adreno.so,
-                    // libvulkan.adreno.so, ...). Largest file wins ties.
+                    // --- meta.json (the ecosystem contract) -----------------
+                    // Winlator/Eden/adrenotools driver packs carry a meta.json:
+                    //   { schemaVersion, name, description, author, vendor,
+                    //     driverVersion, minApi, libraryName }
+                    // The .so file name is NOT stable across builds
+                    // (vulkan.ad0863.so / vulkan.ad07xx.so /
+                    // libvulkan_freedreno.so / ...) — libraryName is the
+                    // authority. The filename scan below is only the
+                    // fallback for packs without meta.json.
+                    val metaFile = dir.walkTopDown()
+                        .filter { it.isFile && it.name.equals("meta.json", ignoreCase = true) }
+                        .firstOrNull()
+                    var metaName: String? = null
+                    var metaVendor: String? = null
+                    var metaDriverVersion: String? = null
+                    var metaLibraryName: String? = null
+                    var metaMinApi: Int = 0
+                    if (metaFile != null) {
+                        runCatching {
+                            val o = org.json.JSONObject(metaFile.readText())
+                            metaName = o.optString("name", "").ifBlank { null }
+                            metaVendor = o.optString("vendor", "").ifBlank { null }
+                            metaDriverVersion = o.optString("driverVersion", "").ifBlank { null }
+                            metaLibraryName = o.optString("libraryName", "").ifBlank { null }
+                            metaMinApi = o.optInt("minApi", 0)
+                        }.onFailure { f ->
+                            android.util.Log.w("PX5", "meta.json parse failed: ${f.message}")
+                        }
+                    }
+
+                    // Honest gate: a pack demanding a newer Android than this
+                    // device cannot work — reject with the real reason.
+                    if (metaMinApi > android.os.Build.VERSION.SDK_INT) {
+                        resultMsg = "Driver requires Android API $metaMinApi " +
+                                "(this device: ${android.os.Build.VERSION.SDK_INT}) — not installable here."
+                        launch(Dispatchers.Main) {
+                            Toast.makeText(context, resultMsg, Toast.LENGTH_LONG).show()
+                        }
+                        return@launch
+                    }
+
+                    // Candidate 1: the exact library named by meta.json.
+                    val metaNamedLib = metaLibraryName?.let { libName ->
+                        dir.walkTopDown()
+                            .filter { it.isFile && it.name == libName }
+                            .maxByOrNull { it.length() }
+                    }
+
+                    // Candidate 2: any shared object whose name belongs to
+                    // the Vulkan driver family (fallback for packs without
+                    // meta.json). Largest file wins ties.
                     val vulkanLib = Regex("(?i)(?:lib)?vulkan[^/]*\\.so(\\.\\d+)*$")
-                    val byName = dir.walkTopDown()
+                    val byName = metaNamedLib ?: dir.walkTopDown()
                         .filter { it.isFile && vulkanLib.containsMatchIn(it.name) }
                         .maxByOrNull { it.length() }
 
@@ -457,30 +536,53 @@ fun AppNavigation(
                         !aarch64Elf(foundSo) ->
                             "${foundSo.name} is not an arm64-v8a shared object — rejected."
                         else -> {
-                            // Normalize: adrenotools opens the slot dir with
-                            // soname "libvulkan_adreno.so"; whatever the pack
-                            // called it, the loader must find that name.
-                            val sonameLib = File(dir, "libvulkan_adreno.so")
-                            if (foundSo.absolutePath != sonameLib.absolutePath) {
-                                foundSo.copyTo(sonameLib, overwrite = true)
-                            }
                             val wrapper = fexCoreWrapper
                             when {
                                 wrapper == null ->
                                     "Driver extracted but the engine library is unavailable."
                                 else -> {
-                                    val label = "Turnip ${dir.name.removePrefix("turnip_")}"
+                                    // meta.json path: the loader opens the file
+                                    // under its OWN libraryName — the ecosystem
+                                    // contract (Winlator/Eden do the same). Only
+                                    // nameless packs get normalized to the
+                                    // legacy libvulkan_adreno.so soname.
+                                    val hasMeta = !metaLibraryName.isNullOrBlank()
+                                    val soname: String
+                                    val libForSlot: File
+                                    if (hasMeta) {
+                                        soname = foundSo.name
+                                        libForSlot = foundSo
+                                    } else {
+                                        soname = "libvulkan_adreno.so"
+                                        libForSlot = File(dir, soname)
+                                        if (foundSo.absolutePath != libForSlot.absolutePath) {
+                                            foundSo.copyTo(libForSlot, overwrite = true)
+                                        }
+                                    }
+
+                                    val label = metaName
+                                        ?: (metaVendor?.let { v -> "$v driver" }
+                                            ?: "Driver ${dir.name}")
                                     val slot = wrapper.nativeRegisterDriverSlot(
-                                        label, sonameLib.absolutePath
+                                        label, libForSlot.absolutePath, soname
                                     )
                                     if (slot > 0) {
                                         wrapper.nativeSetDriverMode(slot)
                                         Px5Settings.setDriverMode(slot)
                                         DriverSlotStore.append(
-                                            context, DriverSlotStore.Slot(label, sonameLib.absolutePath)
+                                            context,
+                                            DriverSlotStore.Slot(
+                                                label, libForSlot.absolutePath, soname)
                                         )
+                                        val provenance = listOfNotNull(
+                                            metaVendor, metaDriverVersion
+                                        ).joinToString(" • ")
                                         "Driver installed • slot $slot active.\n" +
-                                                "${foundSo.name} -> ${sonameLib.absolutePath}"
+                                                label +
+                                                (if (provenance.isNotBlank()) " ($provenance)" else "") +
+                                                "\n${libForSlot.name} -> ${libForSlot.absolutePath}" +
+                                                (if (hasMeta) "\nsource: meta.json (libraryName)" else
+                                                    "\nsource: filename scan (no meta.json)")
                                     } else {
                                         "Extraction ok but native slot registration rejected."
                                     }
@@ -642,5 +744,100 @@ private fun ImportStatusCard(
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PhysicalControllerBridge — hardware gamepad pass-through.
+//
+// WHY THIS EXISTS: Android gaming handhelds (AYN Odin 2 class, Retroid
+// Pocket class, Logitech G Cloud class) expose their built-in controls as
+// standard Android GAMEPAD/JOYSTICK devices, and any Bluetooth pad behaves
+// the same. This bridge routes those events into the SAME native input
+// atomics the on-screen DualSense overlay drives (nativeSetButtonState /
+// nativeSetLeftStick / nativeSetRightStick / nativeSetTriggers), so touch
+// and physical input compose instead of competing. One mapping, two input
+// surfaces, zero new native surface area.
+//
+// Enabled only while EmuScreen is on screen; every mapping follows the
+// Android GameController conventions (AXIS_X/Y left stick, AXIS_Z/RZ right
+// stick, AXIS_HAT_X/Y D-pad, BRAKE/LTRIGGER + GAS/RTRIGGER triggers).
+// ---------------------------------------------------------------------------
+object PhysicalControllerBridge {
+
+    @Volatile var enabled: Boolean = false
+    @Volatile var wrapper: FexCoreWrapper? = null
+
+    private const val DEADZONE = 0.08f
+
+    // Sticky axis state: partial MotionEvents must never zero the other
+    // stick (many pads emit one-axis-per-event batches).
+    private var lx = 0f; private var ly = 0f
+    private var rx = 0f; private var ry = 0f
+    private var l2 = 0f; private var r2 = 0f
+
+    private fun dz(v: Float): Float = if (kotlin.math.abs(v) < DEADZONE) 0f else v
+
+    /** Clears every axis and button so leaving a game never sticks inputs. */
+    fun reset() {
+        lx = 0f; ly = 0f; rx = 0f; ry = 0f; l2 = 0f; r2 = 0f
+        wrapper?.nativeSetLeftStick(0f, 0f)
+        wrapper?.nativeSetRightStick(0f, 0f)
+        wrapper?.nativeSetTriggers(0f, 0f)
+    }
+
+    fun handleKey(e: KeyEvent): Boolean {
+        val w = wrapper ?: return false
+        val pressed = e.action == KeyEvent.ACTION_DOWN
+        if (e.action != KeyEvent.ACTION_DOWN && e.action != KeyEvent.ACTION_UP) {
+            return false
+        }
+        val bit = when (e.keyCode) {
+            KeyEvent.KEYCODE_BUTTON_A     -> FexCoreWrapper.PAD_CROSS
+            KeyEvent.KEYCODE_BUTTON_B     -> FexCoreWrapper.PAD_CIRCLE
+            KeyEvent.KEYCODE_BUTTON_X     -> FexCoreWrapper.PAD_SQUARE
+            KeyEvent.KEYCODE_BUTTON_Y     -> FexCoreWrapper.PAD_TRIANGLE
+            KeyEvent.KEYCODE_DPAD_UP      -> FexCoreWrapper.PAD_DPAD_UP
+            KeyEvent.KEYCODE_DPAD_DOWN    -> FexCoreWrapper.PAD_DPAD_DOWN
+            KeyEvent.KEYCODE_DPAD_LEFT    -> FexCoreWrapper.PAD_DPAD_LEFT
+            KeyEvent.KEYCODE_DPAD_RIGHT   -> FexCoreWrapper.PAD_DPAD_RIGHT
+            KeyEvent.KEYCODE_BUTTON_L1    -> FexCoreWrapper.PAD_L1
+            KeyEvent.KEYCODE_BUTTON_R1    -> FexCoreWrapper.PAD_R1
+            KeyEvent.KEYCODE_BUTTON_SELECT -> FexCoreWrapper.PAD_SHARE
+            KeyEvent.KEYCODE_BUTTON_START -> FexCoreWrapper.PAD_OPTIONS
+            KeyEvent.KEYCODE_BUTTON_MODE  -> FexCoreWrapper.PAD_PS_HOME
+            else -> return false
+        }
+        return w.nativeSetButtonState(bit, pressed)
+    }
+
+    fun handleMotion(e: MotionEvent): Boolean {
+        val w = wrapper ?: return false
+        val src = e.source
+        val isJoystick = (src and android.view.InputDevice.SOURCE_CLASS_JOYSTICK) != 0
+        val isGamepad = (src and android.view.InputDevice.SOURCE_GAMEPAD) != 0
+        if (!isJoystick && !isGamepad) return false
+
+        lx = dz(e.getAxisValue(MotionEvent.AXIS_X))
+        ly = dz(e.getAxisValue(MotionEvent.AXIS_Y))
+        rx = dz(e.getAxisValue(MotionEvent.AXIS_Z))
+        ry = dz(e.getAxisValue(MotionEvent.AXIS_RZ))
+        l2 = maxOf(e.getAxisValue(MotionEvent.AXIS_BRAKE),
+                   e.getAxisValue(MotionEvent.AXIS_LTRIGGER))
+        r2 = maxOf(e.getAxisValue(MotionEvent.AXIS_GAS),
+                   e.getAxisValue(MotionEvent.AXIS_RTRIGGER))
+
+        // HAT emulates a D-pad on pads that have no dedicated DPAD source.
+        val hx = e.getAxisValue(MotionEvent.AXIS_HAT_X)
+        val hy = e.getAxisValue(MotionEvent.AXIS_HAT_Y)
+        w.nativeSetButtonState(FexCoreWrapper.PAD_DPAD_LEFT,  hx < -0.5f)
+        w.nativeSetButtonState(FexCoreWrapper.PAD_DPAD_RIGHT, hx >  0.5f)
+        w.nativeSetButtonState(FexCoreWrapper.PAD_DPAD_UP,    hy < -0.5f)
+        w.nativeSetButtonState(FexCoreWrapper.PAD_DPAD_DOWN,  hy >  0.5f)
+
+        w.nativeSetLeftStick(lx, ly)
+        w.nativeSetRightStick(rx, ry)
+        w.nativeSetTriggers(l2, r2)
+        return true
     }
 }

@@ -22,6 +22,18 @@ inline std::atomic<bool>    vsyncEnabled{true};
 inline std::atomic<bool>    verboseLogging{false};
 inline std::atomic<uint32_t> driverMode{0};        // 0 = system ICD
 
+// Explicit log level selector (Kotlin Diagnostics). -1 = not chosen yet, so
+// the legacy verbose boolean still decides DEBUG vs INFO. 0..5 maps to
+// Logger min-level none/error/warn/info/debug/trace.
+inline std::atomic<int>     logLevel{-1};
+
+// Swapchain present mode selector, validated at swapchain creation against
+// vkGetPhysicalDeviceSurfacePresentModesKHR before it is applied:
+//   0 auto (vsync ? FIFO : MAILBOX/IMMEDIATE)  1 FIFO
+//   2 FIFO_RELAXED   3 MAILBOX   4 IMMEDIATE
+//   5 FIFO_LATEST_READY (only when the device reports it)
+inline std::atomic<int>     presentMode{0};
+
 } // namespace PX5::EngineSettings
 
 #endif // PX5_ENGINE_SETTINGS_H

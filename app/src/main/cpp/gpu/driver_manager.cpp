@@ -3,6 +3,7 @@
 
 #include <dlfcn.h>
 #include <libgen.h>
+#include <unistd.h>
 #include <cstring>
 #include <cstdlib>
 #include <algorithm>
@@ -40,15 +41,16 @@ GpuDriverManager& GpuDriverManager::GetInstance() {
 }
 
 uint32_t GpuDriverManager::RegisterSlot(const std::string& label,
-                                        const std::string& soPath) {
-    if (label.empty() || soPath.empty()) return 0;
+                                        const std::string& soPath,
+                                        const std::string& soname) {
+    if (label.empty() || soPath.empty() || soname.empty()) return 0;
     std::string dir = soPath;
     const auto slash = dir.find_last_of('/');
     dir = (slash == std::string::npos) ? "." : dir.substr(0, slash);
-    m_slots.push_back({label, soPath, dir});
+    m_slots.push_back({label, soPath, dir, soname});
     const uint32_t id = static_cast<uint32_t>(m_slots.size());
-    PX5_LOGI(LogCategory::GPU, "Driver slot %u registered: %s (%s)",
-             id, label.c_str(), soPath.c_str());
+    PX5_LOGI(LogCategory::GPU, "Driver slot %u registered: %s (%s, soname=%s)",
+             id, label.c_str(), soPath.c_str(), soname.c_str());
     return id;
 }
 
@@ -93,16 +95,18 @@ void* GpuDriverManager::OpenHostVulkanLibrary(int dlopenMode) {
 
 #ifdef PX5_HAVE_ADRENOTOOLS
     const auto& slot = m_slots[m_active - 1];
+    const std::string& soname =
+        slot.soname.empty() ? std::string(kCustomDriverSoname) : slot.soname;
     PX5_LOGI(LogCategory::GPU,
-             "Loading custom driver '%s' via adrenotools from %s",
-             slot.label.c_str(), slot.dir.c_str());
+             "Loading custom driver '%s' via adrenotools from %s (soname=%s)",
+             slot.label.c_str(), slot.dir.c_str(), soname.c_str());
     void* handle = adrenotools_open_libvulkan(
             dlopenMode,
             ADRENOTOOLS_DRIVER_CUSTOM,
             m_tmpLibDir.empty() ? nullptr : m_tmpLibDir.c_str(),
             m_hookLibDir.c_str(),
             slot.dir.c_str(),
-            kCustomDriverSoname,
+            soname.c_str(),
             nullptr,               // fileRedirectDir unused for now
             &m_mappingHandle);
     if (handle) {
@@ -110,10 +114,33 @@ void* GpuDriverManager::OpenHostVulkanLibrary(int dlopenMode) {
                  "Custom driver loaded through linker-namespace hook");
         return handle;
     }
-    PX5_LOGE(LogCategory::GPU,
-             "adrenotools_open_libvulkan returned null for '%s' "
-             "(dir=%s soname=%s) — falling back to system ICD",
-             slot.label.c_str(), slot.dir.c_str(), kCustomDriverSoname);
+
+    // Adrenotools gives us no error string, so narrow the cause ourselves.
+    // Its loader dlopens "libhook_impl.so" and "libmain_hook.so" from
+    // hookLibDir, then the driver soname from the slot dir — each missing
+    // piece has a distinct, honest signature in the log.
+    {
+        const std::string hookImpl = m_hookLibDir + "/libhook_impl.so";
+        const std::string hookMain = m_hookLibDir + "/libmain_hook.so";
+        const bool haveImpl  = access(hookImpl.c_str(), F_OK) == 0;
+        const bool haveMain  = access(hookMain.c_str(), F_OK) == 0;
+        const std::string driverSo = slot.dir + "/" + soname;
+        const bool haveDriver = access(driverSo.c_str(), F_OK) == 0;
+        PX5_LOGE(LogCategory::GPU,
+                 "adrenotools_open_libvulkan returned null for '%s' "
+                 "(dir=%s soname=%s) — hookImpl=%s hookMain=%s driverSo=%s",
+                 slot.label.c_str(), slot.dir.c_str(), soname.c_str(),
+                 haveImpl ? "yes" : "MISSING",
+                 haveMain ? "yes" : "MISSING",
+                 haveDriver ? "yes" : "MISSING");
+        if (!haveImpl || !haveMain) {
+            PX5_LOGE(LogCategory::GPU,
+                     "Runtime hook libraries are not installed in %s — the APK "
+                     "build did not package them; custom drivers cannot load "
+                     "until the build ships libhook_impl.so + libmain_hook.so",
+                     m_hookLibDir.c_str());
+        }
+    }
     SetActiveMode(0);   // honest fallback, reflected in summaries
     return dlopen("libvulkan.so", dlopenMode);
 #else
@@ -138,6 +165,8 @@ bool GpuDriverManager::VerifyActiveDriverMapped() {
     return true;
 #else
     const auto& slot = m_slots[m_active - 1];
+    const std::string soname =
+        slot.soname.empty() ? std::string(kCustomDriverSoname) : slot.soname;
 
     // Candidate paths the loader may legitimately map the driver from:
     //   1. the exact file registered (both /data spellings),
@@ -156,7 +185,7 @@ bool GpuDriverManager::VerifyActiveDriverMapped() {
 
     if (!m_tmpLibDir.empty()) {
         std::string realPatched = PathForMapsCheck(
-            m_tmpLibDir + "/" + kCustomDriverSoname);
+            m_tmpLibDir + "/" + soname);
         if (!realPatched.empty()) candidates.push_back(realPatched);
     }
 
@@ -188,9 +217,9 @@ bool GpuDriverManager::VerifyActiveDriverMapped() {
                 break;
             }
         }
-        if (!found && n > strlen(kCustomDriverSoname) &&
-            memcmp(end - strlen(kCustomDriverSoname), kCustomDriverSoname,
-                   strlen(kCustomDriverSoname)) == 0) {
+        if (!found && n > soname.size() &&
+            memcmp(end - soname.size(), soname.c_str(),
+                   soname.size()) == 0) {
             // A mapping of our soname from the slot dir or the tmp dir —
             // covers layout surprises the exact-path list cannot name.
             const std::string path(p, n);

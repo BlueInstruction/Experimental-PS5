@@ -177,7 +177,8 @@ fun PS5TurnipDriverSheet(
                                     // match the persisted order again.
                                     fexCoreWrapper?.nativeClearDriverSlots()
                                     remaining.forEachIndexed { i, s ->
-                                        fexCoreWrapper?.nativeRegisterDriverSlot(s.label, s.soPath)
+                                        fexCoreWrapper?.nativeRegisterDriverSlot(
+                                            s.label, s.soPath, s.soname)
                                     }
                                     val newMode =
                                         if (activeMode == idx) 0 else activeMode.coerceAtMost(remaining.size)

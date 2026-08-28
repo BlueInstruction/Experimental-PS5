@@ -2,6 +2,7 @@ package com.px5.emulator.ui
 
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import com.px5.emulator.PhysicalControllerBridge
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -85,6 +86,18 @@ fun EmuScreen(
         onDispose {
             val seconds = (System.currentTimeMillis() - startedAt) / 1000
             game?.let { gameViewModel?.addPlayTime(it.id, seconds) }
+        }
+    }
+
+    // Physical gamepad pass-through lives only while this screen exists.
+    // Handheld consoles (built-in controls) and Bluetooth pads drive the
+    // same native atomics as the on-screen overlay.
+    DisposableEffect(fexCoreWrapper) {
+        PhysicalControllerBridge.wrapper = fexCoreWrapper
+        PhysicalControllerBridge.enabled = true
+        onDispose {
+            PhysicalControllerBridge.enabled = false
+            PhysicalControllerBridge.reset()
         }
     }
 

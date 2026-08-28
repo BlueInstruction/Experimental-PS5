@@ -29,6 +29,13 @@ bool RunConformanceTest();
 
 std::string GetArchitectureSummary();
 std::string GetSyscallStatsString();
+std::string GetEngineCounters();
+
+// Bridge one FEXCore config override (real FEX option keys, see
+// FEXCore/Source/Interface/Config/Config.json.in). Must be called before
+// engine Initialize(); returns false when the key is unknown or the engine
+// is already live (no silent lies — the caller shows the failure).
+bool ApplyEngineConfigOverride(const std::string& key, const std::string& value);
 
 } // namespace PX5::FexCoreIntegration
 

@@ -41,6 +41,22 @@ object Px5Settings {
     private val _showTouchPad = MutableStateFlow(true)
     val showTouchPad: StateFlow<Boolean> = _showTouchPad
 
+    /** Explicit engine log level: 0=none 1=error 2=warn 3=info 4=debug 5=trace,
+     *  -1 = never chosen (legacy verbose toggle decides). */
+    private val _logLevel = MutableStateFlow(-1)
+    val logLevel: StateFlow<Int> = _logLevel
+
+    /** Swapchain present mode: 0=auto 1=FIFO 2=FIFO_RELAXED 3=MAILBOX
+     *  4=IMMEDIATE 5=FIFO_LATEST_READY (device-validated at swapchain build). */
+    private val _presentMode = MutableStateFlow(0)
+    val presentMode: StateFlow<Int> = _presentMode
+
+    /** Active FEXCore preset name + sanitized custom overrides (JSON map). */
+    private val _enginePresetName = MutableStateFlow("Balanced")
+    val enginePresetName: StateFlow<String> = _enginePresetName
+    private val _engineOverrides = MutableStateFlow<Map<String, String>>(emptyMap())
+    val engineOverrides: StateFlow<Map<String, String>> = _engineOverrides
+
     private var prefs: SharedPreferences? = null
 
     fun init(context: Context) {
@@ -53,6 +69,12 @@ object Px5Settings {
         _themeMode.value     = prefs?.getInt("themeMode", 0) ?: 0
         _orientationMode.value = prefs?.getInt("orientationMode", 0) ?: 0
         _showTouchPad.value  = prefs?.getBoolean("showTouchPad", true) ?: true
+        _logLevel.value      = prefs?.getInt("logLevel", -1) ?: -1
+        _presentMode.value   = prefs?.getInt("presentMode", 0) ?: 0
+        _enginePresetName.value = prefs?.getString("enginePresetName", "Balanced")
+            ?: "Balanced"
+        _engineOverrides.value =
+            FexCorePresets.decode(prefs?.getString("engineOverrides", "") ?: "")
     }
 
     /** Applies the persisted orientation mode to the host activity. */
@@ -103,6 +125,30 @@ object Px5Settings {
     fun setShowTouchPad(on: Boolean) {
         _showTouchPad.value = on
         prefs?.edit()?.putBoolean("showTouchPad", on)?.apply()
+    }
+
+    fun setLogLevel(level: Int) {
+        val v = level.coerceIn(-1, 5)
+        _logLevel.value = v
+        prefs?.edit()?.putInt("logLevel", v)?.apply()
+    }
+
+    fun setPresentMode(mode: Int) {
+        val v = mode.coerceIn(0, 5)
+        _presentMode.value = v
+        prefs?.edit()?.putInt("presentMode", v)?.apply()
+    }
+
+    /** Stores a preset selection and returns the effective override map. */
+    fun setEnginePreset(name: String, overrides: Map<String, String>): Map<String, String> {
+        val clean = FexCorePresets.sanitize(overrides)
+        _enginePresetName.value = name
+        _engineOverrides.value = clean
+        prefs?.edit()
+            ?.putString("enginePresetName", name)
+            ?.putString("engineOverrides", FexCorePresets.encode(clean))
+            ?.apply()
+        return clean
     }
 
     /**

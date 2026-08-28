@@ -92,10 +92,11 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadSelf(
     return JNI_FALSE;
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
+extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunCpuConformanceTest(
-        JNIEnv*, jobject) {
-    return JNI_FALSE;
+        JNIEnv* env, jobject) {
+    return env->NewStringUTF(
+        "SKIPPED — x86_64 UI-smoke ABI has no FEXCore bridge");
 }
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -117,6 +118,27 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeGetArchitectureSummary(
         "x86_64 UI-smoke ABI: Vulkan enumeration active; FEXCore bridge "
         "not built for this ABI.");
 }
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeGetEngineCounters(
+        JNIEnv* env, jobject) {
+    return env->NewStringUTF(
+        "x86_64 UI-smoke ABI: no FEXCore counters on this ABI.");
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeApplyEngineConfigOverride(
+        JNIEnv*, jobject, jstring, jstring) {
+    return JNI_FALSE;   // no FEXCore config on the smoke ABI
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeSetLogLevel(
+        JNIEnv*, jobject, jint) {}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeSetPresentMode(
+        JNIEnv*, jobject, jint) {}
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunFoundationSelfTest(
@@ -177,6 +199,18 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGpuProof(
     return env->NewStringUTF("FAIL | GPU proof requires the arm64-v8a "
                              "engine ABI (ui-smoke stub)");
 }
+extern "C" JNIEXPORT void JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeInitRuntimeContext(
+        JNIEnv*, jobject, jstring, jstring, jstring, jstring) {
+    // Smoke ABI: no crash-handler/driver-dir wiring needed (no engine).
+}
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeGetVulkanSummary(
+        JNIEnv* env, jobject) {
+    auto& gpu = PX5::VulkanGpuDevice::GetInstance();
+    gpu.Initialize();
+    return env->NewStringUTF(gpu.GetSummaryString().c_str());
+}
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeSetButtonState(
         JNIEnv*, jobject, jint, jboolean) { return JNI_FALSE; }
@@ -199,7 +233,7 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeGetInputSummary(
 }
 extern "C" JNIEXPORT jint JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRegisterDriverSlot(
-        JNIEnv*, jobject, jstring, jstring) { return 0; }
+        JNIEnv*, jobject, jstring, jstring, jstring) { return 0; }
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeSetDriverMode(
         JNIEnv*, jobject, jint) { return JNI_FALSE; }

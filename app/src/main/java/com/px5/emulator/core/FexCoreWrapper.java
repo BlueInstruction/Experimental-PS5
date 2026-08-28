@@ -30,8 +30,14 @@ public class FexCoreWrapper {
     public native boolean nativeLoadElf(String elfPath);
     public native boolean nativeLoadSelf(String selfPath);
 
-    // Legacy arithmetic JIT conformance (mov/add/hlt -> RAX=42)
-    public native boolean nativeRunCpuConformanceTest();
+    /**
+     * Fork-isolated JIT conformance (mov/add/hlt -> RAX=42).
+     * Returns the REAL report string: "PASSED — ...", "FAILED — ...", or
+     * "... CRASHED in isolated child (signal N)" when the JIT faulted. A
+     * fault kills the test child, never the app; the crash handler writes a
+     * full register dump to px5_crash_<timestamp>.log either way.
+     */
+    public native String nativeRunCpuConformanceTest();
 
     /**
      * One-time runtime wiring (call in Application/MainActivity onCreate):
@@ -47,6 +53,27 @@ public class FexCoreWrapper {
 
     // Architecture status strings
     public native String nativeGetArchitectureSummary();
+
+    /** Live engine counters (syscalls, SMC, memory window, thread state). */
+    public native String nativeGetEngineCounters();
+
+    /**
+     * Applies one FEXCore config override through the real layered config
+     * (FEXCore::Config::Set). Keys mirror FEX's own FEX_* options:
+     * TSOEnabled, VectorTSOEnabled, HalfBarrierTSOEnabled, MemcpySetTSOEnabled,
+     * X87ReducedPrecision, Multiblock, MaxInst, HostFeatures, SmallTSCScale,
+     * SMCChecks, VolatileMetadata, MonoHacks, HideHypervisorBit,
+     * DisableL2Cache, DynamicL1Cache. Must run BEFORE engine init; returns
+     * false (logged) when the key is unknown or the engine is already live.
+     */
+    public native boolean nativeApplyEngineConfigOverride(String key, String value);
+
+    /** Kotlin ids: 0=none 1=error 2=warn 3=info 4=debug 5=trace. */
+    public native void nativeSetLogLevel(int level);
+
+    /** Kotlin ids: 0=auto 1=FIFO 2=FIFO_RELAXED 3=MAILBOX 4=IMMEDIATE
+     *  5=FIFO_LATEST_READY. Validated against the device at swapchain build. */
+    public native void nativeSetPresentMode(int mode);
 
     // ===== Foundation evidence pipeline (NEW, replaces fake layers) =====
 
@@ -111,7 +138,7 @@ public class FexCoreWrapper {
      * Registers a user-imported driver directory (already extracted &
      * structurally validated by Kotlin). Returns slot id >=1, 0 on reject.
      */
-    public native int     nativeRegisterDriverSlot(String label, String soPath);
+    public native int     nativeRegisterDriverSlot(String label, String soPath, String soname);
     /** Mode 0 = system ICD; >0 selects a registered slot for next init. */
     public native boolean nativeSetDriverMode(int mode);
     /** Drops every registered slot (falls back to system ICD until re-registered). */

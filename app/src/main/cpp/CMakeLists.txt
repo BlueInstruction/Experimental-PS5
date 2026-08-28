@@ -212,6 +212,40 @@ if(PX5_ADRENOTOOLS_ROOT AND EXISTS "${PX5_ADRENOTOOLS_ROOT}/CMakeLists.txt")
     target_link_libraries(px5 adrenotools)
     target_compile_definitions(px5 PRIVATE PX5_HAVE_ADRENOTOOLS=1)
     message(STATUS "PX5: adrenotools enabled (${PX5_ADRENOTOOLS_ROOT})")
+
+    # -------------------------------------------------------------------------
+    # Runtime hook libraries — REQUIRED for custom driver loading.
+    #
+    # adrenotools_open_libvulkan() dlopens "libhook_impl.so" and
+    # "libmain_hook.so" from a private linker namespace rooted at the
+    # hookLibDir we pass (= applicationInfo.nativeLibraryDir). Those .so are
+    # RUNTIME dependencies of the loader, not link-time deps of px5, so they
+    # are NOT pulled in by target_link_libraries. They must be:
+    #   1. built (ninja only builds what px5 depends on — force it here), and
+    #   2. packaged into the APK lib/<abi>/ dir, extracted into
+    #      nativeLibraryDir at install (useLegacyPackaging=true in gradle).
+    #
+    # Device evidence (2026-08-28 logs): without these the load always
+    # returned null and fell back to the system ICD, while the APK shipped
+    # only libpx5.so. sharpdroid ships exactly these two libraries.
+    # -------------------------------------------------------------------------
+    if(TARGET hook_impl AND TARGET main_hook)
+        add_dependencies(px5 hook_impl main_hook)
+        # AGP packages every .so it finds in CMAKE_LIBRARY_OUTPUT_DIRECTORY.
+        add_custom_command(TARGET px5 POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory
+                        ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        $<TARGET_FILE:hook_impl>
+                        $<TARGET_FILE:main_hook>
+                        ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
+                COMMENT "PX5: packaging adrenotools runtime hooks (libhook_impl.so, libmain_hook.so)")
+        message(STATUS "PX5: adrenotools runtime hooks will be packaged")
+    else()
+        message(WARNING
+            "PX5: adrenotools present but hook_impl/main_hook targets missing —"
+            " custom driver loading will fail at runtime with dlopen errors")
+    endif()
 else()
     message(STATUS "PX5: adrenotools NOT provided — system-ICD-only driver mode")
 endif()

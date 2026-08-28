@@ -614,21 +614,54 @@ bool VulkanGpuDevice::CreateSwapchainLocked() {
         pfnPMs(reinterpret_cast<VkPhysicalDevice>(m_physDev), m_surface,
                &npm, pms.data());
 
-    bool haveFifo = false, haveMailbox = false, haveImmediate = false;
+    bool haveFifo = false, haveMailbox = false, haveImmediate = false,
+         haveFifoRelaxed = false, haveFifoLatestReady = false;
     for (auto m : pms) {
-        if (m == VK_PRESENT_MODE_FIFO_KHR)      haveFifo = true;
-        if (m == VK_PRESENT_MODE_MAILBOX_KHR)   haveMailbox = true;
-        if (m == VK_PRESENT_MODE_IMMEDIATE_KHR) haveImmediate = true;
+        if (m == VK_PRESENT_MODE_FIFO_KHR)            haveFifo = true;
+        if (m == VK_PRESENT_MODE_MAILBOX_KHR)         haveMailbox = true;
+        if (m == VK_PRESENT_MODE_IMMEDIATE_KHR)       haveImmediate = true;
+        if (m == VK_PRESENT_MODE_FIFO_RELAXED_KHR)    haveFifoRelaxed = true;
+#ifdef VK_PRESENT_MODE_FIFO_LATEST_READY_EXT
+        if (m == VK_PRESENT_MODE_FIFO_LATEST_READY_EXT) haveFifoLatestReady = true;
+#endif
     }
+
+    // Selection order: an explicit user choice wins ONLY when the device
+    // reports support for it (queried right above — never forced); otherwise
+    // the auto policy applies and the fallback is logged, never silent.
     VkPresentModeKHR chosen = VK_PRESENT_MODE_FIFO_KHR;
     std::string pmName = "FIFO(vsync)";
-    if (!EngineSettings::vsyncEnabled.load()) {
-        if (haveMailbox) {
-            chosen = VK_PRESENT_MODE_MAILBOX_KHR;
-            pmName = "MAILBOX";
-        } else if (haveImmediate) {
-            chosen = VK_PRESENT_MODE_IMMEDIATE_KHR;
-            pmName = "IMMEDIATE";
+    const int wantMode = EngineSettings::presentMode.load();
+    bool honored = false;
+    switch (wantMode) {
+        case 1: if (haveFifo)              { chosen = VK_PRESENT_MODE_FIFO_KHR;         pmName = "FIFO";           honored = true; } break;
+        case 2: if (haveFifoRelaxed)       { chosen = VK_PRESENT_MODE_FIFO_RELAXED_KHR; pmName = "FIFO_RELAXED";   honored = true; } break;
+        case 3: if (haveMailbox)           { chosen = VK_PRESENT_MODE_MAILBOX_KHR;      pmName = "MAILBOX";        honored = true; } break;
+        case 4: if (haveImmediate)         { chosen = VK_PRESENT_MODE_IMMEDIATE_KHR;    pmName = "IMMEDIATE";      honored = true; } break;
+#ifdef VK_PRESENT_MODE_FIFO_LATEST_READY_EXT
+        case 5: if (haveFifoLatestReady)   { chosen = VK_PRESENT_MODE_FIFO_LATEST_READY_EXT; pmName = "FIFO_LATEST_READY"; honored = true; } break;
+#endif
+        default: break; // 0 = auto
+    }
+    if (wantMode > 0 && !honored) {
+        PX5_LOGW(LogCategory::VULKAN,
+                 "present mode %d requested but not supported by this device/"
+                 "surface — falling back (supported: FIFO=%d MAILBOX=%d "
+                 "IMMEDIATE=%d FIFO_RELAXED=%d LATEST_READY=%d)",
+                 wantMode, haveFifo ? 1 : 0, haveMailbox ? 1 : 0,
+                 haveImmediate ? 1 : 0, haveFifoRelaxed ? 1 : 0,
+                 haveFifoLatestReady ? 1 : 0);
+    }
+    if (!honored) {
+        pmName = "FIFO(vsync)";
+        if (!EngineSettings::vsyncEnabled.load()) {
+            if (haveMailbox) {
+                chosen = VK_PRESENT_MODE_MAILBOX_KHR;
+                pmName = "MAILBOX";
+            } else if (haveImmediate) {
+                chosen = VK_PRESENT_MODE_IMMEDIATE_KHR;
+                pmName = "IMMEDIATE";
+            }
         }
     }
     if (chosen == VK_PRESENT_MODE_FIFO_KHR && !haveFifo && !pms.empty())
