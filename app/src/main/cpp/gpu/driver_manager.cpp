@@ -6,8 +6,16 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
-#include <android/linker.h>
 #include <android/dlext.h>
+#ifdef PX5_HAVE_ADRENOTOOLS
+// NOTE: the linker-namespace APIs (android_create_namespace and friends)
+// have NO public NDK header — <android/linker.h> does not exist. The
+// pinned adrenotools build already compiles liblinkernsbypass, whose
+// android_linker_ns.h declares the real contracts (constants included:
+// ANDROID_NAMESPACE_TYPE_SHARED = 2) and resolves the __loader_ symbols
+// from libdl_android at runtime. We reuse that target instead of guessing.
+#include <android_linker_ns.h>
+#endif
 #include <cstring>
 #include <cerrno>
 #include <cstdlib>
@@ -77,7 +85,16 @@ void LogSlotInventory(const std::string& dir, const std::string& soname) {
 // and reports the REAL linker error for the driver soname. Runs only on
 // the failure path, so a future adrenotools null can never again leave us
 // guessing between "package problem" and "hook plumbing problem".
+// Uses liblinkernsbypass (already in the adrenotools link graph) for the
+// namespace APIs — the NDK ships no public header for them.
+#ifdef PX5_HAVE_ADRENOTOOLS
 void NamespaceDlopenProbe(const std::string& dir, const std::string& soname) {
+    if (!linkernsbypass_load_status()) {
+        PX5_LOGE(LogCategory::GPU,
+                 "DiagNS probe: linkernsbypass failed to initialize — probe "
+                 "unavailable on this device");
+        return;
+    }
     const std::string dirSlash = dir.back() == '/' ? dir : dir + "/";
     struct android_namespace_t* ns = android_create_namespace(
             "px5-driver-diag",
@@ -92,11 +109,8 @@ void NamespaceDlopenProbe(const std::string& dir, const std::string& soname) {
                  dlerror());
         return;
     }
-    android_dlextinfo info{};
-    info.flags = ANDROID_DLEXT_USE_NAMESPACE;
-    info.library_namespace = ns;
     const std::string path = dirSlash + soname;
-    void* h = android_dlopen_ext(path.c_str(), RTLD_NOW, &info);
+    void* h = linkernsbypass_namespace_dlopen(path.c_str(), RTLD_NOW, ns);
     if (h) {
         PX5_LOGI(LogCategory::GPU,
                  "DiagNS probe: '%s' dlopens FINE in its own namespace — "
@@ -114,6 +128,8 @@ void NamespaceDlopenProbe(const std::string& dir, const std::string& soname) {
                  err ? err : "(dlerror empty)");
     }
 }
+
+#endif  // PX5_HAVE_ADRENOTOOLS
 
 } // namespace
 

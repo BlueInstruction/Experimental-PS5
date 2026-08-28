@@ -212,6 +212,10 @@ if(PX5_ADRENOTOOLS_ROOT AND EXISTS "${PX5_ADRENOTOOLS_ROOT}/CMakeLists.txt")
     set(ADRENOTOOLS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     add_subdirectory(${PX5_ADRENOTOOLS_ROOT} ${CMAKE_CURRENT_BINARY_DIR}/adrenotools)
     target_link_libraries(px5 adrenotools)
+    # linkernsbypass declares the linker-namespace APIs the NDK ships no
+    # public header for (driver_manager's failure-path DiagNS probe uses
+    # them); its include dir propagates through this link.
+    target_link_libraries(px5 linkernsbypass)
     target_compile_definitions(px5 PRIVATE PX5_HAVE_ADRENOTOOLS=1)
     message(STATUS "PX5: adrenotools enabled (${PX5_ADRENOTOOLS_ROOT})")
 
