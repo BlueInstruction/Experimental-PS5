@@ -100,6 +100,13 @@ bool VulkanGpuDevice::Initialize() {
         return false;
     }
 
+    // The Android loader binds an ICD on its first instance-level call, not
+    // at dlopen — so this is the first point where the binding exists and a
+    // check means something. Prove the chosen custom driver is really
+    // mapped, or say so loudly: a run that quietly renders through the
+    // system driver looks exactly like a successful injection.
+    PX5::GpuDriverManager::GetInstance().VerifyActiveDriverMapped();
+
     // ---- Stage 3: physical devices ------------------------------------
     auto pfnEnumDevs = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
         vkGIPA(reinterpret_cast<VkInstance>(m_instance),

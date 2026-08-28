@@ -18,6 +18,9 @@ namespace PX5 {
 //   * When a non-system slot is active, OpenHostVulkanLibrary() loads the
 //     driver through adrenotools_open_libvulkan() (linker-namespace hook),
 //     exactly the path used by Winlator and the Eden emulator.
+//   * The hook can silently fall back to the system driver while still
+//     returning a usable handle, so VerifyActiveDriverMapped() proves the
+//     chosen driver against /proc/self/maps after the ICD is bound.
 //   * No fabricated "driver installed" state ever leaves this class.
 // ---------------------------------------------------------------------------
 class GpuDriverManager {
@@ -43,10 +46,27 @@ public:
     // Returns a dlopen-style handle, or nullptr with the failure logged.
     void*  OpenHostVulkanLibrary(int dlopenMode);
 
+    // Post-binding proof that the chosen custom driver is really in use.
+    // A non-null handle from adrenotools is NOT that proof: the hook can
+    // silently fall back to the system driver and still return a perfectly
+    // good loader handle. Call once AFTER the first instance-level Vulkan
+    // call (vkCreateInstance) — the Android loader binds an ICD on its first
+    // entry point, not at dlopen, so checking earlier would condemn every
+    // driver ever loaded.
+    // Answers: true when the driver is confirmed mapped in /proc/self/maps,
+    // false on definite absence. An unreadable map or an unresolvable path
+    // answers "unknown" (true): the expensive mistake is condemning a
+    // driver that did load. Result is computed once and cached.
+    bool VerifyActiveDriverMapped();
+
     std::string SummaryString() const;
 
 private:
     GpuDriverManager() = default;
+
+    // 0 = not yet run, 1 = verified, 2 = definitely absent, 3 = unknown
+    int         m_verifyState = 0;
+    std::string m_verifyDetail;
 
     struct Slot { std::string label; std::string soPath; std::string dir; };
 
