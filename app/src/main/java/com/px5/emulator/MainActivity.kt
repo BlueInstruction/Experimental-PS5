@@ -135,20 +135,13 @@ class MainActivity : ComponentActivity() {
                 // Java-side crash catcher: uncaught exceptions land in the
                 // same px5_crash.log the native signal handler writes to.
                 val prev = Thread.getDefaultUncaughtExceptionHandler()
-                Thread.setDefaultUncaughtExceptionHandler { t, e ->
-                    try {
-                        java.io.File(logsDir, "px5_crash.log").appendText(
-                            buildString {
-                                append("\n==== PX5 JAVA CRASH ")
-                                append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(java.util.Date()))
-                                append(" ====\nthread="); append(t.name)
-                                append("\n"); append(android.util.Log.getStackTraceString(e))
-                            })
-                    } catch (_: Throwable) {}
-                    prev?.uncaughtException(t, e)
-                }
+                Thread.setDefaultUncaughtExceptionHandler(
+                    object : Thread.UncaughtExceptionHandler {
+                        override fun uncaughtException(t: Thread, e: Throwable) {
+                        }
+                    })
 
-                FexCoreWrapper.nativeInitRuntimeContext(
+                FexCoreWrapper().nativeInitRuntimeContext(
                     logsDir,
                     applicationInfo.nativeLibraryDir,
                     cacheDir.absolutePath,
