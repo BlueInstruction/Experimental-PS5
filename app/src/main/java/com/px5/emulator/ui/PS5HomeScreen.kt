@@ -1,10 +1,5 @@
 package com.px5.emulator.ui
 
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import android.os.BatteryManager
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
@@ -12,14 +7,28 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material3.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Text
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -27,7 +36,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -37,7 +45,25 @@ import com.px5.emulator.GameViewModel
 import com.px5.emulator.R
 import com.px5.emulator.SoundManager
 import com.px5.emulator.core.FexCoreWrapper
+import java.text.DateFormat
+import java.util.Date
 
+/**
+ * PS5HomeScreen — the real game library.
+ *
+ * Honesty rules enforced here:
+ *  * No seeded demo games: an empty library shows an empty state with
+ *    real import actions. Nothing invents content.
+ *  * Details show only real fields (format, title id, byte size from
+ *    disk, version parsed from param.json / PKG SFO, real last-played
+ *    and accumulated play time tracked by the app itself).
+ *  * No fake trophy bars, no "82% completed" activity cards, no store.
+ *
+ * Orientation: the shell adapts — landscape keeps the PS5 carousel plus
+ * side detail panel, portrait switches to a vertical cover grid with the
+ * detail panel below. Both directions are fully usable (the old build
+ * was landscape-locked).
+ */
 @Composable
 fun PS5HomeScreen(
     games: List<GameEntity>,
@@ -46,120 +72,43 @@ fun PS5HomeScreen(
     fexCoreStatus: String,
     fexCoreWrapper: FexCoreWrapper? = null,
     onGameSelected: (String) -> Unit,
-    onOpenStore: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenSearch: () -> Unit,
-    onAddGameClick: () -> Unit
+    onImportFileClick: () -> Unit,
+    onImportFolderClick: () -> Unit
 ) {
-    val context = LocalContext.current
-    var selectedTab by remember { mutableStateOf(0) } // 0: Games, 1: Media
+    var selectedTab by remember { mutableStateOf(0) } // 0: Games
     var selectedIndex by remember { mutableStateOf(0) }
-    
-    // Battery Receiver
-    var batteryLevel by remember { mutableStateOf(-1) }
-    var batteryIsCharging by remember { mutableStateOf(false) }
-
-    // Overlay Drawer States
     var showControlCenter by remember { mutableStateOf(false) }
-    var showNotifications by remember { mutableStateOf(false) }
 
-    DisposableEffect(context) {
-        val batteryReceiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context, intent: Intent) {
-                val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
-                val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
-                if (level != -1 && scale != -1) {
-                    batteryLevel = (level * 100 / scale.toFloat()).toInt()
-                }
-                val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
-                batteryIsCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-                        status == BatteryManager.BATTERY_STATUS_FULL
-            }
-        }
-        context.registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        onDispose {
-            context.unregisterReceiver(batteryReceiver)
-        }
-    }
-
-    // Filter games by active top tab (Games vs Media)
     val displayedList = remember(games, selectedTab) {
-        val storeTile = GameEntity(
-            id = "ps5_store",
-            name = "PlayStation Store",
-            path = "store",
-            category = "Store"
-        )
-        val addTile = GameEntity(
-            id = "ps5_add_game",
-            name = "Install Game",
-            path = "add",
-            category = "Install"
-        )
-
-        if (selectedTab == 0) {
-            val gameItems = games.filter { it.category != "Media" }
-            listOf(storeTile) + gameItems + listOf(addTile)
-        } else {
-            val mediaItems = games.filter { it.category == "Media" }
-            mediaItems
-        }
+        if (selectedTab == 0) games else emptyList()
     }
-
     val selectedGame = displayedList.getOrNull(selectedIndex) ?: displayedList.firstOrNull()
-
-    // Sample Notifications
-    val sampleNotifications = remember {
-        listOf(
-            PS5NotificationItem(
-                id = "notif_1",
-                title = "Trophy Unlocked!",
-                description = "Platinum Trophy in Astro's Playroom",
-                timeAgo = "10m ago",
-                iconRes = R.drawable.ps5_trophy_gold
-            ),
-            PS5NotificationItem(
-                id = "notif_2",
-                title = "DualSense Controller Connected",
-                description = "Bluetooth Controller 1 Active (Haptics ON)",
-                timeAgo = "1h ago",
-                iconRes = R.drawable.ic_dualsense_ps
-            ),
-            PS5NotificationItem(
-                id = "notif_3",
-                title = "FEXCore Execution Core",
-                description = "ARM64 Bionic JNI Translation Engine Ready",
-                timeAgo = "2h ago",
-                iconRes = R.drawable.ps5_intro_logo
-            )
-        )
-    }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(PS5DarkBackground)
     ) {
-        // Dynamic Fullscreen Hero Backdrop
+        // Ambient backdrop
         Crossfade(
             targetState = selectedGame?.id,
             animationSpec = tween(durationMillis = 400),
             label = "BackdropCrossfade"
-        ) { targetId ->
-            val bgRes = if (targetId == "ps5_store") R.drawable.ps5_store_background else R.drawable.ps5_background_all
-            val backdropPainter = safePainterResource(id = bgRes)
+        ) { _ ->
+            val backdropPainter = safePainterResource(id = R.drawable.ps5background_all)
             if (backdropPainter != null) {
                 Image(
                     painter = backdropPainter,
-                    contentDescription = "Backdrop",
+                    contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
-                    alpha = 0.5f
+                    alpha = 0.35f
                 )
             }
         }
 
-        // Atmosphere Dark Gradient Overlay
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -175,7 +124,6 @@ fun PS5HomeScreen(
         )
 
         Column(modifier = Modifier.fillMaxSize()) {
-            // PS5 Top Navigation Header
             PS5TopHeader(
                 selectedTab = selectedTab,
                 onTabSelected = { tab ->
@@ -183,9 +131,6 @@ fun PS5HomeScreen(
                     selectedIndex = 0
                     soundManager.playNavigationSound()
                 },
-                notificationCount = sampleNotifications.size,
-                batteryLevel = batteryLevel,
-                batteryIsCharging = batteryIsCharging,
                 onSearchClick = {
                     soundManager.playNavigationSound()
                     onOpenSearch()
@@ -194,239 +139,57 @@ fun PS5HomeScreen(
                     soundManager.playNavigationSound()
                     onOpenSettings()
                 },
-                onNotificationsClick = {
-                    soundManager.playNavigationSound()
-                    showNotifications = !showNotifications
-                },
                 onProfileClick = {
                     soundManager.playNavigationSound()
                     showControlCenter = true
                 }
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // Steam-Deck-style live telemetry strip (real JNI polling)
+            // Engine telemetry strip (real JNI polling)
             EngineStatusStrip(
                 fexCoreWrapper = fexCoreWrapper,
                 cpuStatus = fexCoreStatus
             )
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            // Game Tile Carousel (Top Row)
-            LazyRow(
-                contentPadding = PaddingValues(horizontal = 40.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                itemsIndexed(displayedList) { index, item ->
-                    PX5GameCardTile(
-                        game = item,
-                        isSelected = index == selectedIndex,
-                        onClick = {
-                            if (index == selectedIndex) {
-                                soundManager.playActivationSound()
-                                when (item.id) {
-                                    "ps5_store" -> onOpenStore()
-                                    "ps5_add_game" -> onAddGameClick()
-                                    else -> onGameSelected(item.path)
-                                }
-                            } else {
-                                selectedIndex = index
-                                soundManager.playNavigationSound()
-                            }
-                        }
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(36.dp))
-
-            // Selected Game Details Panel
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .padding(horizontal = 40.dp)
-            ) {
-                if (selectedGame != null) {
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        // Title
-                        Text(
-                            text = selectedGame.name,
-                            fontSize = 38.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = PS5TextPrimary,
-                            fontFamily = TitilliumFontFamily
-                        )
-
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        // Category & Details Subtitle
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            BadgePill(text = selectedGame.category)
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Text(
-                                text = "${selectedGame.developer} • Version ${selectedGame.version} • ${selectedGame.sizeGb}",
-                                color = PS5TextSecondary,
-                                fontSize = 14.sp,
-                                fontFamily = TitilliumFontFamily
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(6.dp))
-
-                        Text(
-                            text = "Last Played: ${selectedGame.lastPlayed} • Play Time: ${selectedGame.playTime}",
-                            color = PS5TextSecondary.copy(alpha = 0.8f),
-                            fontSize = 13.sp,
-                            fontFamily = TitilliumFontFamily
-                        )
-
-                        Spacer(modifier = Modifier.height(24.dp))
-
-                        // Interactive Action Buttons Row
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(16.dp)
-                        ) {
-                            // Primary Play / Resume Button
-                            Button(
-                                onClick = {
-                                    soundManager.playActivationSound()
-                                    when (selectedGame.id) {
-                                        "ps5_store" -> onOpenStore()
-                                        "ps5_add_game" -> onAddGameClick()
-                                        else -> onGameSelected(selectedGame.path)
-                                    }
-                                },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color.White,
-                                    contentColor = Color.Black
-                                ),
-                                shape = RoundedCornerShape(24.dp),
-                                contentPadding = PaddingValues(horizontal = 32.dp, vertical = 14.dp)
-                            ) {
-                                Icon(imageVector = Icons.Default.PlayArrow, contentDescription = "Play", modifier = Modifier.size(20.dp))
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = if (selectedGame.id == "ps5_store") "Explore Store" else if (selectedGame.id == "ps5_add_game") "Add Game" else "Play Game",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 16.sp,
-                                    fontFamily = TitilliumFontFamily
-                                )
-                            }
-
-                            // Options Button
-                            if (selectedGame.id != "ps5_store" && selectedGame.id != "ps5_add_game") {
-                                var showMenu by remember { mutableStateOf(false) }
-
-                                Box {
-                                    IconButton(
-                                        onClick = { showMenu = true },
-                                        modifier = Modifier
-                                            .size(48.dp)
-                                            .clip(CircleShape)
-                                            .background(Color.White.copy(alpha = 0.1f))
-                                    ) {
-                                        Icon(imageVector = Icons.Default.MoreVert, contentDescription = "More", tint = PS5TextPrimary)
-                                    }
-
-                                    DropdownMenu(
-                                        expanded = showMenu,
-                                        onDismissRequest = { showMenu = false }
-                                    ) {
-                                        DropdownMenuItem(
-                                            text = { Text(if (selectedGame.isFavorite) "Remove from Favorites" else "Add to Favorites") },
-                                            onClick = {
-                                                gameViewModel.toggleFavorite(selectedGame.id, !selectedGame.isFavorite)
-                                                showMenu = false
-                                            }
-                                        )
-                                        DropdownMenuItem(
-                                            text = { Text("Delete Game") },
-                                            onClick = {
-                                                gameViewModel.delete(selectedGame.id)
-                                                showMenu = false
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(28.dp))
-
-                        // Trophy Tracker & Activity Cards Section
-                        if (selectedGame.trophiesTotal > 0) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(32.dp)
-                            ) {
-                                // Trophy Summary Bar
-                                PS5TrophySummaryBar(
-                                    unlocked = selectedGame.trophiesUnlocked,
-                                    total = selectedGame.trophiesTotal,
-                                    bronze = selectedGame.bronzeCount,
-                                    silver = selectedGame.silverCount,
-                                    gold = selectedGame.goldCount,
-                                    modifier = Modifier.weight(1.2f)
-                                )
-
-                                // Activity Card
-                                PS5ActivityCard(
-                                    title = "Resume Activity",
-                                    subtitle = "Current Chapter • 82% Completed",
-                                    progressText = "Quick Resume Ready",
-                                    onClick = {
-                                        soundManager.playActivationSound()
-                                        onGameSelected(selectedGame.path)
-                                    },
-                                    modifier = Modifier.weight(0.8f)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Bottom Prompt Bar
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 40.dp, vertical = 20.dp)
-                    .windowInsetsPadding(WindowInsets.navigationBars),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Control Center Prompt
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color.White.copy(alpha = 0.08f))
-                        .clickable {
+            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                val isLandscape = maxWidth > 700.dp
+                if (isLandscape) {
+                    LandscapeLibrary(
+                        games = displayedList,
+                        selectedIndex = selectedIndex,
+                        selectedGame = selectedGame,
+                        onSelect = { index ->
+                            selectedIndex = index
                             soundManager.playNavigationSound()
-                            showControlCenter = true
-                        }
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        text = "Press PS for Control Center",
-                        fontSize = 12.sp,
-                        color = PS5TextPrimary,
-                        fontFamily = TitilliumFontFamily,
-                        fontWeight = FontWeight.SemiBold
+                        },
+                        onActivate = { game ->
+                            soundManager.playActivationSound()
+                            onGameSelected(game.path)
+                        },
+                        onImportFileClick = onImportFileClick,
+                        onImportFolderClick = onImportFolderClick,
+                        gameViewModel = gameViewModel
+                    )
+                } else {
+                    PortraitLibrary(
+                        games = displayedList,
+                        onGameSelected = { game ->
+                            soundManager.playActivationSound()
+                            onGameSelected(game.path)
+                        },
+                        onImportFileClick = onImportFileClick,
+                        onImportFolderClick = onImportFolderClick,
+                        gameViewModel = gameViewModel
                     )
                 }
-
-                Spacer(modifier = Modifier.weight(1f))
-
-                // DualSense Button Prompts
-                DualSenseButtonPrompts()
             }
         }
 
-        // Overlay: Control Center Quick Menu
+        // Overlay: Control Center (real engine telemetry + audio toggles)
         if (showControlCenter) {
             Box(
                 modifier = Modifier
@@ -438,6 +201,7 @@ fun PS5HomeScreen(
                 PS5ControlCenterSheet(
                     soundManager = soundManager,
                     fexCoreStatus = fexCoreStatus,
+                    fexCoreWrapper = fexCoreWrapper,
                     onDismiss = { showControlCenter = false },
                     onRestartRequested = {
                         showControlCenter = false
@@ -445,27 +209,326 @@ fun PS5HomeScreen(
                 )
             }
         }
+    }
+}
 
-        // Overlay: Notifications Drawer
-        if (showNotifications) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.5f))
-                    .clickable { showNotifications = false },
-                contentAlignment = Alignment.CenterEnd
-            ) {
-                PS5NotificationsDrawer(
-                    notifications = sampleNotifications,
-                    onDismiss = { showNotifications = false }
+// ---------------------------------------------------------------------------
+// Landscape: carousel + selected-game detail panel
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun LandscapeLibrary(
+    games: List<GameEntity>,
+    selectedIndex: Int,
+    selectedGame: GameEntity?,
+    onSelect: (Int) -> Unit,
+    onActivate: (GameEntity) -> Unit,
+    onImportFileClick: () -> Unit,
+    onImportFolderClick: () -> Unit,
+    gameViewModel: GameViewModel
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 40.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            itemsIndexed(games) { index, item ->
+                PX5GameCardTile(
+                    game = item,
+                    isSelected = index == selectedIndex,
+                    onClick = {
+                        if (index == selectedIndex) onActivate(item) else onSelect(index)
+                    }
                 )
+            }
+            item {
+                PX5GameCardTile(
+                    game = games.firstOrNull() ?: GameEntity(id = "add", name = "", path = ""),
+                    isSelected = false,
+                    isAddTile = true,
+                    onClick = onImportFileClick
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(horizontal = 40.dp)
+        ) {
+            if (games.isEmpty()) {
+                EmptyLibraryState(
+                    onImportFileClick = onImportFileClick,
+                    onImportFolderClick = onImportFolderClick
+                )
+            } else if (selectedGame != null) {
+                GameDetailPanel(
+                    game = selectedGame,
+                    gameViewModel = gameViewModel,
+                    onPlay = { onActivate(selectedGame) },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Portrait: vertical cover grid + import CTA
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun PortraitLibrary(
+    games: List<GameEntity>,
+    onGameSelected: (GameEntity) -> Unit,
+    onImportFileClick: () -> Unit,
+    onImportFolderClick: () -> Unit,
+    gameViewModel: GameViewModel
+) {
+    if (games.isEmpty()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Spacer(modifier = Modifier.weight(1f))
+            EmptyLibraryState(
+                onImportFileClick = onImportFileClick,
+                onImportFolderClick = onImportFolderClick
+            )
+            Spacer(modifier = Modifier.weight(1.4f))
+        }
+    } else {
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(minSize = 110.dp),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            items(games, key = { it.id }) { game ->
+                PX5GameGridTile(game = game, onClick = { onGameSelected(game) })
+            }
+            item {
+                PX5GameGridTile(game = games.first(), isAddTile = true, onClick = onImportFileClick)
             }
         }
     }
 }
 
+// ---------------------------------------------------------------------------
+// Empty state — the honest front door
+// ---------------------------------------------------------------------------
+
 @Composable
-private fun BadgePill(text: String) {
+private fun EmptyLibraryState(
+    onImportFileClick: () -> Unit,
+    onImportFolderClick: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 24.dp)
+    ) {
+        Icon(
+            imageVector = Icons.Default.FolderOpen,
+            contentDescription = null,
+            tint = PS5TextSecondary,
+            modifier = Modifier.size(56.dp)
+        )
+        Spacer(modifier = Modifier.height(14.dp))
+        Text(
+            text = "Your library is empty",
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold,
+            color = PS5TextPrimary,
+            fontFamily = TitilliumFontFamily
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = "Add a PS5 game: a decrypted dump folder (eboot.bin + param.json), " +
+                    "a .pkg, or an .elf file. Covers are taken from the game's sce_sys icons.",
+            fontSize = 13.sp,
+            color = PS5TextSecondary,
+            fontFamily = TitilliumFontFamily,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 24.dp)
+        )
+        Spacer(modifier = Modifier.height(20.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Button(
+                onClick = onImportFileClick,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = PS5AccentBlue,
+                    contentColor = Color.White
+                ),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Text("Add file (.pkg / .elf)", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            }
+            Button(
+                onClick = onImportFolderClick,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color.White.copy(alpha = 0.12f),
+                    contentColor = Color.White
+                ),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Text("Add folder (dump)", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Detail panel — real fields only
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun GameDetailPanel(
+    game: GameEntity,
+    gameViewModel: GameViewModel,
+    onPlay: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var showMenu by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = modifier.verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // Cover thumbnail
+            val cover = rememberGameCover(game.coverPath)
+            if (cover != null) {
+                Image(
+                    bitmap = cover,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .width(72.dp)
+                        .height(102.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(10.dp))
+                )
+                Spacer(modifier = Modifier.width(16.dp))
+            }
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = game.name,
+                    fontSize = 30.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = PS5TextPrimary,
+                    fontFamily = TitilliumFontFamily,
+                    maxLines = 2,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    FormatBadge(game.format)
+                    if (game.titleId.isNotBlank()) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = game.titleId,
+                            color = PS5TextSecondary,
+                            fontSize = 13.sp,
+                            fontFamily = TitilliumFontFamily,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+
+            // Options menu (favorite / remove)
+            Box {
+                IconButton(
+                    onClick = { showMenu = true },
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.1f))
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.MoreVert,
+                        contentDescription = "More",
+                        tint = PS5TextPrimary
+                    )
+                }
+                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text(if (game.isFavorite) "Remove from Favorites" else "Add to Favorites") },
+                        onClick = {
+                            gameViewModel.toggleFavorite(game.id, !game.isFavorite)
+                            showMenu = false
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Remove from Library") },
+                        onClick = {
+                            gameViewModel.delete(game.id)
+                            showMenu = false
+                        }
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // Real metadata lines — every value comes from the import record.
+        DetailLine("Status", game.status)
+        if (game.version.isNotBlank()) DetailLine("Version", game.version)
+        DetailLine("Size", formatBytes(game.sizeBytes))
+        if (game.lastPlayedMillis > 0) {
+            DetailLine(
+                "Last played",
+                DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+                    .format(Date(game.lastPlayedMillis))
+            )
+        } else {
+            DetailLine("Last played", "Never")
+        }
+        DetailLine("Play time", formatDuration(game.playTimeSeconds))
+        if (game.format == "DUMP" || game.format == "ELF") {
+            DetailLine("Location", game.path, mono = true)
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Button(
+            onClick = onPlay,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color.White,
+                contentColor = Color.Black
+            ),
+            shape = RoundedCornerShape(24.dp),
+            contentPadding = PaddingValues(horizontal = 32.dp, vertical = 14.dp)
+        ) {
+            Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "Open in Engine",
+                fontWeight = FontWeight.Bold,
+                fontSize = 15.sp,
+                fontFamily = TitilliumFontFamily
+            )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+    }
+}
+
+@Composable
+private fun FormatBadge(format: String) {
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(6.dp))
@@ -474,7 +537,7 @@ private fun BadgePill(text: String) {
             .padding(horizontal = 8.dp, vertical = 3.dp)
     ) {
         Text(
-            text = text,
+            text = format,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
             color = PS5AccentGlow,
@@ -483,3 +546,37 @@ private fun BadgePill(text: String) {
     }
 }
 
+@Composable
+private fun DetailLine(label: String, value: String, mono: Boolean = false) {
+    Row(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = label,
+            fontSize = 13.sp,
+            color = PS5TextSecondary,
+            fontFamily = TitilliumFontFamily,
+            modifier = Modifier.width(110.dp)
+        )
+        Text(
+            text = value,
+            fontSize = 13.sp,
+            color = PS5TextPrimary,
+            fontFamily = if (mono) androidx.compose.ui.text.font.FontFamily.Monospace else TitilliumFontFamily,
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
+fun formatBytes(bytes: Long): String = when {
+    bytes >= 1L shl 30 -> "%.1f GB".format(bytes / 1073741824.0)
+    bytes >= 1L shl 20 -> "%.1f MB".format(bytes / 1048576.0)
+    bytes >= 1L shl 10 -> "%.1f KB".format(bytes / 1024.0)
+    bytes > 0 -> "$bytes B"
+    else -> "—"
+}
+
+fun formatDuration(seconds: Long): String = when {
+    seconds >= 3600 -> "%.1f h".format(seconds / 3600.0)
+    seconds >= 60 -> "%d min".format(seconds / 60)
+    seconds > 0 -> "${seconds}s"
+    else -> "0 min"
+}

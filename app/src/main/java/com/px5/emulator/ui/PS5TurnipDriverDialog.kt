@@ -1,6 +1,5 @@
 package com.px5.emulator.ui
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -10,10 +9,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -23,54 +23,47 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.px5.emulator.DriverSlotStore
 import com.px5.emulator.SoundManager
 import com.px5.emulator.core.FexCoreWrapper
+import com.px5.emulator.core.Px5Settings
+import kotlinx.coroutines.launch
+import java.io.File
 
-data class TurnipDriverProfile(
-    val id: String,
-    val name: String,
-    val version: String,
-    val description: String,
-    val isSystem: Boolean = false
-)
-
+/**
+ * TurnipDriverSheet — manages REAL driver slots only.
+ *
+ * The previous dialog presented three selectable "profiles"
+ * (Turnip Mesa 24.1.0 / 23.3.0 / system) that did not correspond to any
+ * file on disk — selecting one changed a label, nothing else. This
+ * version lists exactly what exists: the system ICD plus every imported
+ * driver persisted in DriverSlotStore and registered in the native
+ * GpuDriverManager. Selecting a slot really switches the loader mode;
+ * removing slots clears the native registry and re-registers the
+ * remaining ones; the summary line comes straight from the engine
+ * (including the /proc/self/maps driver-verification state).
+ */
 @Composable
 fun PS5TurnipDriverSheet(
     soundManager: SoundManager,
-    fexCoreWrapper: FexCoreWrapper,
+    fexCoreWrapper: FexCoreWrapper?,
     onImportCustomDriverClick: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val defaultDrivers = remember {
-        listOf(
-            TurnipDriverProfile(
-                id = "turnip_24_1",
-                name = "Turnip Mesa 24.1.0-devel",
-                version = "v24.1.0 (a6xx/a7xx)",
-                description = "Recommended for PS5 GNM/GNMX translation. Full Vulkan 1.3 + BCn texture extensions."
-            ),
-            TurnipDriverProfile(
-                id = "turnip_23_3",
-                name = "Turnip Mesa 23.3.0 Stable",
-                version = "v23.3.0 (a6xx)",
-                description = "High stability profile for Adreno 640/650/660 GPUs."
-            ),
-            TurnipDriverProfile(
-                id = "system_adreno",
-                name = "System Qualcomm Adreno Driver",
-                version = "Native System Driver",
-                description = "Default device driver without Turnip libadrenotools injection.",
-                isSystem = true
-            )
-        )
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var slots by remember { mutableStateOf(DriverSlotStore.load(context)) }
+    var activeMode by remember { mutableStateOf(Px5Settings.driverMode.value) }
+    var summary by remember { mutableStateOf("querying engine…") }
+    var busy by remember { mutableStateOf(false) }
+
+    suspend fun refreshSummary() {
+        summary = runCatching { fexCoreWrapper?.nativeGetDriverManagerSummary() ?: "engine unavailable" }
+            .getOrDefault("engine unavailable")
     }
 
-    var selectedDriverId by remember { mutableStateOf("turnip_24_1") }
-    // Honest state: driver loading lands with libadrenotools in Phase C.
-    var vulkanSummary by remember { mutableStateOf("Vulkan runtime: unknown") }
-    LaunchedEffect(Unit) {
-        try { vulkanSummary = fexCoreWrapper.nativeGetVulkanSummary() } catch (_: Exception) {}
-    }
+    LaunchedEffect(Unit) { refreshSummary() }
 
     Box(
         modifier = Modifier
@@ -78,7 +71,7 @@ fun PS5TurnipDriverSheet(
             .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
             .background(Color(0xFF141A24))
             .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
-            .padding(28.dp)
+            .padding(24.dp)
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
             // Header
@@ -87,32 +80,27 @@ fun PS5TurnipDriverSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
-                    imageVector = Icons.Default.PlayArrow,
-                    contentDescription = "Turnip",
+                    imageVector = Icons.Default.Memory,
+                    contentDescription = null,
                     tint = PS5AccentGlow,
                     modifier = Modifier.size(26.dp)
                 )
-
                 Spacer(modifier = Modifier.width(10.dp))
-
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Turnip Vulkan & libadrenotools Manager",
+                        text = "GPU Driver Manager",
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Bold,
                         color = PS5TextPrimary,
                         fontFamily = TitilliumFontFamily
                     )
                     Text(
-                        text = "Custom Mesa Vulkan Driver Injection for Adreno GPUs (Rule 5 & 9 Compliant)",
+                        text = "System Adreno ICD + imported Turnip drivers (libadrenotools)",
                         fontSize = 12.sp,
                         color = PS5TextSecondary,
                         fontFamily = TitilliumFontFamily
                     )
                 }
-
-                Spacer(modifier = Modifier.weight(1f))
-
                 IconButton(
                     onClick = onDismiss,
                     modifier = Modifier
@@ -129,267 +117,202 @@ fun PS5TurnipDriverSheet(
                 }
             }
 
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Driver Selection List
-            Text(
-                text = "Select Turnip Driver Profile:",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                color = PS5TextPrimary,
-                fontFamily = TitilliumFontFamily
-            )
-
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(10.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 200.dp)
+                    .heightIn(max = 340.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                items(defaultDrivers) { profile ->
-                    val isSelected = profile.id == selectedDriverId
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(if (isSelected) PS5AccentBlue.copy(alpha = 0.3f) else Color.White.copy(alpha = 0.05f))
-                            .border(
-                                width = if (isSelected) 1.5.dp else 0.dp,
-                                color = if (isSelected) PS5AccentGlow else Color.Transparent,
-                                shape = RoundedCornerShape(12.dp)
-                            )
-                            .clickable {
-                                soundManager.playNavigationSound()
-                                selectedDriverId = profile.id
-                                // NOTE: selection is visual only. Real
-                                // libadrenotools injection ships in Phase C.
-                            }
-                            .padding(14.dp)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = profile.name,
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = PS5TextPrimary,
-                                        fontFamily = TitilliumFontFamily
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = profile.version,
-                                        fontSize = 11.sp,
-                                        color = PS5AccentGlow,
-                                        fontFamily = TitilliumFontFamily
-                                    )
-                                }
-                                Text(
-                                    text = profile.description,
-                                    fontSize = 12.sp,
-                                    color = PS5TextSecondary,
-                                    fontFamily = TitilliumFontFamily
-                                )
-                            }
-                            if (isSelected) {
-                                Icon(
-                                    imageVector = Icons.Default.Check,
-                                    contentDescription = "Selected",
-                                    tint = PS5AccentGlow,
-                                    modifier = Modifier.size(20.dp)
-                                )
+                // System driver — always present, mode 0.
+                item {
+                    DriverRow(
+                        title = "System Qualcomm Adreno driver",
+                        subtitle = "Default device ICD (libvulkan.so)",
+                        selected = activeMode == 0,
+                        enabled = !busy,
+                        onSelect = {
+                            busy = true
+                            scope.launch {
+                                fexCoreWrapper?.nativeSetDriverMode(0)
+                                Px5Settings.setDriverMode(0)
+                                activeMode = 0
+                                soundManager.playActivationSound()
+                                refreshSummary()
+                                busy = false
                             }
                         }
-                    }
+                    )
+                }
+                // Imported slots — mode i+1, only if the .so still exists.
+                items(slots) { slot ->
+                    val exists = remember(slot.soPath) { File(slot.soPath).isFile }
+                    val idx = slots.indexOf(slot) + 1
+                    DriverRow(
+                        title = slot.label,
+                        subtitle = if (exists) slot.soPath
+                        else "${slot.soPath}  —  file missing, re-import required",
+                        selected = activeMode == idx && exists,
+                        enabled = !busy && exists,
+                        showDelete = exists,
+                        onSelect = {
+                            busy = true
+                            scope.launch {
+                                fexCoreWrapper?.nativeSetDriverMode(idx)
+                                Px5Settings.setDriverMode(idx)
+                                activeMode = idx
+                                soundManager.playActivationSound()
+                                refreshSummary()
+                                busy = false
+                            }
+                        },
+                        onDelete = {
+                            if (exists && !busy) {
+                                busy = true
+                                scope.launch {
+                                    DriverSlotStore.remove(context, idx - 1)
+                                    val remaining = DriverSlotStore.load(context)
+                                    // Rebuild the native registry so slot ids
+                                    // match the persisted order again.
+                                    fexCoreWrapper?.nativeClearDriverSlots()
+                                    remaining.forEachIndexed { i, s ->
+                                        fexCoreWrapper?.nativeRegisterDriverSlot(s.label, s.soPath)
+                                    }
+                                    val newMode =
+                                        if (activeMode == idx) 0 else activeMode.coerceAtMost(remaining.size)
+                                    fexCoreWrapper?.nativeSetDriverMode(newMode)
+                                    Px5Settings.setDriverMode(newMode)
+                                    slots = remaining
+                                    activeMode = newMode
+                                    soundManager.playActivationSound()
+                                    refreshSummary()
+                                    busy = false
+                                }
+                            }
+                        }
+                    )
                 }
             }
 
-            Spacer(modifier = Modifier.height(18.dp))
+            if (slots.isEmpty()) {
+                Text(
+                    text = "No imported drivers yet. Import a Turnip/Mesa driver package " +
+                            "(a zip containing libvulkan_adreno.so) to add one.",
+                    fontSize = 12.sp,
+                    color = PS5TextSecondary,
+                    fontFamily = TitilliumFontFamily,
+                    modifier = Modifier.padding(vertical = 8.dp)
+                )
+            }
 
-            Text(
-                text = vulkanSummary,
-                fontSize = 11.sp,
-                color = PS5AccentGlow,
-                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                modifier = Modifier.padding(bottom = 6.dp)
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Button(
+                enabled = !busy,
+                onClick = {
+                    soundManager.playActivationSound()
+                    onImportCustomDriverClick()
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = PS5AccentBlue, contentColor = Color.White
+                ),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Import driver package (.zip)", fontWeight = FontWeight.Bold, fontFamily = TitilliumFontFamily)
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Live engine summary — includes driverVerified= state.
+            MonoSummary(summary)
+        }
+    }
+}
+
+@Composable
+private fun DriverRow(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    enabled: Boolean,
+    showDelete: Boolean = false,
+    onSelect: () -> Unit,
+    onDelete: () -> Unit = {}
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(
+                if (selected) PS5AccentBlue.copy(alpha = 0.28f)
+                else Color.White.copy(alpha = 0.05f)
             )
-            Text(
-                text = "Driver injection arrives with Phase C (libadrenotools). " +
-                       "Selections below are informational only.",
-                fontSize = 11.sp,
-                color = Color(0xFFFFB74D),
-                fontFamily = TitilliumFontFamily
+            .border(
+                width = if (selected) 1.5.dp else 1.dp,
+                color = if (selected) PS5AccentGlow else Color.White.copy(alpha = 0.12f),
+                shape = RoundedCornerShape(12.dp)
             )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Turnip Driver Toggles (read-only until Phase C)
+            .clickable(enabled = enabled, onClick = onSelect)
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+    ) {
+        if (selected) {
+            Icon(
+                imageVector = Icons.Default.Check,
+                contentDescription = "Active",
+                tint = PS5AccentGlow,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(Modifier.width(10.dp))
+        }
+        Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = "libadrenotools & Turnip Engine Settings:",
+                text = title,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
                 color = PS5TextPrimary,
                 fontFamily = TitilliumFontFamily
             )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Card(
-                colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.05f)),
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    // Toggle 1: BCn Texture Decoding
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Turnip BCn Texture Decoding",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = PS5TextPrimary,
-                                fontFamily = TitilliumFontFamily
-                            )
-                            Text(
-                                text = "Hardware ASTC/BC1-BC7 texture unpacking for GNM shaders",
-                                fontSize = 11.sp,
-                                color = PS5TextSecondary,
-                                fontFamily = TitilliumFontFamily
-                            )
-                        }
-                        Switch(
-                            checked = false,
-                            enabled = false,
-                            onCheckedChange = { },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color.White,
-                                checkedTrackColor = PS5AccentBlue
-                            )
-                        )
-                    }
-
-                    HorizontalDivider(
-                        color = Color.White.copy(alpha = 0.08f),
-                        modifier = Modifier.padding(vertical = 8.dp)
-                    )
-
-                    // Toggle 2: Vulkan Pipeline Cache (Phase C)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Vulkan Pipeline Caching",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = PS5TextPrimary,
-                                fontFamily = TitilliumFontFamily
-                            )
-                            Text(
-                                text = "Store compiled SPIR-V shaders in /sdcard/PX5/Cache",
-                                fontSize = 11.sp,
-                                color = PS5TextSecondary,
-                                fontFamily = TitilliumFontFamily
-                            )
-                        }
-                        Switch(
-                            checked = false,
-                            enabled = false,
-                            onCheckedChange = { },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color.White,
-                                checkedTrackColor = PS5AccentBlue
-                            )
-                        )
-                    }
-
-                    HorizontalDivider(
-                        color = Color.White.copy(alpha = 0.08f),
-                        modifier = Modifier.padding(vertical = 8.dp)
-                    )
-
-                    // Toggle 3: KGSL Hook (Phase C)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "libadrenotools KGSL FD Hooking",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = PS5TextPrimary,
-                                fontFamily = TitilliumFontFamily
-                            )
-                            Text(
-                                text = "Bypass Android driver permission limits for custom .so loading",
-                                fontSize = 11.sp,
-                                color = PS5TextSecondary,
-                                fontFamily = TitilliumFontFamily
-                            )
-                        }
-                        Switch(
-                            checked = false,
-                            enabled = false,
-                            onCheckedChange = { },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color.White,
-                                checkedTrackColor = PS5AccentBlue
-                            )
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Action Row
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                OutlinedButton(
-                    onClick = {
-                        soundManager.playActivationSound()
-                        onImportCustomDriverClick()
-                    },
-                    shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = PS5TextPrimary),
-                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.3f)),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(imageVector = Icons.Default.Refresh, contentDescription = "Import", modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "Import Turnip ZIP Driver",
-                        fontSize = 13.sp,
-                        fontFamily = TitilliumFontFamily
-                    )
-                }
-
-                Button(
-                    onClick = {
-                        soundManager.playActivationSound()
-                        onDismiss()
-                    },
-                    shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = PS5AccentBlue, contentColor = Color.White),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        text = "Apply Driver Profile",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp,
-                        fontFamily = TitilliumFontFamily
-                    )
-                }
+            Text(
+                text = subtitle,
+                fontSize = 11.sp,
+                color = PS5TextSecondary,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                maxLines = 2
+            )
+        }
+        if (showDelete) {
+            IconButton(onClick = onDelete, modifier = Modifier.size(34.dp)) {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = "Remove driver",
+                    tint = PS5TextSecondary,
+                    modifier = Modifier.size(18.dp)
+                )
             }
         }
+    }
+}
+
+@Composable
+private fun MonoSummary(text: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color.Black.copy(alpha = 0.55f))
+            .border(1.dp, PS5AccentBlue.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
+            .padding(10.dp)
+    ) {
+        Text(
+            text = text,
+            fontSize = 11.sp,
+            color = Color(0xFF7DD3FC),
+            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+        )
     }
 }

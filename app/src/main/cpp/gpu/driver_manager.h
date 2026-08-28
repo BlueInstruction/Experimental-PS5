@@ -31,6 +31,11 @@ public:
     uint32_t RegisterSlot(const std::string& label,
                           const std::string& soAbsolutePath);
 
+    // Drops every registered slot and falls back to the system ICD.
+    // Used by the UI when the user removes an imported driver: slots are
+    // then re-registered from the persisted store so ids stay consistent.
+    void   ClearSlots();
+
     void   SetActiveMode(uint32_t mode);        // 0 = system
     uint32_t ActiveMode() const { return m_active; }
 

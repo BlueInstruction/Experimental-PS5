@@ -106,6 +106,8 @@ public class FexCoreWrapper {
     public native int     nativeRegisterDriverSlot(String label, String soPath);
     /** Mode 0 = system ICD; >0 selects a registered slot for next init. */
     public native boolean nativeSetDriverMode(int mode);
+    /** Drops every registered slot (falls back to system ICD until re-registered). */
+    public native void    nativeClearDriverSlots();
     public native String  nativeGetDriverManagerSummary();
 
     /** Shared PadButtons bit definitions (mirrors cpp input/controller.h). */

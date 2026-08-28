@@ -26,12 +26,22 @@ import com.px5.emulator.SoundManager
 fun PS5ControlCenterSheet(
     soundManager: SoundManager,
     fexCoreStatus: String,
+    fexCoreWrapper: com.px5.emulator.core.FexCoreWrapper? = null,
     onDismiss: () -> Unit,
     onRestartRequested: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var isMuted by remember { mutableStateOf(!soundManager.isSoundEnabled) }
     var bgMusicEnabled by remember { mutableStateOf(soundManager.isBgMusicEnabled) }
+    // Real GPU/runtime facts, polled once when the sheet opens.
+    var vulkanLine by remember { mutableStateOf("") }
+    var driverLine by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        fexCoreWrapper?.let { w ->
+            vulkanLine = runCatching { w.nativeGetVulkanSummary() }.getOrDefault("")
+            driverLine = runCatching { w.nativeGetDriverManagerSummary() }.getOrDefault("")
+        }
+    }
 
     Box(
         modifier = modifier
@@ -124,7 +134,7 @@ fun PS5ControlCenterSheet(
 
             Spacer(modifier = Modifier.height(20.dp))
 
-            // System Status Card
+            // System Status Card — real engine state only
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.05f)),
                 shape = RoundedCornerShape(16.dp),
@@ -132,7 +142,7 @@ fun PS5ControlCenterSheet(
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        text = "FEXCore CPU & Vulkan Renderer Status",
+                        text = "Engine Status",
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold,
                         color = PS5AccentGlow,
@@ -140,23 +150,27 @@ fun PS5ControlCenterSheet(
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Architecture: ARM64 Native (Bionic Runtime)",
-                        fontSize = 12.sp,
-                        color = PS5TextSecondary,
-                        fontFamily = TitilliumFontFamily
-                    )
-                    Text(
-                        text = "FEXCore JNI Core: $fexCoreStatus",
+                        text = "CPU bridge: $fexCoreStatus",
                         fontSize = 12.sp,
                         color = PS5TextPrimary,
                         fontFamily = TitilliumFontFamily
                     )
-                    Text(
-                        text = "Graphics: Vulkan 1.3 System Driver (Turnip / Adreno)",
-                        fontSize = 12.sp,
-                        color = PS5TextSecondary,
-                        fontFamily = TitilliumFontFamily
-                    )
+                    if (vulkanLine.isNotBlank()) {
+                        Text(
+                            text = vulkanLine,
+                            fontSize = 12.sp,
+                            color = PS5TextSecondary,
+                            fontFamily = TitilliumFontFamily
+                        )
+                    }
+                    if (driverLine.isNotBlank()) {
+                        Text(
+                            text = driverLine,
+                            fontSize = 11.sp,
+                            color = PS5TextSecondary,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                        )
+                    }
                 }
             }
         }

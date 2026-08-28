@@ -8,22 +8,30 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -34,7 +42,13 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.px5.emulator.core.FexCoreWrapper
 import com.px5.emulator.core.Px5Settings
-import com.px5.emulator.ui.*
+import com.px5.emulator.ui.EmuScreen
+import com.px5.emulator.ui.PS5HomeScreen
+import com.px5.emulator.ui.PS5SearchScreen
+import com.px5.emulator.ui.PS5SettingsScreen
+import com.px5.emulator.ui.PS5TurnipDriverSheet
+import com.px5.emulator.ui.PX5Theme
+import com.px5.emulator.ui.TitilliumFontFamily
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.File
@@ -117,37 +131,46 @@ class MainActivity : ComponentActivity() {
         // --- Settings store (native-coupled) ------------------------------
         Px5Settings.init(applicationContext)
 
-        if (fexCoreWrapper != null && fexCoreStatus != "FATAL: libpx5.so cannot load") {
-            Px5Settings.push(fexCoreWrapper, applicationContext)
+        // --- Runtime context wiring (crash handler + driver dirs) ---------
+        // Uses the SAME wrapper instance created above. The previous code
+        // built a throwaway FexCoreWrapper() here, which double-installed
+        // the native crash handler through JNI_OnLoad side effects.
+        fexCoreWrapper?.let { wrapper ->
+            logState("runtime", "wiring_context")
+            try {
+                val logsDir = getExternalFilesDir("logs")?.absolutePath
+                    ?: filesDir.resolve("logs").absolutePath
+                java.io.File(logsDir).mkdirs()
+                wrapper.nativeInitRuntimeContext(
+                    logsDir,
+                    applicationInfo.nativeLibraryDir,
+                    cacheDir.absolutePath,
+                    filesDir.absolutePath
+                )
+                logState("runtime", "context_ready")
+
+                // Re-register persisted driver slots (cold start used to
+                // forget imported Turnip drivers entirely).
+                val liveSlots = DriverSlotStore.restore(applicationContext, wrapper)
+                val savedMode = Px5Settings.driverMode.value
+                if (liveSlots > 0 && savedMode in 1..liveSlots) {
+                    wrapper.nativeSetDriverMode(savedMode)
+                } else if (savedMode > liveSlots) {
+                    Px5Settings.setDriverMode(0)
+                    wrapper.nativeSetDriverMode(0)
+                }
+                logState("drivers", "restored_$liveSlots")
+                Px5Settings.push(wrapper, applicationContext)
+            } catch (e: Throwable) {
+                logState("runtime", "context_failed")
+                logException("RuntimeContext.wiring", e)
+            }
         }
 
         logState("ui", "initializing")
         logEvent("UI", "enableEdgeToEdge", "called")
         try {
             enableEdgeToEdge()
-
-            // --- Real diagnostics + driver runtime wiring (one-time) ---
-            run {
-                val logsDir = getExternalFilesDir("logs")?.absolutePath
-                    ?: filesDir.resolve("logs").absolutePath
-                java.io.File(logsDir).mkdirs()
-
-                // Java-side crash catcher: uncaught exceptions land in the
-                // same px5_crash.log the native signal handler writes to.
-                val prev = Thread.getDefaultUncaughtExceptionHandler()
-                Thread.setDefaultUncaughtExceptionHandler(
-                    object : Thread.UncaughtExceptionHandler {
-                        override fun uncaughtException(t: Thread, e: Throwable) {
-                        }
-                    })
-
-                FexCoreWrapper().nativeInitRuntimeContext(
-                    logsDir,
-                    applicationInfo.nativeLibraryDir,
-                    cacheDir.absolutePath,
-                    filesDir.absolutePath)
-            }
-
             logEvent("UI", "enableEdgeToEdge", "completed")
         } catch (e: Throwable) {
             logEvent("UI", "enableEdgeToEdge", "failed")
@@ -160,7 +183,7 @@ class MainActivity : ComponentActivity() {
                 PX5Theme {
                     AppNavigation(
                         soundManager = soundManager,
-                        fexCoreWrapper = fexCoreWrapper!!,
+                        fexCoreWrapper = fexCoreWrapper,
                         fexCoreStatus = fexCoreStatus
                     )
                 }
@@ -239,7 +262,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun AppNavigation(
     soundManager: SoundManager,
-    fexCoreWrapper: FexCoreWrapper,
+    fexCoreWrapper: FexCoreWrapper?,
     fexCoreStatus: String,
     gameViewModel: GameViewModel = viewModel()
 ) {
@@ -248,103 +271,76 @@ fun AppNavigation(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
-    var pendingPkgFile by remember { mutableStateOf<Pair<String, String>?>(null) } // (fileName, path)
     var showTurnipManagerSheet by remember { mutableStateOf(false) }
+    var importStatus by remember { mutableStateOf<String?>(null) }
+    var importBusy by remember { mutableStateOf(false) }
 
-    // Directory scanner function (/root/Games, /sdcard/PX5/Games, etc.)
-    val scanDirectoriesForGames = {
+    fun launchImport(block: suspend () -> String) {
+        if (importBusy) return
+        importBusy = true
+        importStatus = null
         coroutineScope.launch(Dispatchers.IO) {
-            val targetDirs = listOf(
-                File("/root/Games"),
-                File(context.getExternalFilesDir(null), "Games"),
-                File("/sdcard/PX5/Games"),
-                File("/sdcard/Download")
-            )
-            var count = 0
-            for (dir in targetDirs) {
-                if (dir.exists() && dir.isDirectory) {
-                    dir.listFiles()?.forEach { file ->
-                        val ext = file.extension.lowercase()
-                        if (ext in listOf("pkg", "elf", "iso", "bin", "self")) {
-                            val gameName = file.nameWithoutExtension.replace("_", " ")
-                            gameViewModel.insert(
-                                GameEntity(
-                                    id = file.absolutePath.hashCode().toString(),
-                                    name = gameName,
-                                    path = file.absolutePath,
-                                    category = if (ext == "pkg") "PS5 PKG" else "Installed Game",
-                                    developer = "Discovered File",
-                                    sizeGb = "${String.format("%.1f", file.length() / (1024.0 * 1024.0 * 1024.0))} GB"
-                                )
-                            )
-                            count++
-                        }
-                    }
-                }
+            val msg = try {
+                block()
+            } catch (e: Exception) {
+                "Import failed: ${e.message}"
             }
-            launch(Dispatchers.Main) {
-                if (count > 0) {
-                    Toast.makeText(context, "Scanned & imported $count games from /root & storage!", Toast.LENGTH_LONG).show()
-                } else {
-                    Toast.makeText(context, "Directories scanned. Place .pkg or .elf files in /root/Games or /sdcard/PX5/Games", Toast.LENGTH_LONG).show()
-                }
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                importStatus = msg
+                importBusy = false
             }
         }
     }
 
-    // File picker launcher for loading custom game files (.elf, .bin, .iso, .pkg)
-    val gameLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
+    // Pick a single file: .pkg / .iso / .elf / .self
+    val importFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         uri?.let {
-            coroutineScope.launch(Dispatchers.IO) {
-                try {
-                    val originalName = uri.lastPathSegment ?: "game.pkg"
-                    val isPkg = originalName.endsWith(".pkg", ignoreCase = true)
-                    val targetExt = if (isPkg) "pkg" else "elf"
-                    val cacheFile = File(context.cacheDir, "game_${System.currentTimeMillis()}.$targetExt")
-                    
-                    context.contentResolver.openInputStream(it)?.use { input ->
-                        cacheFile.outputStream().use { output -> input.copyTo(output) }
-                    }
-                    val path = cacheFile.absolutePath
-                    val gameName = originalName.substringAfterLast("/").substringBeforeLast(".")
-
-                    if (isPkg) {
-                        launch(Dispatchers.Main) {
-                            pendingPkgFile = Pair(gameName, path)
-                        }
-                    } else {
-                        gameViewModel.insert(
-                            GameEntity(
-                                id = System.currentTimeMillis().toString(),
-                                name = gameName.ifBlank { "Custom Game" },
-                                path = path,
-                                category = "Custom Game",
-                                developer = "Local User",
-                                sizeGb = "2.4 GB"
-                            )
-                        )
-                        launch(Dispatchers.Main) {
-                            Toast.makeText(context, "Installed: $gameName", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                } catch (e: Exception) {
-                    launch(Dispatchers.Main) {
-                        Toast.makeText(context, "Failed to load file: ${e.message}", Toast.LENGTH_LONG).show()
-                    }
-                }
+            launchImport {
+                val report = GameImporter.importUri(
+                    context.applicationContext, it,
+                    add = { g -> gameViewModel.insert(g) },
+                    onProgress = { p -> importStatus = p }
+                )
+                report.summary()
             }
+        }
+    }
+
+    // Pick a whole folder: dumped games, exFAT dumps, sharpdroid/SharpEmu
+    // folder trees — everything that follows the eboot.bin dump contract.
+    val importFolderLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        uri?.let {
+            launchImport {
+                val report = GameImporter.importUri(
+                    context.applicationContext, it,
+                    add = { g -> gameViewModel.insert(g) },
+                    onProgress = { p -> importStatus = p }
+                )
+                report.summary()
+            }
+        }
+    }
+
+    fun scanStorage() {
+        launchImport {
+            val report = GameImporter.scanStorage(
+                context.applicationContext,
+                add = { g -> gameViewModel.insert(g) },
+                onProgress = { p -> importStatus = p }
+            )
+            report.summary()
         }
     }
 
     // File picker launcher for importing Turnip ZIP driver packages.
-    // Real pipeline: copy -> unzip (java.util.zip) -> find aarch64 .so ->
-    // register slot in native GpuDriverManager -> persist selection.
-    // Injection still needs adrenotools (Phase C) and the UI states that
-    // honestly; everything else here is genuine work.
+    // Real pipeline: copy -> unzip (java.util.zip) -> find the Vulkan .so ->
+    // register slot in native GpuDriverManager -> persist slot -> activate.
     val driverLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
+        contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         uri?.let {
             coroutineScope.launch(Dispatchers.IO) {
@@ -374,7 +370,8 @@ fun AppNavigation(
                                     outFile.outputStream().use { out -> zis.copyTo(out) }
                                     if (foundSo == null &&
                                         (e.name.endsWith("libvulkan.adreno.so") ||
-                                         e.name.endsWith("libvulkan.so"))) {
+                                         e.name.endsWith("libvulkan.so"))
+                                    ) {
                                         foundSo = outFile
                                     }
                                 }
@@ -387,17 +384,21 @@ fun AppNavigation(
                         .firstOrNull { f -> f.isFile && f.name.startsWith("libvulkan.") && f.name.endsWith(".so") }
 
                     val soPath = foundSo?.absolutePath
-                    resultMsg = if (soPath != null && fexCoreWrapper != null) {
-                        val label = "Turnip ${dir.name.substringAfterLast('_')}"
-                        val slot = fexCoreWrapper.nativeRegisterDriverSlot(label, soPath)
+                    val wrapper = fexCoreWrapper
+                    resultMsg = if (soPath != null && wrapper != null) {
+                        val slotName = File(soPath).parentFile?.name ?: dir.name
+                        val label = "Turnip $slotName"
+                        val slot = wrapper.nativeRegisterDriverSlot(label, soPath)
                         if (slot > 0) {
-                            fexCoreWrapper.nativeSetDriverMode(slot)
+                            wrapper.nativeSetDriverMode(slot)
                             Px5Settings.setDriverMode(slot)
-                            "Driver extracted OK • slot $slot registered\n" +
-                            "($soPath)\nInjection activates with adrenotools (Phase C)."
+                            DriverSlotStore.append(context, DriverSlotStore.Slot(label, soPath))
+                            "Driver installed • slot $slot active.\n$soPath"
                         } else {
                             "Extraction ok but native slot registration rejected."
                         }
+                    } else if (soPath != null) {
+                        "Driver extracted but the engine library is unavailable."
                     } else {
                         "No Vulkan library found inside archive — nothing registered."
                     }
@@ -423,26 +424,18 @@ fun AppNavigation(
                     onGameSelected = { path ->
                         navController.navigate("emulation?path=$path")
                     },
-                    onOpenStore = {
-                        navController.navigate("store")
-                    },
                     onOpenSettings = {
                         navController.navigate("settings")
                     },
                     onOpenSearch = {
                         navController.navigate("search")
                     },
-                    onAddGameClick = {
-                        gameLauncher.launch("*/*")
+                    onImportFileClick = {
+                        importFileLauncher.launch(arrayOf("*/*"))
+                    },
+                    onImportFolderClick = {
+                        importFolderLauncher.launch(null)
                     }
-                )
-            }
-
-            composable("store") {
-                PS5StoreScreen(
-                    onAddGameClick = { gameLauncher.launch("*/*") },
-                    onBackClick = { navController.popBackStack() },
-                    onGameSelected = { path -> navController.navigate("emulation?path=$path") }
                 )
             }
 
@@ -459,7 +452,13 @@ fun AppNavigation(
                     soundManager = soundManager,
                     fexCoreStatus = fexCoreStatus,
                     fexCoreWrapper = fexCoreWrapper,
-                    onScanGamesClick = { scanDirectoriesForGames() },
+                    onImportFileClick = {
+                        importFileLauncher.launch(arrayOf("*/*"))
+                    },
+                    onImportFolderClick = {
+                        importFolderLauncher.launch(null)
+                    },
+                    onScanGamesClick = { scanStorage() },
                     onOpenTurnipManagerClick = { showTurnipManagerSheet = true },
                     onBackClick = { navController.popBackStack() }
                 )
@@ -469,6 +468,7 @@ fun AppNavigation(
                 val path = backStackEntry.arguments?.getString("path") ?: ""
                 EmuScreen(
                     path = path,
+                    gameViewModel = gameViewModel,
                     fexCoreStatus = fexCoreStatus,
                     fexCoreWrapper = fexCoreWrapper,
                     onBackClick = { navController.popBackStack() }
@@ -476,35 +476,16 @@ fun AppNavigation(
             }
         }
 
-        // Overlay PKG Package Installer Dialog
-        pendingPkgFile?.let { (fileName, path) ->
-            Box(
+        // Honest import progress / result strip (real work, real outcome).
+        if (importStatus != null) {
+            ImportStatusCard(
+                text = importStatus!!,
+                busy = importBusy,
+                onDismiss = { if (!importBusy) importStatus = null },
                 modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.7f)),
-                contentAlignment = Alignment.BottomCenter
-            ) {
-                PS5PkgInstallerSheet(
-                    fileName = fileName,
-                    filePath = path,
-                    soundManager = soundManager,
-                    onInstallationComplete = { title, installedPath ->
-                        gameViewModel.insert(
-                            GameEntity(
-                                id = System.currentTimeMillis().toString(),
-                                name = title,
-                                path = installedPath,
-                                category = "PS5 PKG",
-                                developer = "Installed PKG Package",
-                                sizeGb = "4.2 GB"
-                            )
-                        )
-                        pendingPkgFile = null
-                        Toast.makeText(context, "PKG Package '$title' successfully installed!", Toast.LENGTH_LONG).show()
-                    },
-                    onDismiss = { pendingPkgFile = null }
-                )
-            }
+                    .align(Alignment.BottomCenter)
+                    .padding(16.dp)
+            )
         }
 
         // Overlay Turnip Driver Manager Dialog
@@ -519,10 +500,55 @@ fun AppNavigation(
                     soundManager = soundManager,
                     fexCoreWrapper = fexCoreWrapper,
                     onImportCustomDriverClick = {
-                        driverLauncher.launch("*/*")
+                        driverLauncher.launch(arrayOf("*/*"))
                     },
                     onDismiss = { showTurnipManagerSheet = false }
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ImportStatusCard(
+    text: String,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0xFF141A24).copy(alpha = 0.96f))
+            .padding(16.dp)
+    ) {
+        Column {
+            Text(
+                text = if (busy) "Importing…" else "Import finished",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (busy) Color(0xFF7DD3FC) else Color(0xFF69F0AE),
+                fontFamily = TitilliumFontFamily
+            )
+            Text(
+                text = text,
+                fontSize = 12.sp,
+                color = Color.White.copy(alpha = 0.85f),
+                fontFamily = TitilliumFontFamily,
+                modifier = Modifier.padding(top = 6.dp, bottom = 8.dp)
+            )
+            if (!busy) {
+                Button(
+                    onClick = onDismiss,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.White.copy(alpha = 0.12f),
+                        contentColor = Color.White
+                    ),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("Close", fontSize = 12.sp)
+                }
             }
         }
     }

@@ -52,6 +52,17 @@ uint32_t GpuDriverManager::RegisterSlot(const std::string& label,
     return id;
 }
 
+void GpuDriverManager::ClearSlots() {
+    m_slots.clear();
+    m_active = 0;
+    // Any previous verification answered for an old slot set; make it
+    // recomputed against whatever gets registered next.
+    m_verifyState = 0;
+    m_verifyDetail.clear();
+    PX5_LOGI(LogCategory::GPU,
+             "Driver slots cleared — back to system ICD until re-registered");
+}
+
 void GpuDriverManager::SetActiveMode(uint32_t mode) {
     if (mode > m_slots.size()) mode = static_cast<uint32_t>(m_slots.size());
     m_active = mode;

@@ -32,7 +32,10 @@ fun PS5SearchScreen(
     var searchQuery by remember { mutableStateOf("") }
     val filteredGames = remember(searchQuery, games) {
         if (searchQuery.isBlank()) games
-        else games.filter { it.name.contains(searchQuery, ignoreCase = true) || it.category.contains(searchQuery, ignoreCase = true) }
+        else games.filter {
+            it.name.contains(searchQuery, ignoreCase = true) ||
+                    it.titleId.contains(searchQuery, ignoreCase = true)
+        }
     }
 
     Box(
@@ -72,7 +75,7 @@ fun PS5SearchScreen(
                     onValueChange = { searchQuery = it },
                     placeholder = {
                         Text(
-                            text = "Search games, media, media apps...",
+                            text = "Search your games...",
                             color = PS5TextSecondary,
                             fontFamily = TitilliumFontFamily
                         )
@@ -119,7 +122,7 @@ fun PS5SearchScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "No matching games or media found.",
+                        text = "No matching games found.",
                         color = PS5TextSecondary,
                         fontSize = 16.sp,
                         fontFamily = TitilliumFontFamily
@@ -167,13 +170,23 @@ private fun SearchResultCard(
                     .background(PS5AccentBlue.copy(alpha = 0.3f)),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = game.name.take(2).uppercase(),
-                    color = PS5TextPrimary,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 20.sp,
-                    fontFamily = TitilliumFontFamily
-                )
+                val cover = rememberGameCover(game.coverPath)
+                if (cover != null) {
+                    androidx.compose.foundation.Image(
+                        bitmap = cover,
+                        contentDescription = null,
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Text(
+                        text = game.name.take(2).uppercase(),
+                        color = PS5TextPrimary,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 20.sp,
+                        fontFamily = TitilliumFontFamily
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.width(16.dp))
@@ -188,7 +201,11 @@ private fun SearchResultCard(
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = "${game.category} • ${game.developer} • ${game.sizeGb}",
+                    text = buildString {
+                        append(game.format)
+                        if (game.titleId.isNotBlank()) append(" • ").append(game.titleId)
+                        append(" • ").append(formatBytes(game.sizeBytes))
+                    },
                     fontSize = 12.sp,
                     color = PS5TextSecondary,
                     fontFamily = TitilliumFontFamily
@@ -201,7 +218,7 @@ private fun SearchResultCard(
                 shape = RoundedCornerShape(20.dp),
                 contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp)
             ) {
-                Text(text = "Play", fontWeight = FontWeight.Bold, fontFamily = TitilliumFontFamily)
+                Text(text = "Open", fontWeight = FontWeight.Bold, fontFamily = TitilliumFontFamily)
             }
         }
     }

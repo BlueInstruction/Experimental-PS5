@@ -12,47 +12,68 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import kotlinx.coroutines.flow.Flow
 
+/**
+ * GameEntity — a REAL library entry.
+ *
+ * Every field is backed by something that exists on disk or was actually
+ * parsed from a game dump / package file. There are no seeded demo games,
+ * no fabricated trophy counts, no invented sizes: values start at zero and
+ * are filled in only from real metadata (sce_sys/param.json, PKG header
+ * PARAM.SFO, real byte counts from the filesystem).
+ *
+ * format:     DUMP (decrypted eboot.bin folder) | PKG | ISO | ELF | SELF
+ * status:     human-readable honest state ("Ready", "Encrypted payload — "
+ *             "decryption pending", "Disc image — extraction pending", ...)
+ * coverPath:  absolute path to a cover image that was either copied from
+ *             the game folder (sce_sys/icon0.png etc.) or generated from
+ *             the title. Empty string = no cover yet.
+ */
 @Entity(tableName = "games")
 data class GameEntity(
     @PrimaryKey val id: String,
     val name: String,
+    val titleId: String = "",
     val path: String,
-    val lastPlayed: String = "Never",
-    val playTime: String = "0 hours",
-    val version: String = "1.00",
-    val isFavorite: Boolean = false,
-    val category: String = "PS5", // PS5, PS4, Media, Store
-    val developer: String = "PlayStation Studios",
-    val trophiesUnlocked: Int = 0,
-    val trophiesTotal: Int = 40,
-    val bronzeCount: Int = 0,
-    val silverCount: Int = 0,
-    val goldCount: Int = 0,
-    val coverResName: String = "ps5_custom_cover_bg",
-    val bannerResName: String = "ps5_background_all",
-    val rating: String = "ESRB T",
-    val sizeGb: String = "45.0 GB"
+    val isFolder: Boolean = false,
+    val format: String = "DUMP",
+    val version: String = "",
+    val sizeBytes: Long = 0L,
+    val coverPath: String = "",
+    val status: String = "Ready",
+    val lastPlayedMillis: Long = 0L,
+    val playTimeSeconds: Long = 0L,
+    val installedAtMillis: Long = 0L,
+    val isFavorite: Boolean = false
 )
 
 @Dao
 interface GameDao {
-    @Query("SELECT * FROM games ORDER BY name ASC")
+    @Query("SELECT * FROM games ORDER BY lastPlayedMillis DESC, name ASC")
     fun getAllGames(): Flow<List<GameEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertGame(game: GameEntity)
-    
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertGames(games: List<GameEntity>)
 
     @Query("DELETE FROM games WHERE id = :id")
     suspend fun deleteGameById(id: String)
-    
+
     @Query("UPDATE games SET isFavorite = :isFavorite WHERE id = :id")
     suspend fun updateFavoriteStatus(id: String, isFavorite: Boolean)
+
+    @Query("UPDATE games SET lastPlayedMillis = :atMillis WHERE id = :id")
+    suspend fun updateLastPlayed(id: String, atMillis: Long)
+
+    @Query("UPDATE games SET playTimeSeconds = playTimeSeconds + :seconds WHERE id = :id")
+    suspend fun addPlayTime(id: String, seconds: Long)
+
+    @Query("SELECT * FROM games WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): GameEntity?
 }
 
-@Database(entities = [GameEntity::class], version = 2, exportSchema = false)
+@Database(entities = [GameEntity::class], version = 3, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun gameDao(): GameDao
 
@@ -67,6 +88,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "px5_database"
                 )
+                // Schema v2 held seeded demo data; wiping it is the point.
                 .fallbackToDestructiveMigration()
                 .build()
                 INSTANCE = instance
@@ -80,10 +102,16 @@ class GameRepository(private val gameDao: GameDao) {
     val allGames: Flow<List<GameEntity>> = gameDao.getAllGames()
 
     suspend fun insert(game: GameEntity) = gameDao.insertGame(game)
-    
+
     suspend fun insertAll(games: List<GameEntity>) = gameDao.insertGames(games)
 
     suspend fun deleteById(id: String) = gameDao.deleteGameById(id)
-    
+
     suspend fun setFavorite(id: String, isFavorite: Boolean) = gameDao.updateFavoriteStatus(id, isFavorite)
+
+    suspend fun touchPlayed(id: String, atMillis: Long) = gameDao.updateLastPlayed(id, atMillis)
+
+    suspend fun addPlayTime(id: String, seconds: Long) = gameDao.addPlayTime(id, seconds)
+
+    suspend fun getById(id: String) = gameDao.getById(id)
 }

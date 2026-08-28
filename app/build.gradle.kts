@@ -103,5 +103,8 @@ dependencies {
 dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    // Full icon set (FolderOpen / Memory / BugReport / VolumeUp are absent
+    // from material-icons-core).
+    implementation("androidx.compose.material:material-icons-extended")
 }
 

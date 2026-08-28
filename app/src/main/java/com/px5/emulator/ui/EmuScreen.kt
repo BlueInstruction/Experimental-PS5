@@ -11,10 +11,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,6 +53,7 @@ fun EmuScreen(
     path: String,
     fexCoreStatus: String,
     fexCoreWrapper: FexCoreWrapper?,
+    gameViewModel: com.px5.emulator.GameViewModel? = null,
     onBackClick: () -> Unit
 ) {
     val context = LocalContext.current
@@ -58,6 +62,23 @@ fun EmuScreen(
     var renderStats by remember { mutableStateOf("renderer idle") }
     var gpuProof by remember { mutableStateOf<String?>(null) }
     var inputSummary by remember { mutableStateOf("input: -") }
+    var loadResult by remember { mutableStateOf<String?>(null) }
+
+    // Resolve the library entry behind this path (path is unique enough
+    // for records the importer created) and credit REAL session time.
+    val games = gameViewModel?.allGames?.collectAsStateWithLifecycle()?.value ?: emptyList()
+    val game = remember(games, path) { games.firstOrNull { it.path == path } }
+
+    LaunchedEffect(game?.id) {
+        game?.let { gameViewModel?.touchPlayed(it.id) }
+    }
+    DisposableEffect(game?.id) {
+        val startedAt = System.currentTimeMillis()
+        onDispose {
+            val seconds = (System.currentTimeMillis() - startedAt) / 1000
+            game?.let { gameViewModel?.addPlayTime(it.id, seconds) }
+        }
+    }
 
     val isStubAbi = fexCoreWrapper?.nativeGetArchitectureSummary()
         ?.contains("UI-smoke ABI") == true
@@ -201,6 +222,51 @@ fun EmuScreen(
                 fontSize = 11.sp,
                 color = PS5TextSecondary
             )
+
+            // Honest boot attempt: hand the ELF to the real loader and
+            // report the genuine result. Dumps use their eboot.bin.
+            if (!isStubAbi && fexCoreWrapper != null) {
+                Button(
+                    onClick = {
+                        scope.launch(Dispatchers.IO) {
+                            val target = run {
+                                val f = java.io.File(path)
+                                if (f.isDirectory) {
+                                    f.listFiles()?.firstOrNull {
+                                        it.isFile && it.name.equals("eboot.bin", true)
+                                    }?.absolutePath ?: ""
+                                } else path
+                            }
+                            loadResult = if (target.isBlank()) {
+                                "LOAD FAILED: no eboot.bin in folder"
+                            } else {
+                                try {
+                                    val ok = fexCoreWrapper.nativeLoadElf(target)
+                                    if (ok) "LOADED: $target mapped into guest window"
+                                    else "LOAD FAILED: loader rejected $target (see logcat)"
+                                } catch (t: Throwable) {
+                                    "LOAD FAILED: ${t.message}"
+                                }
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.White.copy(alpha = 0.10f),
+                        contentColor = Color.White
+                    ),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("Attempt ELF load (experimental)", fontSize = 12.sp)
+                }
+                loadResult?.let { res ->
+                    Text(
+                        text = res,
+                        fontSize = 11.sp,
+                        color = if (res.startsWith("LOADED")) Color(0xFF69F0AE) else Color(0xFFFF8A65),
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    )
+                }
+            }
 
             Spacer(Modifier.weight(1f))
 

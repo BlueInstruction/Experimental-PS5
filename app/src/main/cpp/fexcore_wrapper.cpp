@@ -271,6 +271,12 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeSetDriverMode(
     return JNI_TRUE;
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeClearDriverSlots(
+        JNIEnv*, jobject) {
+    PX5::GpuDriverManager::GetInstance().ClearSlots();
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeGetDriverManagerSummary(
         JNIEnv* env, jobject) {

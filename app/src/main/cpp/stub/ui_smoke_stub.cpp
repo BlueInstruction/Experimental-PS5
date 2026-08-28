@@ -191,6 +191,9 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRegisterDriverSlot(
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeSetDriverMode(
         JNIEnv*, jobject, jint) { return JNI_FALSE; }
+extern "C" JNIEXPORT void JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeClearDriverSlots(
+        JNIEnv*, jobject) {}
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeGetDriverManagerSummary(
         JNIEnv* env, jobject) {
