@@ -73,6 +73,7 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {
 
     if (uctx) {
         auto* uc = static_cast<ucontext_t*>(uctx);
+#if defined(__aarch64__)
         const auto& mc = uc->uc_mcontext;
         append("registers:\n");
         for (int i = 0; i < 31; i += 3) {
@@ -99,6 +100,16 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {
             snprintf(line, sizeof(line), "  #%02d pc %p\n", i, bt.frames[i]);
             append(line);
         }
+#else
+        (void)uc;
+        BtCtx bt{};
+        _Unwind_Backtrace(BtFn, &bt);
+        append("backtrace (addresses; register dump is arm64-only):\n");
+        for (int i = 0; i < bt.n; ++i) {
+            snprintf(line, sizeof(line), "  #%02d pc %p\n", i, bt.frames[i]);
+            append(line);
+        }
+#endif
     } else {
         append("ucontext unavailable (synthetic raise)\n");
     }
