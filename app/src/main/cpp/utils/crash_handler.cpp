@@ -9,13 +9,22 @@
 #include <ctime>
 #include <fcntl.h>
 #include <unistd.h>
-#include <execinfo.h>
+#include <unwind.h>
 #include <sys/uio.h>
 
 namespace PX5 {
 
 namespace {
 
+// _Unwind-based backtrace: available on all Android APIs (execinfo's
+// backtrace() only exists for API >= 33).
+struct BtCtx { void* frames[24]; int n; };
+
+_Unwind_Reason_Code BtFn(struct _Unwind_Context* c, void* p) {
+    auto* b = static_cast<BtCtx*>(p);
+    if (b->n < 24) b->frames[b->n++] = reinterpret_cast<void*>(_Unwind_GetIP(c));
+    return _URC_NO_REASON;
+}
 std::string g_logsDir;
 
 const char* SignalName(int sig) {
@@ -83,11 +92,11 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {
 
         // Best-effort backtrace: addresses only on-device (symbolization is
         // done by ndk-stack from the matching build). Honest about limits.
-        void* frames[24];
-        int n = backtrace(frames, 24);
+        BtCtx bt{};
+        _Unwind_Backtrace(BtFn, &bt);
         append("backtrace (addresses; use ndk-stack with this build):\n");
-        for (int i = 0; i < n; ++i) {
-            snprintf(line, sizeof(line), "  #%02d pc %p\n", i, frames[i]);
+        for (int i = 0; i < bt.n; ++i) {
+            snprintf(line, sizeof(line), "  #%02d pc %p\n", i, bt.frames[i]);
             append(line);
         }
     } else {
