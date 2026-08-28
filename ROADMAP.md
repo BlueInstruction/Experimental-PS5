@@ -30,7 +30,7 @@
 
 ## Evidence Engine Integration
 
-The [agent-evidence-engine](https://github.com/SeaNaxxx/agent-evidence-engine)
+The [agent-evidence-engine](https://github.com/BlueInstruction/agent-evidence-engine)
 operates alongside the core emulator phases. It is not a sequential
 emulator phase — it is the measurement and validation layer that
 prevents blind development.
