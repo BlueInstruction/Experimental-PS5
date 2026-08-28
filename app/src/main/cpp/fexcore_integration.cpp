@@ -249,7 +249,10 @@ private:
         auto result = FEXCore::ArchHelpers::Arm64::HandleUnalignedAccess(
             thread,
             FEXCore::ArchHelpers::Arm64::UnalignedHandlerType::HalfBarrier,
-            pc, uctx->uc_mcontext.regs);
+            // Bionic stores the register file as __u64[31]; FEXCore wants
+            // uint64_t*. Identical 64-bit types on LP64 — the same cast FEX's
+            // own ArchHelpers::Context::GetArmGPRs performs.
+            pc, reinterpret_cast<uint64_t*>(uctx->uc_mcontext.regs));
         if (!result) return false;
         uctx->uc_mcontext.pc = pc + *result;
         ++m_unalignedCount;
