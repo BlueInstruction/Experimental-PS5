@@ -156,6 +156,13 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop) {
         PX5_LOGE(LogCategory::FEX, "%s", res.error.c_str());
         return res;
     }
+    // The window must exist before CreateThread maps guest stacks.
+    if (!MemoryManager::GetInstance().Initialize()) {
+        res.error = "guest window reservation failed before guest thread start";
+        PX5_LOGE(LogCategory::FEX, "%s (errno=%d %s)", res.error.c_str(),
+                 errno, strerror(errno));
+        return res;
+    }
     if (hostRip == 0 || hostStackTop == 0) {
         res.error = "host RIP or stack top is null";
         return res;
@@ -216,6 +223,15 @@ bool RunConformanceTest() {
     };
 
     auto& mm = MemoryManager::GetInstance();
+    // BUGFIX: this path used to run before the window reservation and failed
+    // with "failed to map guest window page" on device. Reservation is
+    // idempotent — force it here exactly like the self-test pipeline does.
+    if (!mm.Initialize()) {
+        PX5_LOGE(LogCategory::FEX,
+                 "Conformance: guest window reservation failed (errno=%d %s)",
+                 errno, strerror(errno));
+        return false;
+    }
     constexpr uint64_t kTestVA = 0x140000000ULL + 0x00800000ULL; // inside window
     const size_t pageSize = static_cast<size_t>(sysconf(_SC_PAGESIZE));
     const size_t codeSize = (sizeof(guestCode) + pageSize - 1) & ~(pageSize - 1);

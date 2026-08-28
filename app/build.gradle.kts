@@ -44,6 +44,13 @@ android {
                 val fexRoot = System.getenv("PX5_FEXCORE_ROOT")
                     ?: File(rootProject.projectDir, "../../deps/FEX").absolutePath
                 arguments += "-DPX5_FEXCORE_ROOT=$fexRoot"
+
+                // libadrenotools (Turnip loading) — same discipline as FEX.
+                // Optional: when absent, driver switching honestly reports
+                // system-ICD-only mode instead of faking success.
+                val adrenoRoot = System.getenv("PX5_ADRENOTOOLS_ROOT")
+                    ?: File(rootProject.projectDir, "../../deps/adrenotools").absolutePath
+                arguments += "-DPX5_ADRENOTOOLS_ROOT=$adrenoRoot"
             }
         }
     }
@@ -61,6 +68,15 @@ android {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
             version = "3.22.1"
+        }
+    }
+
+    // REQUIRED by libadrenotools: the hook lives in nativeLibraryDir which
+    // only exists when .so files are decompressed into the APK install dir
+    // (useLegacyPackaging = true). Same setting Winlator ships.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
 

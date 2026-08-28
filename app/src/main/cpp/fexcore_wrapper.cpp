@@ -140,6 +140,7 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeGetVulkanSummary(JNIEnv* env,
 #include "input/controller.h"
 #include "kernel/sce_kernel_hle.h"
 #include "gpu/driver_manager.h"
+#include "utils/crash_handler.h"
 #include "core/settings.h"
 
 #include <android/native_window_jni.h>
@@ -275,4 +276,43 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeGetDriverManagerSummary(
         JNIEnv* env, jobject) {
     return env->NewStringUTF(
         PX5::GpuDriverManager::GetInstance().SummaryString().c_str());
+}
+
+// ---------------------------------------------------------------------------
+// Runtime context wiring (diagnostics + driver directories).
+// Called once from MainActivity.onCreate before any engine use.
+// ---------------------------------------------------------------------------
+extern "C" JNIEXPORT void JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeInitRuntimeContext(
+        JNIEnv* env, jobject,
+        jstring jLogsDir, jstring jHookLibDir,
+        jstring jTmpLibDir, jstring jDriverRootDir) {
+    auto toStr = [env](jstring s) -> std::string {
+        if (!s) return {};
+        const char* c = env->GetStringUTFChars(s, nullptr);
+        std::string out = c ? c : "";
+        if (c) env->ReleaseStringUTFChars(s, c);
+        return out;
+    };
+    const std::string logsDir  = toStr(jLogsDir);
+    const std::string hookDir  = toStr(jHookLibDir);
+    const std::string tmpDir   = toStr(jTmpLibDir);
+    const std::string rootDir  = toStr(jDriverRootDir);
+
+    PX5::CrashHandler::Install(logsDir);
+    PX5::GpuDriverManager::GetInstance().SetRuntimeDirs(hookDir, tmpDir, rootDir);
+    PX5_LOGI(PX5::LogCategory::CORE,
+             "Runtime context wired: crash reports + driver dirs ready");
+}
+
+// JNI_OnLoad runs at System.loadLibrary("px5") time — before any UI code.
+// Crash handler is installed here with a provisional dir; MainActivity
+// refines it via nativeInitRuntimeContext once the context dirs are known.
+extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void*) {
+    JNIEnv* env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        return JNI_ERR;
+    }
+    PX5::CrashHandler::Install({});   // provisional: /data/local/tmp fallback
+    return JNI_VERSION_1_6;
 }

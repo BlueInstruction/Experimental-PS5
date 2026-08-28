@@ -125,6 +125,36 @@ class MainActivity : ComponentActivity() {
         logEvent("UI", "enableEdgeToEdge", "called")
         try {
             enableEdgeToEdge()
+
+            // --- Real diagnostics + driver runtime wiring (one-time) ---
+            run {
+                val logsDir = getExternalFilesDir("logs")?.absolutePath
+                    ?: filesDir.resolve("logs").absolutePath
+                java.io.File(logsDir).mkdirs()
+
+                // Java-side crash catcher: uncaught exceptions land in the
+                // same px5_crash.log the native signal handler writes to.
+                val prev = Thread.getDefaultUncaughtExceptionHandler()
+                Thread.setDefaultUncaughtExceptionHandler { t, e ->
+                    try {
+                        java.io.File(logsDir, "px5_crash.log").appendText(
+                            buildString {
+                                append("\n==== PX5 JAVA CRASH ")
+                                append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(java.util.Date()))
+                                append(" ====\nthread="); append(t.name)
+                                append("\n"); append(android.util.Log.getStackTraceString(e))
+                            })
+                    } catch (_: Throwable) {}
+                    prev?.uncaughtException(t, e)
+                }
+
+                FexCoreWrapper.nativeInitRuntimeContext(
+                    logsDir,
+                    applicationInfo.nativeLibraryDir,
+                    cacheDir.absolutePath,
+                    filesDir.absolutePath)
+            }
+
             logEvent("UI", "enableEdgeToEdge", "completed")
         } catch (e: Throwable) {
             logEvent("UI", "enableEdgeToEdge", "failed")

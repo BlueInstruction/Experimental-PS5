@@ -154,6 +154,7 @@ add_library(
         input/controller.cpp
         filesystem/vfs.cpp
         utils/logger.cpp
+        utils/crash_handler.cpp
         utils/linker_ns_bypass.cpp
         media/media_codec_hle.cpp)
 
@@ -180,4 +181,21 @@ target_link_libraries(
         FEXCore
         FEXCore_Base
         JemallocDummy)
+
+# ----------------------------------------------------------------------------
+# libadrenotools — real Turnip/custom-driver loading (linker-namespace hook)
+# ----------------------------------------------------------------------------
+# Materialized outside the repo by tools/fetch_adrenotools.sh and routed
+# through PX5_ADRENOTOOLS_ROOT. When absent the build still succeeds and
+# driver switching honestly reports system-ICD-only mode.
+set(PX5_ADRENOTOOLS_ROOT "" CACHE PATH "Path to libadrenotools source")
+if(PX5_ADRENOTOOLS_ROOT AND EXISTS "${PX5_ADRENOTOOLS_ROOT}/CMakeLists.txt")
+    set(ADRENOTOOLS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    add_subdirectory(${PX5_ADRENOTOOLS_ROOT} ${CMAKE_CURRENT_BINARY_DIR}/adrenotools)
+    target_link_libraries(px5 adrenotools)
+    target_compile_definitions(px5 PRIVATE PX5_HAVE_ADRENOTOOLS=1)
+    message(STATUS "PX5: adrenotools enabled (${PX5_ADRENOTOOLS_ROOT})")
+else()
+    message(STATUS "PX5: adrenotools NOT provided — system-ICD-only driver mode")
+endif()
 

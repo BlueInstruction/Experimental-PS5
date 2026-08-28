@@ -8,19 +8,17 @@
 namespace PX5 {
 
 // ---------------------------------------------------------------------------
-// GpuDriverManager — Vulkan ICD selection state.
+// GpuDriverManager — real Vulkan ICD selection through libadrenotools.
 //
-// Honest contract:
-//   * Mode 0 always exists: the SYSTEM loader (libvulkan.so).
-//   * Slots 1..N are registered by the Kotlin layer after it has extracted
-//     a user-imported driver archive (e.g., Turnip) into app storage and
-//     verified it contains an aarch64 Vulkan library. The metadata here is
-//     REAL.
-//   * Selecting a non-system slot today configures intent only: actual
-//     out-of-tree ICD injection requires libadrenotools (linker-namespace
-//     bypass) which lands with Phase C. Until then, initialization logs
-//     the requested mode loudly and falls back to the system loader —
-//     we never claim Turnip is active when the system ICD is in use.
+// Contract (mirrors Winlator/Eden behavior):
+//   * Mode 0 = SYSTEM loader (dlopen "libvulkan.so").
+//   * Slots 1..N = user-imported Turnip/other drivers, extracted by the
+//     Kotlin layer into app-private storage and registered here with the
+//     real directory holding libvulkan_adreno.so.
+//   * When a non-system slot is active, OpenHostVulkanLibrary() loads the
+//     driver through adrenotools_open_libvulkan() (linker-namespace hook),
+//     exactly the path used by Winlator and the Eden emulator.
+//   * No fabricated "driver installed" state ever leaves this class.
 // ---------------------------------------------------------------------------
 class GpuDriverManager {
 public:
@@ -33,15 +31,29 @@ public:
     void   SetActiveMode(uint32_t mode);        // 0 = system
     uint32_t ActiveMode() const { return m_active; }
 
+    // Runtime directories supplied once from JNI (Kotlin context paths):
+    //   hookLibDir  = ApplicationInfo.nativeLibraryDir (required by the hook)
+    //   tmpLibDir   = context.cacheDir for patched libs (api<29 path)
+    //   driverRoot  = app files dir where driver slots live
+    void   SetRuntimeDirs(const std::string& hookLibDir,
+                          const std::string& tmpLibDir,
+                          const std::string& driverRootDir);
+
+    // Central loader used by vulkan_device.cpp instead of a raw dlopen.
+    // Returns a dlopen-style handle, or nullptr with the failure logged.
+    void*  OpenHostVulkanLibrary(int dlopenMode);
+
     std::string SummaryString() const;
 
 private:
     GpuDriverManager() = default;
 
-    struct Slot { std::string label; std::string soPath; };
+    struct Slot { std::string label; std::string soPath; std::string dir; };
 
     std::vector<Slot> m_slots;
     uint32_t m_active = 0;
+    std::string m_hookLibDir, m_tmpLibDir, m_driverRoot;
+    void* m_mappingHandle = nullptr;
 };
 
 } // namespace PX5

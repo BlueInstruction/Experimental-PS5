@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PX5_FEXCORE_ROOT: ${{ github.workspace }}/../deps/FEX
+      PX5_ADRENOTOOLS_ROOT: ${{ github.workspace }}/../deps/adrenotools
 
     steps:
     - name: Checkout
@@ -36,6 +37,9 @@ jobs:
 
     - name: Fetch pinned FEXCore sources
       run: ./tools/fetch_fexcore.sh
+
+    - name: Fetch pinned libadrenotools
+      run: ./tools/fetch_adrenotools.sh
 
     - name: Clean build cache and intermediates
       run: |

@@ -302,6 +302,7 @@ void Logger::WriteToFile(std::string_view formatted_line, LogLevel level) noexce
 }
 
 void Logger::LogV(LogLevel level, LogCategory category,
+                  const char* file, int line,
                   const char* format, va_list args) noexcept {
     auto& s = State();
     if (static_cast<uint8_t>(level) < static_cast<uint8_t>(s.min_level)) {
@@ -318,21 +319,26 @@ void Logger::LogV(LogLevel level, LogCategory category,
         va_end(args_copy);
     }
 
-    // 2. Format the full line: [TS] [LEVEL] [TID:threadname] [CATEGORY] msg
+    // 2. Format the full line: [TS] [LEVEL] [TID:threadname] [CATEGORY] [file:line] msg
     char msg_buf[kLineBufSize];
     vsnprintf(msg_buf, kLineBufSize, format, args);
 
-    char line_buf[kLineBufSize + 128];
+    // Strip directories from __FILE__ so lines stay readable on-device.
+    const char* base = file ? strrchr(file, '/') : nullptr;
+    base = base ? base + 1 : (file ? file : "?");
+
+    char line_buf[kLineBufSize + 160];
     auto ts = FormatTimestamp();
     auto tid = static_cast<unsigned long>(gettid());
     auto tname = CurrentThreadName();
 
     std::snprintf(line_buf, sizeof(line_buf),
-                  "[%s] [%-5s] [%lu:%s] [%s] %s",
+                  "[%s] [%-5s] [%lu:%s] [%s] [%s:%d] %s",
                   ts.c_str(),
                   LevelToString(level),
                   tid, tname.c_str(),
                   CategoryToString(category),
+                  base, line,
                   msg_buf);
 
     // 3. Write to file under the lock.
@@ -343,10 +349,11 @@ void Logger::LogV(LogLevel level, LogCategory category,
 }
 
 void Logger::Log(LogLevel level, LogCategory category,
+                 const char* file, int line,
                  const char* format, ...) noexcept {
     va_list args;
     va_start(args, format);
-    LogV(level, category, format, args);
+    LogV(level, category, file, line, format, args);
     va_end(args);
 }
 

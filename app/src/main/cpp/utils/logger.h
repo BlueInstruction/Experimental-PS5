@@ -72,12 +72,16 @@ public:
     // Routes the message to:
     //   1. Android logcat (__android_log_vprint)
     //   2. The rotating file (if Initialize() was called)
+    // Every file line carries [file:line] of the CALL SITE so diagnostics
+    // point at real code locations, not pre-planted strings.
     // Thread-safe.
     static void Log(LogLevel level, LogCategory category,
+                    const char* file, int line,
                     const char* format, ...) noexcept;
 
     // ---- Variadic helper (for forwarding from other code) ----
     static void LogV(LogLevel level, LogCategory category,
+                     const char* file, int line,
                      const char* format, va_list args) noexcept;
 
     // ---- Flush ----
@@ -115,17 +119,17 @@ private:
 // Existing call sites using PX5_LOGI(cat, fmt, ...) keep working unchanged.
 
 #define PX5_LOGT(cat, fmt, ...) \
-    ::PX5::Logger::Log(::PX5::LogLevel::TRACE,   cat, fmt, ##__VA_ARGS__)
+    ::PX5::Logger::Log(::PX5::LogLevel::TRACE,   cat, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define PX5_LOGD(cat, fmt, ...) \
-    ::PX5::Logger::Log(::PX5::LogLevel::DEBUG,   cat, fmt, ##__VA_ARGS__)
+    ::PX5::Logger::Log(::PX5::LogLevel::DEBUG,   cat, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define PX5_LOGI(cat, fmt, ...) \
-    ::PX5::Logger::Log(::PX5::LogLevel::INFO,    cat, fmt, ##__VA_ARGS__)
+    ::PX5::Logger::Log(::PX5::LogLevel::INFO,    cat, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define PX5_LOGW(cat, fmt, ...) \
-    ::PX5::Logger::Log(::PX5::LogLevel::WARNING, cat, fmt, ##__VA_ARGS__)
+    ::PX5::Logger::Log(::PX5::LogLevel::WARNING, cat, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define PX5_LOGE(cat, fmt, ...) \
-    ::PX5::Logger::Log(::PX5::LogLevel::ERROR,   cat, fmt, ##__VA_ARGS__)
+    ::PX5::Logger::Log(::PX5::LogLevel::ERROR,   cat, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define PX5_LOGF(cat, fmt, ...) \
-    ::PX5::Logger::Log(::PX5::LogLevel::FATAL,   cat, fmt, ##__VA_ARGS__)
+    ::PX5::Logger::Log(::PX5::LogLevel::FATAL,   cat, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 
 // Backward-compat: the old code also used PX5_LOGI etc. — keep them.
 // (defined above)

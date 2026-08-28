@@ -1,4 +1,5 @@
 #include "vulkan_device.h"
+#include "driver_manager.h"
 #include "../core/settings.h"
 #include "../utils/logger.h"
 
@@ -50,7 +51,10 @@ bool VulkanGpuDevice::Initialize() {
     m_caps = GpuCapabilities{};
 
     // ---- Stage 1: dynamic loader --------------------------------------
-    m_vulkanLib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+    // Real driver selection: mode 0 = system ICD, >0 = Turnip/other driver
+    // loaded through libadrenotools (linker-namespace hook), Winlator-style.
+    m_vulkanLib = PX5::GpuDriverManager::GetInstance()
+                      .OpenHostVulkanLibrary(RTLD_NOW | RTLD_LOCAL);
     if (!m_vulkanLib) {
         m_caps.lastError = std::string("dlopen libvulkan.so failed: ") + dlerror();
         PX5_LOGE(LogCategory::GPU, "%s", m_caps.lastError.c_str());

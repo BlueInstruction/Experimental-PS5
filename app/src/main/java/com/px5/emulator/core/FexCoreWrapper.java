@@ -33,6 +33,14 @@ public class FexCoreWrapper {
     // Legacy arithmetic JIT conformance (mov/add/hlt -> RAX=42)
     public native boolean nativeRunCpuConformanceTest();
 
+    /**
+     * One-time runtime wiring (call in Application/MainActivity onCreate):
+     *  - installs the native crash handler writing px5_crash.log
+     *  - hands driver-loader directories to GpuDriverManager (adrenotools)
+     */
+    public native void nativeInitRuntimeContext(String logsDir, String hookLibDir,
+                                                String tmpLibDir, String driverRootDir);
+
     // Memory window tests (validated against canonical window now)
     public native long nativeMapMemory(long addr, long size, int flags);
     public native boolean nativeUnmapMemory(long addr, long size);
