@@ -58,7 +58,8 @@ if(ANDROID_ABI STREQUAL "x86_64")
             gpu/vulkan_device.cpp
             gpu/driver_manager.cpp
             utils/crash_handler.cpp
-            utils/logger.cpp)
+            utils/logger.cpp
+            utils/diag_bridge.cpp)
     find_library(log-lib log)
     find_library(android-lib android)
     target_include_directories(px5 PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -157,6 +158,7 @@ add_library(
         filesystem/vfs.cpp
         utils/logger.cpp
         utils/crash_handler.cpp
+        utils/diag_bridge.cpp
         utils/linker_ns_bypass.cpp
         media/media_codec_hle.cpp)
 

@@ -2,6 +2,7 @@
 // PX5 — Enhanced Logger implementation
 
 #include "logger.h"
+#include "diag_bridge.h"
 
 #include <android/log.h>
 #include <chrono>
@@ -346,6 +347,11 @@ void Logger::LogV(LogLevel level, LogCategory category,
         std::lock_guard<std::mutex> lock(s.mtx);
         WriteToFile(line_buf, level);
     }
+
+    // 4. Mirror the filtered subset into the Kotlin diagnostic stream
+    //    (px5_diagnostic.log) so pasted event logs carry native evidence —
+    //    driver loader outcomes, verification failures, engine errors.
+    DiagBridge::Forward(level, category, msg_buf);
 }
 
 void Logger::Log(LogLevel level, LogCategory category,

@@ -1,8 +1,37 @@
+import java.io.ByteArrayOutputStream
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.compose.compiler)
     alias(libs.plugins.ksp)
+}
+
+// Build identity, stamped into BuildConfig and emitted into the on-device
+// diagnostic stream at every startup — so any pasted log self-identifies
+// the exact APK, commit, and FEXCore pin it came from.
+fun gitSha(): String = try {
+    val out = ByteArrayOutputStream()
+    exec {
+        commandLine("git", "rev-parse", "--short", "HEAD")
+        workingDir = rootProject.projectDir
+        standardOutput = out
+    }
+    out.toString("UTF-8").trim().ifEmpty { "unknown" }
+} catch (_: Throwable) {
+    "unknown"   // tarball builds / CI edge cases: honest fallback
+}
+
+// Single source of truth: tools/fetch_fexcore.sh pins PIN_TAG + PIN_SHA;
+// CMake stamps them into the native library and we stamp them here too.
+fun fexCorePin(): String = try {
+    val script = rootProject.projectDir.resolve("tools/fetch_fexcore.sh")
+    val text = script.readText()
+    val tag = Regex("PIN_TAG=\"([^\"]+)\"").find(text)?.groupValues?.get(1) ?: "unknown-tag"
+    val sha = Regex("PIN_SHA=\"([^\"]+)\"").find(text)?.groupValues?.get(1)?.take(12) ?: "unknown-sha"
+    "$tag @ $sha"
+} catch (_: Throwable) {
+    "unknown"
 }
 
 android {
@@ -14,8 +43,11 @@ android {
         applicationId = "com.px5.emulator"
         minSdk = 28
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.3"
+
+        buildConfigField("String", "GIT_SHA", "\"${gitSha()}\"")
+        buildConfigField("String", "FEXCORE_PIN", "\"${fexCorePin()}\"")
 
         // Two-ABI strategy:
         //   arm64-v8a = the REAL guest engine (FEXCore JIT x86-64 -> ARM64).
@@ -82,6 +114,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

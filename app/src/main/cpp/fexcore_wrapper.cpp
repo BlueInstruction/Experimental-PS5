@@ -16,6 +16,7 @@
 #include "gpu/vulkan_device.h"
 #include "core/settings.h"
 #include "utils/logger.h"
+#include "utils/diag_bridge.h"
 
 namespace fs = std::filesystem;
 
@@ -493,6 +494,12 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeInitRuntimeContext(
 
     PX5::CrashHandler::Install(logsDir);
     PX5::GpuDriverManager::GetInstance().SetRuntimeDirs(hookDir, tmpDir, rootDir);
+    // Mirror filtered native lines (driver loader outcomes, engine errors)
+    // into the same px5_diagnostic.log the Kotlin EVENT/STATE stream writes,
+    // so a pasted log is self-sufficient for diagnosis.
+    if (!logsDir.empty()) {
+        PX5::DiagBridge::Enable(logsDir + "/px5_diagnostic.log");
+    }
     PX5_LOGI(PX5::LogCategory::CORE,
              "Runtime context wired: crash reports + driver dirs ready");
 }

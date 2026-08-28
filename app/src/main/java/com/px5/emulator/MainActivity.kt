@@ -43,6 +43,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.px5.emulator.core.FexCoreWrapper
+import com.px5.emulator.core.PX5EventLog
 import com.px5.emulator.core.Px5Settings
 import com.px5.emulator.ui.EmuScreen
 import com.px5.emulator.ui.PS5HomeScreen
@@ -82,10 +83,30 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         // ---- Early diagnostic logging ----
-        // Write a "MainActivity.onCreate started" line to the crash log file
-        // BEFORE doing anything else. If the app crashes after this point,
-        // we'll at least know it got this far.
+        // The shared event stream must exist before anything else emits.
+        PX5EventLog.init(applicationContext)
         logEvent("MainActivity", "onCreate", "started")
+
+        // ---- Build identity (honest, from the running process) ----
+        // Every pasted log now self-identifies: which APK version, which
+        // git commit was compiled in, which FEXCore pin the build stamped,
+        // and whether the adrenotools runtime hook libraries are actually
+        // packaged — the exact discriminator that was missing between the
+        // 2026-08-28 23:38 (restored_0) and 23:45 (restored_2) launches.
+        try {
+            val hookDir = applicationInfo.nativeLibraryDir
+            val haveImpl = File(hookDir, "libhook_impl.so").isFile
+            val haveMain = File(hookDir, "libmain_hook.so").isFile
+            logState("build", "v${BuildConfig.VERSION_NAME} " +
+                    "vc${BuildConfig.VERSION_CODE} sha=${BuildConfig.GIT_SHA}")
+            logEvent("build", "identity",
+                    "fexcore=${BuildConfig.FEXCORE_PIN.replace(" ", "")} " +
+                    "api=${android.os.Build.VERSION.SDK_INT} " +
+                    "abi=${android.os.Build.SUPPORTED_ABIS.firstOrNull()} " +
+                    "hooks=${if (haveImpl && haveMain) "packaged" else "impl=$haveImpl,main=$haveMain"}")
+        } catch (e: Throwable) {
+            logException("build.identity", e)
+        }
 
         // --- SoundManager ---
         logState("sound", "initializing")
@@ -187,7 +208,11 @@ class MainActivity : ComponentActivity() {
 
                 // Re-register persisted driver slots (cold start used to
                 // forget imported Turnip drivers entirely).
-                val liveSlots = DriverSlotStore.restore(applicationContext, wrapper)
+                val liveSlots = DriverSlotStore.restore(applicationContext, wrapper,
+                    onSlot = { label, soPath, soname ->
+                        PX5EventLog.event("drivers", "slot_restored",
+                            "label=$label soname=$soname path=$soPath")
+                    })
                 val savedMode = Px5Settings.driverMode.value
                 if (liveSlots > 0 && savedMode in 1..liveSlots) {
                     wrapper.nativeSetDriverMode(savedMode)
@@ -263,18 +288,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun writeLog(message: String) {
-        try {
-            android.util.Log.i("PX5", message)
-            val logsDir = getExternalFilesDir("logs") ?: return
-            if (!logsDir.exists()) logsDir.mkdirs()
-            val logFile = File(logsDir, "px5_diagnostic.log")
-            val timestamp = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date())
-            logFile.appendText("[$timestamp] $message\n")
-        } catch (_: Throwable) {}
+        // Delegates to the app-wide stream so every component (dialogs,
+        // importers, coroutines) writes the same px5_diagnostic.log format.
+        PX5EventLog.write(message)
     }
 
     override fun onResume() {
         super.onResume()
+        logState("activity", "resumed")
         try {
             soundManager.startBgMusic()
         } catch (_: Throwable) {}
@@ -282,6 +303,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
+        logState("activity", "paused")
         try {
             soundManager.pauseBgMusic()
         } catch (_: Throwable) {}
@@ -289,6 +311,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        logState("activity", "destroyed")
         try {
             soundManager.release()
         } catch (_: Throwable) {}
@@ -434,6 +457,8 @@ fun AppNavigation(
                     }
                     extractZip(zipFile, dir)
                     zipFile.delete()
+                    PX5EventLog.event("driverImport", "zip_extracted",
+                            "entries=${seenNames.size} dir=${dir.name}")
 
                     // --- meta.json (the ecosystem contract) -----------------
                     // Winlator/Eden/adrenotools driver packs carry a meta.json:
@@ -460,9 +485,17 @@ fun AppNavigation(
                             metaDriverVersion = o.optString("driverVersion", "").ifBlank { null }
                             metaLibraryName = o.optString("libraryName", "").ifBlank { null }
                             metaMinApi = o.optInt("minApi", 0)
+                            PX5EventLog.event("driverImport", "meta_json",
+                                    "name=$metaName vendor=$metaVendor " +
+                                    "driverVersion=$metaDriverVersion " +
+                                    "libraryName=$metaLibraryName minApi=$metaMinApi")
                         }.onFailure { f ->
                             android.util.Log.w("PX5", "meta.json parse failed: ${f.message}")
+                            PX5EventLog.exception("driverImport.metaJson", f)
                         }
+                    } else {
+                        PX5EventLog.event("driverImport", "meta_json",
+                                "detail=absent (filename scan fallback)")
                     }
 
                     // Honest gate: a pack demanding a newer Android than this
@@ -470,6 +503,8 @@ fun AppNavigation(
                     if (metaMinApi > android.os.Build.VERSION.SDK_INT) {
                         resultMsg = "Driver requires Android API $metaMinApi " +
                                 "(this device: ${android.os.Build.VERSION.SDK_INT}) — not installable here."
+                        PX5EventLog.event("driverImport", "min_api_rejected",
+                                "required=$metaMinApi device=${android.os.Build.VERSION.SDK_INT}")
                         launch(Dispatchers.Main) {
                             Toast.makeText(context, resultMsg, Toast.LENGTH_LONG).show()
                         }
@@ -519,22 +554,33 @@ fun AppNavigation(
                         .singleOrNull()
 
                     val foundSo = byName?.takeIf { aarch64Elf(it) } ?: soloElf
+                    PX5EventLog.event("driverImport", "library_scan",
+                            "metaNamed=${metaNamedLib?.name} byName=${byName?.name} " +
+                                    "soloElf=${soloElf?.name} foundSo=${foundSo?.name}")
 
                     resultMsg = when {
-                        byName != null && soloElf == null && !aarch64Elf(byName) ->
+                        byName != null && soloElf == null && !aarch64Elf(byName) -> {
+                            PX5EventLog.event("driverImport", "rejected",
+                                    "reason=${byName.name} not arm64-v8a ELF")
                             "${byName.name} is not an arm64-v8a shared object — rejected."
+                        }
                         foundSo == null -> {
                             // Honest failure + real archive evidence so the
                             // user can tell exactly what was inside.
                             val listing = seenNames.take(6).joinToString(", ")
                                 .ifEmpty { "(unreadable or empty archive)" }
+                            PX5EventLog.event("driverImport", "no_library_found",
+                                    "contents=$listing")
                             "No Vulkan driver library found in the archive — nothing registered.\n" +
                                     "Contents seen: $listing\n" +
                                     "Expected a Turnip/Mesa package (vulkan.turnip.so, libvulkan.so, " +
                                     "libvulkan_adreno.so) for arm64-v8a."
                         }
-                        !aarch64Elf(foundSo) ->
+                        !aarch64Elf(foundSo) -> {
+                            PX5EventLog.event("driverImport", "rejected",
+                                    "reason=${foundSo.name} not arm64-v8a ELF")
                             "${foundSo.name} is not an arm64-v8a shared object — rejected."
+                        }
                         else -> {
                             val wrapper = fexCoreWrapper
                             when {
@@ -574,6 +620,10 @@ fun AppNavigation(
                                             DriverSlotStore.Slot(
                                                 label, libForSlot.absolutePath, soname)
                                         )
+                                        PX5EventLog.event("driverImport", "installed",
+                                                "slot=$slot label=$label soname=$soname " +
+                                                        "path=${libForSlot.absolutePath} " +
+                                                        "source=${if (hasMeta) "meta.json" else "filename-scan"}")
                                         val provenance = listOfNotNull(
                                             metaVendor, metaDriverVersion
                                         ).joinToString(" • ")
@@ -584,6 +634,8 @@ fun AppNavigation(
                                                 (if (hasMeta) "\nsource: meta.json (libraryName)" else
                                                     "\nsource: filename scan (no meta.json)")
                                     } else {
+                                        PX5EventLog.event("driverImport", "registration_rejected",
+                                                "label=$label soname=$soname")
                                         "Extraction ok but native slot registration rejected."
                                     }
                                 }
@@ -592,6 +644,7 @@ fun AppNavigation(
                     }
                 } catch (e: Exception) {
                     resultMsg = "Failed to import driver: ${e.message}"
+                    PX5EventLog.exception("driverImport", e)
                 }
                 launch(Dispatchers.Main) {
                     Toast.makeText(context, resultMsg, Toast.LENGTH_LONG).show()

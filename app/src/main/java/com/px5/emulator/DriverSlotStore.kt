@@ -55,8 +55,13 @@ object DriverSlotStore {
      * Re-register every persisted slot whose .so still exists into the
      * native manager, in the saved order (so slot ids match the saved
      * active mode). Returns the number of live slots.
+     *
+     * onSlot fires per restored slot so callers can put the restore story
+     * into the shared event stream (label/soname/path) — without it, a
+     * pasted diagnostic log only ever said "restored_N" with no detail.
      */
-    fun restore(context: Context, wrapper: FexCoreWrapper?): Int {
+    fun restore(context: Context, wrapper: FexCoreWrapper?,
+                onSlot: ((label: String, soPath: String, soname: String) -> Unit)? = null): Int {
         if (wrapper == null) return 0
         val live = load(context).filter { File(it.soPath).isFile }
         // Drop entries pointing at files that vanished (cleared cache etc.)
@@ -66,11 +71,18 @@ object DriverSlotStore {
                 wrapper.nativeRegisterDriverSlot(slot.label, slot.soPath, slot.soname)
             }
                 .onSuccess { id ->
+                    onSlot?.invoke(slot.label, slot.soPath, slot.soname)
                     if (id.toInt() != index + 1) {
-                        android.util.Log.w(
-                            "PX5", "driver slot id drift: expected ${index + 1}, got $id"
-                        )
+                        val msg = "driver slot id drift: expected ${index + 1}, got $id"
+                        android.util.Log.w("PX5", msg)
+                        com.px5.emulator.core.PX5EventLog.event(
+                            "drivers", "slot_id_drift",
+                            "expected=${index + 1} got=$id label=${slot.label}")
                     }
+                }
+                .onFailure { f ->
+                    com.px5.emulator.core.PX5EventLog.exception(
+                        "DriverSlotStore.restore(${slot.label})", f)
                 }
         }
         return live.size
