@@ -147,7 +147,19 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
         return ok ? 0 : kErrInval;
     }
 
-    case NR_mprotect:
+    case NR_mprotect: {
+        // Real: re-protect through the memory manager so the SMC registry
+        // and the executable-range query stay truthful. The manager fires
+        // the code-invalidation notify when an exec range's W bit drops.
+        const bool ok = MemoryManager::GetInstance().ProtectMemory(
+            a0, static_cast<size_t>(a1),
+            (a2 & PROT_READ  ? MemoryFlags::PAGE_READ  : 0) |
+            (a2 & PROT_WRITE ? MemoryFlags::PAGE_WRITE : 0) |
+            (a2 & PROT_EXEC  ? MemoryFlags::PAGE_EXEC  : 0));
+        std::lock_guard<std::mutex> lk(g_stateMutex);
+        g_stats.handledCalls++;
+        return ok ? 0 : kErrInval;
+    }
     case NR_madvise: {                       // advisory no-op in window model
         std::lock_guard<std::mutex> lk(g_stateMutex);
         g_stats.handledCalls++;

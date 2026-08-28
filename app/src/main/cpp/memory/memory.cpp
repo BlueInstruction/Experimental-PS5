@@ -4,6 +4,7 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <android/sharedmem.h>
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <cstdio>
@@ -108,10 +109,34 @@ void MemoryManager::Shutdown() {
     PX5_LOGI(LogCategory::MEMORY, "Memory window shut down successfully");
 }
 
+void MemoryManager::CollectExecOverlaps_Unlocked(
+        uint64_t vaLo, uint64_t vaHi,
+        std::vector<std::pair<uint64_t, size_t>>& out) const {
+    // Caller holds m_mutex. Snapshots every mapped, currently-executable
+    // block overlapping [vaLo, vaHi) so the invalidation notify can fire
+    // AFTER m_mutex is released (FEXCore's CodeInvalidationMutex must never
+    // nest inside ours).
+    for (const auto& [base, blk] : m_allocations) {
+        if (!(blk.flags & MemoryFlags::PAGE_EXEC)) continue;
+        const uint64_t blkHi = blk.va + blk.size;
+        if (blk.va >= vaHi || blkHi <= vaLo) continue;
+        const uint64_t lo = std::max<uint64_t>(blk.va, vaLo);
+        const uint64_t hi = std::min<uint64_t>(blkHi, vaHi);
+        out.push_back({lo, hi - lo});
+    }
+}
+
+void MemoryManager::SetCodeInvalidationNotify(CodeInvalidationNotify fn) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_codeInvalidationNotify = std::move(fn);
+}
+
 bool MemoryManager::MapMemoryImpl_Unlocked(uint64_t vaddr, size_t size,
                                            uint32_t flags,
-                                           const std::string& tag) {
-    // NOTE: caller holds m_mutex.
+                                           const std::string& tag,
+                                           std::vector<std::pair<uint64_t, size_t>>* invalidatedOut) {
+    // NOTE: caller holds m_mutex. Overlapping exec ranges are snapshotted to
+    // *invalidatedOut and fired by the CALLER after m_mutex is released.
     if (!m_initialized) return false;
     if (vaddr == 0 || size == 0) return false;
 
@@ -126,6 +151,14 @@ bool MemoryManager::MapMemoryImpl_Unlocked(uint64_t vaddr, size_t size,
                  (unsigned long long)m_guestBase,
                  (unsigned long long)(m_guestBase + m_windowSize));
         return false;
+    }
+
+    // Snapshot overlapping EXEC ranges BEFORE mutating anything: a map that
+    // lands on compiled guest memory replaces the bytes and faults nothing,
+    // so this notify is the only invalidation signal it produces (the
+    // sharpdroid c423471 bug class, found by their public git history).
+    if (invalidatedOut) {
+        CollectExecOverlaps_Unlocked(vaLo, vaHi, *invalidatedOut);
     }
 
     int prot = PROT_NONE;
@@ -153,8 +186,24 @@ bool MemoryManager::MapMemoryImpl_Unlocked(uint64_t vaddr, size_t size,
 // Public overload keeps the old signature/behavior contract.
 uint64_t MemoryManager::MapMemory(uint64_t vaddr, size_t size, uint32_t flags,
                                   const std::string& tag) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!MapMemoryImpl_Unlocked(vaddr, size, flags, tag)) return 0;
+    std::vector<std::pair<uint64_t, size_t>> invalidated;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!MapMemoryImpl_Unlocked(vaddr, size, flags, tag, &invalidated)) {
+            return 0;
+        }
+    }
+    // Fire the notify AFTER m_mutex is released (contract: the consumer's
+    // unprotect path re-enters MemoryManager, which would deadlock under our
+    // non-recursive mutex).
+    if (!invalidated.empty() && m_codeInvalidationNotify) {
+        for (const auto& [base, len] : invalidated) {
+            PX5_LOGI(LogCategory::MEMORY,
+                     "Code invalidation notify (map-overwrite): 0x%llx +0x%zx",
+                     (unsigned long long)base, len);
+            m_codeInvalidationNotify(base, len);
+        }
+    }
     return vaddr;
 }
 
@@ -182,41 +231,99 @@ int MemoryManager::CreateSharedMemory(const char* name, size_t size) {
 }
 
 bool MemoryManager::UnmapMemory(uint64_t vaddr, size_t size) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_allocations.find(RoundDown64(vaddr, kPageSize));
-    if (it == m_allocations.end()) return false;
+    std::vector<std::pair<uint64_t, size_t>> invalidated;
+    uint64_t vaLo = 0;
+    size_t   len   = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_allocations.find(RoundDown64(vaddr, kPageSize));
+        if (it == m_allocations.end()) return false;
 
-    const uint64_t vaLo = it->first;
-    const size_t len = std::min(size <= kPageSize ? RoundUp64(vaddr + size - vaLo, kPageSize)
-                                                  : size,
-                                it->second.size);
-    char* hostLo = static_cast<char*>(m_hostWindow) + (vaLo - m_guestBase);
-    // Re-seal as PROT_NONE instead of munmap so the window stays coherent.
-    if (mprotect(hostLo, len, PROT_NONE) != 0) return false;
+        vaLo = it->first;
+        len = std::min(size <= kPageSize ? RoundUp64(vaddr + size - vaLo, kPageSize)
+                                          : size,
+                        it->second.size);
+        const uint64_t vaHi = vaLo + len;
+        CollectExecOverlaps_Unlocked(vaLo, vaHi, invalidated);
 
-    m_allocatedBytes -= len;
-    m_allocations.erase(it);
-    PX5_LOGI(LogCategory::MEMORY,
-             "Unmapped guest VA 0x%llx (%zu B resealed)",
-             (unsigned long long)vaLo, len);
+        char* hostLo = static_cast<char*>(m_hostWindow) + (vaLo - m_guestBase);
+        // Re-seal as PROT_NONE instead of munmap so the window stays coherent.
+        if (mprotect(hostLo, len, PROT_NONE) != 0) return false;
+
+        m_allocatedBytes -= len;
+        m_allocations.erase(it);
+        PX5_LOGI(LogCategory::MEMORY,
+                 "Unmapped guest VA 0x%llx (%zu B resealed)",
+                 (unsigned long long)vaLo, len);
+    }
+    if (!invalidated.empty() && m_codeInvalidationNotify) {
+        for (const auto& [base, blen] : invalidated) {
+            PX5_LOGI(LogCategory::MEMORY,
+                     "Code invalidation notify (unmap): 0x%llx +0x%zx",
+                     (unsigned long long)base, blen);
+            m_codeInvalidationNotify(base, blen);
+        }
+    }
     return true;
 }
 
 bool MemoryManager::ProtectMemory(uint64_t vaddr, size_t size, uint32_t flags) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_initialized) return false;
-    if (vaddr < m_guestBase || vaddr + size > m_guestBase + m_windowSize)
-        return false;
-    int prot = 0;
-    if (flags & MemoryFlags::PAGE_READ)  prot |= PROT_READ;
-    if (flags & MemoryFlags::PAGE_WRITE) prot |= PROT_WRITE;
-    if (flags & MemoryFlags::PAGE_EXEC)  prot |= PROT_EXEC;
-    char* h = static_cast<char*>(m_hostWindow) + (vaddr - m_guestBase);
-    return mprotect(h, size, prot) == 0;
+    std::vector<std::pair<uint64_t, size_t>> invalidated;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_initialized) return false;
+        if (vaddr < m_guestBase || vaddr + size > m_guestBase + m_windowSize)
+            return false;
+
+        const uint64_t vaLo = RoundDown64(vaddr, kPageSize);
+        const uint64_t vaHi = RoundUp64(vaddr + size, kPageSize);
+
+        int prot = 0;
+        if (flags & MemoryFlags::PAGE_READ)  prot |= PROT_READ;
+        if (flags & MemoryFlags::PAGE_WRITE) prot |= PROT_WRITE;
+        if (flags & MemoryFlags::PAGE_EXEC)  prot |= PROT_EXEC;
+
+        // Invalidate only when the W bit is being taken OFF an exec range:
+        // adding W does not stale the JIT (bytes unchanged); dropping W can
+        // only follow a byte change made possible by a prior W, which the
+        // map/write paths above already reported. Removing W here (e.g. the
+        // guest sealing text) still ends the range's compiled lifetime.
+        const bool writeChanging = (flags & MemoryFlags::PAGE_WRITE) == 0;
+        if (writeChanging) {
+            CollectExecOverlaps_Unlocked(vaLo, vaHi, invalidated);
+        }
+
+        char* h = static_cast<char*>(m_hostWindow) + (vaLo - m_guestBase);
+        if (mprotect(h, vaHi - vaLo, prot) != 0) {
+            PX5_LOGE(LogCategory::MEMORY,
+                     "ProtectMemory mprotect failed VA 0x%llx: %s",
+                     (unsigned long long)vaLo, strerror(errno));
+            return false;
+        }
+        // Update the recorded flags: the SMC registry and the executable-
+        // range query both read what the guest asked for from here.
+        for (auto& [base, blk] : m_allocations) {
+            if (blk.va + blk.size <= vaLo || blk.va >= vaHi) continue;
+            blk.flags = flags;
+        }
+    }
+    if (!invalidated.empty() && m_codeInvalidationNotify) {
+        for (const auto& [base, blen] : invalidated) {
+            PX5_LOGI(LogCategory::MEMORY,
+                     "Code invalidation notify (protect): 0x%llx +0x%zx",
+                     (unsigned long long)base, blen);
+            m_codeInvalidationNotify(base, blen);
+        }
+    }
+    return true;
 }
 
 bool MemoryManager::ReadGuestMemory(uint64_t vaddr, void* outBuffer, size_t size) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    // Deliberately lock-free: HLE reads guest memory at high frequency and —
+    // decisively — a read fault on an SMC-protected page must not arrive with
+    // m_mutex held, because the fault intercept has to re-enter this class
+    // (FindExecutableMapping) from signal context. GetHostPointer is pure
+    // address math; m_allocations is not consulted here.
     void* h = GetHostPointer(vaddr);
     if (!h || !outBuffer ||
         vaddr + size > m_guestBase + m_windowSize) return false;
@@ -225,7 +332,10 @@ bool MemoryManager::ReadGuestMemory(uint64_t vaddr, void* outBuffer, size_t size
 }
 
 bool MemoryManager::WriteGuestMemory(uint64_t vaddr, const void* inBuffer, size_t size) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    // Lock-free for the same reason as ReadGuestMemory: this is exactly the
+    // call that may write into an SMC-protected code page and fault. The
+    // fault handler re-enters this class from signal context, so no mutex of
+    // ours may be held across the memcpy.
     void* h = GetHostPointer(vaddr);
     if (!h || !inBuffer ||
         vaddr + size > m_guestBase + m_windowSize) return false;
@@ -234,8 +344,9 @@ bool MemoryManager::WriteGuestMemory(uint64_t vaddr, const void* inBuffer, size_
 }
 
 void* MemoryManager::GetHostPointer(uint64_t vaddr) {
-    // Caller normally holds m_mutex via the read/write wrappers; standalone
-    // use (syscall bridge on the hot path) is address-math only and safe.
+    // Pure address math, deliberately lock-free: used on the syscall hot
+    // path AND from the fault intercept's unprotect step, which must be able
+    // to run from signal context without taking m_mutex.
     if (!m_initialized) return nullptr;
     if (vaddr < m_guestBase || vaddr >= m_guestBase + m_windowSize) return nullptr;
     return static_cast<char*>(m_hostWindow) + (vaddr - m_guestBase);
@@ -246,6 +357,21 @@ bool MemoryManager::IsValidAddress(uint64_t vaddr, size_t size) const {
     return vaddr >= m_guestBase &&
            vaddr + size <= m_guestBase + m_windowSize &&
            m_allocations.count(RoundDown64(vaddr, kPageSize)) > 0;
+}
+
+bool MemoryManager::FindExecutableMapping(uint64_t vaddr, ExecMapInfo& out) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    out = {0, 0, false, false};
+    if (!m_initialized) return false;
+    auto it = m_allocations.find(RoundDown64(vaddr, kPageSize));
+    if (it == m_allocations.end()) return false;
+    const auto& blk = it->second;
+    if (!(blk.flags & MemoryFlags::PAGE_EXEC)) return false;
+    out.base     = blk.va;
+    out.size     = blk.size;
+    out.exec     = true;
+    out.writable = (blk.flags & MemoryFlags::PAGE_WRITE) != 0;
+    return true;
 }
 
 void MemoryManager::SetProgramBreak(uint64_t base) {

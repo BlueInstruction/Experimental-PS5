@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <functional>
 #include <string>
 #include <vector>
 #include <mutex>
@@ -36,6 +37,21 @@ namespace MemoryFlags {
 //   * Untouched window pages stay PROT_NONE: stray accesses fault loudly
 //     instead of corrupting the Android heap silently.
 //
+// CODE INVALIDATION CONTRACT (mtrack, FEX-2608):
+//   FEXCore compiles guest code and asks THIS layer to make writes to
+//   compiled pages fault (Mark path), and to drop stale translations when
+//   guest memory changes underneath the JIT. Every mutation of a mapped
+//   executable range therefore fires m_codeInvalidationNotify AFTER the
+//   mutation is committed and WITHOUT m_mutex held (the consumer takes
+//   FEXCore's CodeInvalidationMutex, which must never nest inside ours):
+//     * MapMemory over an existing mapped range (the c423471 class: a
+//       MAP_FIXED-style overwrite replaces bytes and invalidated nothing),
+//     * UnmapMemory (memory stops holding what was compiled),
+//     * ProtectMemory whenever an executable range's W bit changes.
+//   The notify is best-effort bookkeeping insurance: even with SMC write
+//   faults armed, these paths replace bytes with NO fault, so the notify is
+//   the ONLY invalidation signal they produce.
+//
 // Full identity mapping / FEXCore-managed address spaces are a Phase-C
 // upgrade path (FEXCore BaseAddress support) and are deliberately NOT
 // claimed to exist here.
@@ -67,6 +83,23 @@ public:
 
     size_t GetTotalAllocatedMB() const;
 
+    // Real per-mapping answer for FEXCore's QueryGuestExecutableRange.
+    // exec=false in the result is how the host layer says "not executable"
+    // (the decoder then refuses to translate); a range is reported only when
+    // a MAPPED block actually contains the address.
+    struct ExecMapInfo {
+        uint64_t base;
+        size_t   size;
+        bool     exec;
+        bool     writable;
+    };
+    bool FindExecutableMapping(uint64_t vaddr, ExecMapInfo& out) const;
+
+    // Registration for the code-invalidation notify (see contract above).
+    // Null callback = no consumer yet (foundation tests before FEX init).
+    using CodeInvalidationNotify = std::function<void(uint64_t base, size_t size)>;
+    void SetCodeInvalidationNotify(CodeInvalidationNotify fn);
+
     // Human-readable window info for evidence UI (hex numbers pre-formatted).
     std::string GetWindowInfoString() const;
 
@@ -77,12 +110,14 @@ private:
     struct WindowCandidate { uint64_t base; size_t size; };
     static std::vector<WindowCandidate> WindowCandidates();
     bool MapMemoryImpl_Unlocked(uint64_t vaddr, size_t size, uint32_t flags,
-                                const std::string& tag);
+                                const std::string& tag,
+                                std::vector<std::pair<uint64_t, size_t>>* invalidatedOut);
 
     struct MemoryBlock { uint64_t va; size_t size; uint32_t flags; std::string tag; };
     std::unordered_map<uint64_t, MemoryBlock> m_allocations;
 
-    std::mutex m_mutex;
+    // mutable: logically-const queries (FindExecutableMapping) still lock.
+    mutable std::mutex m_mutex;
     bool     m_initialized = false;
     uint64_t m_guestBase   = 0;      // numeric guest anchor
     uint64_t m_windowSize  = 0;
@@ -92,6 +127,12 @@ private:
     uint64_t m_programBreakLimit = 0;
 
     size_t m_allocatedBytes = 0;
+    CodeInvalidationNotify m_codeInvalidationNotify;
+
+    // Snapshot helper: collects every mapped EXEC range overlapping
+    // [vaLo, vaHi). Caller holds m_mutex.
+    void CollectExecOverlaps_Unlocked(uint64_t vaLo, uint64_t vaHi,
+                                      std::vector<std::pair<uint64_t, size_t>>& out) const;
 };
 
 } // namespace PX5

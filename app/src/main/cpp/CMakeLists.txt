@@ -185,8 +185,23 @@ target_link_libraries(
         JemallocDummy)
 
 # ----------------------------------------------------------------------------
-# libadrenotools — real Turnip/custom-driver loading (linker-namespace hook)
+# Stamp the FEXCore pin into the binary so diagnostics report the tree that
+# is actually compiled (tools/fetch_fexcore.sh writes .fex-pin = sha + tag).
 # ----------------------------------------------------------------------------
+set(PX5_FEXCORE_PIN_VALUE "unknown")
+if(EXISTS "${PX5_FEXCORE_ROOT}/.fex-pin")
+    file(STRINGS "${PX5_FEXCORE_ROOT}/.fex-pin" _PX5_PIN_LINES LIMIT_COUNT 2)
+    list(GET _PX5_PIN_LINES 1 _PX5_PIN_TAG)
+    list(GET _PX5_PIN_LINES 0 _PX5_PIN_SHA)
+    string(SUBSTRING "${_PX5_PIN_SHA}" 0 8 _PX5_PIN_SHA_SHORT)
+    set(PX5_FEXCORE_PIN_VALUE "${_PX5_PIN_TAG} @ ${_PX5_PIN_SHA_SHORT}")
+endif()
+# Quote-escape the value: it contains spaces, and an unquoted -D argument
+# would split into bogus compiler flags.
+set(_PX5_PIN_DEF "PX5_FEXCORE_PIN=\"${PX5_FEXCORE_PIN_VALUE}\"")
+target_compile_definitions(px5 PRIVATE "${_PX5_PIN_DEF}")
+message(STATUS "PX5: FEXCore pin = ${PX5_FEXCORE_PIN_VALUE}")
+
 # Materialized outside the repo by tools/fetch_adrenotools.sh and routed
 # through PX5_ADRENOTOOLS_ROOT. When absent the build still succeeds and
 # driver switching honestly reports system-ICD-only mode.

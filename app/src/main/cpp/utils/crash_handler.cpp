@@ -14,6 +14,8 @@
 
 namespace PX5 {
 
+using FaultIntercept = bool (*)(int sig, void* siginfo, void* ucontext);
+
 namespace {
 
 // _Unwind-based backtrace: available on all Android APIs (execinfo's
@@ -26,6 +28,7 @@ _Unwind_Reason_Code BtFn(struct _Unwind_Context* c, void* p) {
     return _URC_NO_REASON;
 }
 std::string g_logsDir;
+FaultIntercept g_faultIntercept = nullptr;
 
 const char* SignalName(int sig) {
     switch (sig) {
@@ -42,7 +45,7 @@ const char* SignalName(int sig) {
 // The single write path. Async-signal-safety: only open/write/dprintf are
 // used inside the handler; the backtrace call is best-effort (bionic's
 // implementation is unwind-based and does not take locks we hold).
-void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {
+void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {   // NOLINT(bugprone-easily-swappable-parameters)
     char path[512];
     snprintf(path, sizeof(path), "%s/px5_crash.log",
              g_logsDir.empty() ? "/data/local/tmp" : g_logsDir.c_str());
@@ -121,6 +124,12 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {
 }
 
 void Handler(int sig, siginfo_t* info, void* uctx) {
+    // Routing question order (see class contract): engine-owned fault
+    // classes are offered the fault BEFORE anything is written. A fault
+    // nobody claims is a real crash and gets the full report below.
+    if (g_faultIntercept && g_faultIntercept(sig, info, uctx)) {
+        return;
+    }
     WriteCrashReport(sig, info, uctx);
     // Restore default disposition and re-raise so Android tombstoning and
     // crash reporting still see the real signal.
@@ -155,5 +164,9 @@ void CrashHandler::Install(const std::string& logsDir) {
 }
 
 const std::string& CrashHandler::LogsDir() { return g_logsDir; }
+
+void CrashHandler::SetFaultIntercept(FaultIntercept fn) {
+    g_faultIntercept = fn;
+}
 
 } // namespace PX5
