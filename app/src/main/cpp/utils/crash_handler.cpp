@@ -141,6 +141,46 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {   // NOLINT(bugpro
 
     append(Logger::GetCurrentLogFilePath().c_str());
     append("\n");
+
+    // One-liner into the pasted diagnostic stream (px5_diagnostic.log).
+    // Process death is the one event a pasted log can never contain
+    // afterwards — the 2026-08-29 "Let's Build A Zoo" crash left the event
+    // stream silent because this report only went to its own file. Mirror
+    // the essentials while we are still running in the handler; same
+    // async-signal-safe discipline (open/write/fsync only).
+    {
+        char diagPath[512];
+        snprintf(diagPath, sizeof(diagPath), "%s/px5_diagnostic.log",
+                 g_logsDir.empty() ? "/data/local/tmp" : g_logsDir.c_str());
+        int dfd = open(diagPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (dfd >= 0) {
+            char diag[320];
+#if defined(__aarch64__)
+            const void* pc = uctx
+                ? reinterpret_cast<const void*>(
+                      reinterpret_cast<ucontext_t*>(uctx)->uc_mcontext.pc)
+                : nullptr;
+            snprintf(diag, sizeof(diag),
+                     "[%04d-%02d-%02d %02d:%02d:%02d] NATIVE level=FATAL "
+                     "cat=PX5_System process_crashed signal=%s(%d) pc=%p "
+                     "dump=%s\n",
+                     tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                     tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
+                     SignalName(sig), sig, pc, path);
+#else
+            snprintf(diag, sizeof(diag),
+                     "[%04d-%02d-%02d %02d:%02d:%02d] NATIVE level=FATAL "
+                     "cat=PX5_System process_crashed signal=%s(%d) dump=%s\n",
+                     tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                     tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
+                     SignalName(sig), sig, path);
+#endif
+            write(dfd, diag, strlen(diag));
+            fsync(dfd);
+            close(dfd);
+        }
+    }
+
     fsync(fd);
     if (fd >= 0 && fd != STDERR_FILENO) close(fd);
     if (latestFd >= 0 && latestFd != STDERR_FILENO) {

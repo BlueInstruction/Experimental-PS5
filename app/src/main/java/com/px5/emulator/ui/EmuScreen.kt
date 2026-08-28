@@ -108,12 +108,18 @@ fun EmuScreen(
     val showPad by Px5Settings.showTouchPad.collectAsState()
 
     // One-shot honest GPU proof (skipped on the UI-smoke x86_64 ABI).
+    // Emits the boot story: on the 2026-08-29 paste the game screen produced
+    // ZERO events between entry and process death — nothing to diagnose from.
     LaunchedEffect(Unit) {
+        com.px5.emulator.core.PX5EventLog.event("gameBoot", "screen_entered",
+                "path=$path stub=${isStubAbi}")
         if (!isStubAbi) {
             launch(Dispatchers.Default) {
                 gpuProof = try {
                     fexCoreWrapper?.nativeRunGpuProof() ?: "wrapper missing"
                 } catch (t: Throwable) { "FAIL | ${t.message}" }
+                com.px5.emulator.core.PX5EventLog.event("gameBoot", "gpu_proof",
+                        "result=${gpuProof?.take(120)}")
             }
         }
     }
@@ -278,14 +284,22 @@ fun EmuScreen(
                                     }?.absolutePath ?: ""
                                 } else path
                             }
+                            com.px5.emulator.core.PX5EventLog.event("gameBoot",
+                                    "elf_load_started", "target=$target")
                             loadResult = if (target.isBlank()) {
+                                com.px5.emulator.core.PX5EventLog.event("gameBoot",
+                                        "elf_load_failed", "reason=no eboot.bin in folder")
                                 "LOAD FAILED: no eboot.bin in folder"
                             } else {
                                 try {
                                     val ok = fexCoreWrapper.nativeLoadElf(target)
+                                    com.px5.emulator.core.PX5EventLog.event("gameBoot",
+                                            "elf_load", "target=${target.substringAfterLast('/')}",
+                                            result = ok.toString())
                                     if (ok) "LOADED: $target mapped into guest window"
                                     else "LOAD FAILED: loader rejected $target (see logcat)"
                                 } catch (t: Throwable) {
+                                    com.px5.emulator.core.PX5EventLog.exception("gameBoot.elfLoad", t)
                                     "LOAD FAILED: ${t.message}"
                                 }
                             }

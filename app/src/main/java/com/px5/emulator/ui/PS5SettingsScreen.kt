@@ -403,6 +403,7 @@ private fun LazyListScope.systemSection(
         // before the context exists; verification happens in the counters
         // panel and engine log, never in a toggle's wishful checked state.
         SettingsHeader("FEXCore presets")
+        val scope = rememberCoroutineScope()
         val presetName by Px5Settings.enginePresetName.collectAsState()
         val overrides by Px5Settings.engineOverrides.collectAsState()
         SettingsSegmented(
@@ -418,10 +419,43 @@ private fun LazyListScope.systemSection(
             onSelect = { i ->
                 val preset = FexCorePresets.BUILT_INS[i]
                 val applied = Px5Settings.setEnginePreset(preset.name, preset.overrides)
-                // Best effort now; native honestly rejects when the engine
-                // is already live (the log says "takes effect next start").
-                applied.forEach { (k, v) ->
-                    fexCoreWrapper?.nativeApplyEngineConfigOverride(k, v)
+                // FEX_CONFIG_OPT members are read at context creation, so a
+                // live context would silently ignore every override (the
+                // 00:41:28 device log: 7× "ignored — engine already
+                // initialized"). The honest path is a REAL restart:
+                // shutdown → re-apply every override → re-init — refused
+                // with a logged reason if anything fails mid-way.
+                scope.launch(Dispatchers.Default) {
+                    val w = fexCoreWrapper ?: return@launch
+                    try {
+                        // GetEngineCounters reports exactly "engine: initialized"
+                        // or "engine: not initialized".
+                        val wasLive = w.nativeGetEngineCounters()
+                            ?.contains("engine: initialized") == true
+                        if (wasLive) {
+                            com.px5.emulator.core.PX5EventLog.event(
+                                "fexPreset", "engine_restart_started",
+                                "preset=${preset.name}")
+                            w.nativeShutdown()
+                            applied.forEach { (k, v) ->
+                                w.nativeApplyEngineConfigOverride(k, v)
+                            }
+                            val ok = w.initializeFexCore()
+                            com.px5.emulator.core.PX5EventLog.event(
+                                "fexPreset", "engine_restart",
+                                "preset=${preset.name} keys=${applied.size}",
+                                result = ok.toString())
+                        } else {
+                            applied.forEach { (k, v) ->
+                                w.nativeApplyEngineConfigOverride(k, v)
+                            }
+                            com.px5.emulator.core.PX5EventLog.event(
+                                "fexPreset", "overrides_applied_cold",
+                                "preset=${preset.name} keys=${applied.size}")
+                        }
+                    } catch (t: Throwable) {
+                        com.px5.emulator.core.PX5EventLog.exception("fexPreset.apply", t)
+                    }
                 }
                 soundManager.playNavigationSound()
             }

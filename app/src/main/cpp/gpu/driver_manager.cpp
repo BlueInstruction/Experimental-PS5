@@ -97,15 +97,24 @@ void* GpuDriverManager::OpenHostVulkanLibrary(int dlopenMode) {
     const auto& slot = m_slots[m_active - 1];
     const std::string& soname =
         slot.soname.empty() ? std::string(kCustomDriverSoname) : slot.soname;
+    // ROOT CAUSE (2026-08-29 device logs): adrenotools concatenates
+    // customDriverDir + customDriverName WITHOUT a separator (pinned fork
+    // driver.cpp:55 stat check) — the directory must carry a trailing '/'.
+    // Without it the stat looked for ".../turnip_<ts>libvulkan_freedreno.so",
+    // returned ENOENT, and the call failed with every file actually present.
+    // Sharpdroid's own log on the same device confirms the contract:
+    //   "adrenotools: libvulkan_freedreno.so injected from .../turnip-.../".
+    std::string dirForTools = slot.dir;
+    if (!dirForTools.empty() && dirForTools.back() != '/') dirForTools += '/';
     PX5_LOGI(LogCategory::GPU,
              "Loading custom driver '%s' via adrenotools from %s (soname=%s)",
-             slot.label.c_str(), slot.dir.c_str(), soname.c_str());
+             slot.label.c_str(), dirForTools.c_str(), soname.c_str());
     void* handle = adrenotools_open_libvulkan(
             dlopenMode,
             ADRENOTOOLS_DRIVER_CUSTOM,
             m_tmpLibDir.empty() ? nullptr : m_tmpLibDir.c_str(),
             m_hookLibDir.c_str(),
-            slot.dir.c_str(),
+            dirForTools.c_str(),
             soname.c_str(),
             nullptr,               // fileRedirectDir unused for now
             &m_mappingHandle);
@@ -128,8 +137,9 @@ void* GpuDriverManager::OpenHostVulkanLibrary(int dlopenMode) {
         const bool haveDriver = access(driverSo.c_str(), F_OK) == 0;
         PX5_LOGE(LogCategory::GPU,
                  "adrenotools_open_libvulkan returned null for '%s' "
-                 "(dir=%s soname=%s) — hookImpl=%s hookMain=%s driverSo=%s",
-                 slot.label.c_str(), slot.dir.c_str(), soname.c_str(),
+                 "(dir=%s soname=%s) — hookImpl=%s hookMain=%s driverSo=%s "
+                 "(adrenotools logs its own reason to logcat tag 'adrenotools')",
+                 slot.label.c_str(), dirForTools.c_str(), soname.c_str(),
                  haveImpl ? "yes" : "MISSING",
                  haveMain ? "yes" : "MISSING",
                  haveDriver ? "yes" : "MISSING");
