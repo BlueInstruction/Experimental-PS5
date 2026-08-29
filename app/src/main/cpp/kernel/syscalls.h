@@ -48,8 +48,13 @@ public:
     static const GuestSyscallStats& Stats();
 };
 
-// Kept for continuity: ARM64 fault interceptors used by signals.cpp decls.
-void RegisterSignalHandlers();
+// NOTE (signal routing): host signal handlers are owned EXCLUSIVELY by
+// utils/crash_handler.cpp (installed once at native init). Guest-visible
+// synchronous traps are routed through FexCoreIntegration's fault
+// intercept (see fexcore_integration.cpp FaultInterceptRouter). Do NOT
+// register additional sigaction handlers anywhere else: a handler that
+// returns without re-raising silently swallows real faults and breaks the
+// SMC/trap pipeline (the old kernel/signals.cpp did exactly that).
 
 } // namespace PX5
 

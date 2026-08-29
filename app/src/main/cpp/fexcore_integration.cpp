@@ -375,10 +375,109 @@ void OnMemoryCodeInvalidated(uint64_t base, size_t size) {
 }
 
 // CrashHandler fault intercept — the sharpdroid/FEX question order:
-// SMC write faults and unaligned-atomic repairs are engine-owned fault
-// classes; everything else falls through to the crash report.
-bool FaultInterceptRouter(int sig, void* siginfo, void* uctx) {
-    return SmcManager::GetInstance().HandleFault(sig, siginfo, uctx);
+// engine-owned fault classes are answered first; everything else falls
+// through to the crash report.
+//
+// ---------------------------------------------------------------------------
+// Guest synchronous-trap routing — the missing half of the FEX frontend
+// contract, now implemented for PX5.
+//
+// Evidence from the pinned FEX-2608 tree:
+//  * FEXCore/Source/Interface/Core/JIT/MiscOps.cpp DEF_OP(Break): a guest
+//    ud2/int3/#GP/hlt writes CpuStateFrame::SynchronousFaultData
+//    (FaultToTopAndGeneratedException=1 + Signal/TrapNo/si_code) and then
+//    BRANCHES (br) to the dispatcher's GuestSignal_SIGILL/SIGTRAP/SIGSEGV
+//    blocks — no host fault yet.
+//  * Dispatcher.cpp: those blocks SpillStaticRegs, then hlt(0)/brk(0)
+//    (SIGILL/SIGTRAP) or, without ExitOnHLT, load-from-null (SIGSEGV).
+//  * LinuxSyscalls/SignalDelegator.cpp: the FRONTEND's host handler must
+//    recognize these and route them. We implement the routing FEX's
+//    frontend provides and we do not have yet.
+//
+// Honest gate (no guessing): the trap is only consumed when a live exec
+// thread exists AND frame->SynchronousFaultData.FaultToTopAndGeneratedException
+// is set — a flag ONLY FEXCore's own fault emission writes. Anything else is
+// a real host fault and gets the full crash report.
+//
+// Unwind mechanism (same one FEX's frontend uses for thread stop, and the
+// same one the ExitOnHLT clean exit uses): dispatcher entry pushed callee-
+// saved registers and stored that SP in frame->ReturningStackLocation
+// ("cleanly shutdown the emulation with a long jump"). We set ucontext SP to
+// it and PC to ThreadStopHandlerAddress (SRA already spilled by the
+// GuestSignal_* blocks) or its SpillSRA variant if the PC was inside a JIT
+// code buffer. ExecuteThread then returns normally and the app survives.
+// ---------------------------------------------------------------------------
+GuestTrapInfo g_lastGuestTrap{};      // honest zero when no trap fired
+uint64_t      g_guestTrapCount = 0;   // monotonic, includes every one
+
+bool GuestTrapRouter(int sig, void* siginfoVoid, void* uctxVoid) {
+    auto* uctx = static_cast<ucontext_t*>(uctxVoid);
+    if (!uctx) return false;
+
+    auto* thread = g_execThread;
+    if (!thread || !thread->CurrentFrame) return false;
+    auto* frame = thread->CurrentFrame;
+
+    const auto& synFault = frame->SynchronousFaultData;
+    if (!synFault.FaultToTopAndGeneratedException) {
+        return false;   // not a FEXCore-generated fault: real host fault
+    }
+    // Staleness guard: the emitter records the signal it is about to raise.
+    // A stale flag from a previous trap must never consume a different,
+    // unrelated host fault. (Struct is additionally cleared per-run below.)
+    if (static_cast<uint8_t>(sig) != synFault.Signal) {
+        return false;
+    }
+
+    const uint64_t pc = uctx->uc_mcontext.pc;
+    const bool inJit = g_context->IsAddressInCodeBuffer(thread, pc);
+
+    // Snapshot the honest details BEFORE unwinding (guest RIP was stored
+    // into State.rip by the Break emission right before the branch).
+    GuestTrapInfo trap{};
+    trap.fired    = true;
+    trap.signal   = synFault.Signal;
+    trap.trapNo   = synFault.TrapNo;
+    trap.siCode   = synFault.si_code;
+    trap.guestRip = frame->State.rip;
+
+    // The x86 trap number tells us what the guest actually did (X86_TRAPNO_*
+    // in FEXCore/Core/X86State.h): 12=#SS 13=#GP 6=#UD 3=#BP 0=#DE ...
+    PX5_LOGE(LogCategory::FEX,
+             "Guest trap routed: signal=%d trapNo=%u si_code=%u "
+             "guestRIP=0x%llx hostPC=%#llx inJit=%d — unwinding cleanly "
+             "(stop-handler), app survives",
+             sig, trap.trapNo, trap.siCode,
+             (unsigned long long)trap.guestRip,
+             (unsigned long long)pc, inJit ? 1 : 0);
+
+    g_lastGuestTrap = trap;
+    ++g_guestTrapCount;
+
+    // Sanctioned long-jump shutdown (see Dispatcher entry: ReturningStack-
+    // Location was saved exactly for this).
+    uctx->uc_mcontext.sp = frame->ReturningStackLocation;
+    const auto& cfg = g_signalDelegator.GetConfig();
+    uctx->uc_mcontext.pc = inJit
+        ? cfg.ThreadStopHandlerAddressSpillSRA
+        : cfg.ThreadStopHandlerAddress;
+    return true;
+}
+
+bool FaultInterceptRouterWithTraps(int sig, void* siginfo, void* uctx) {
+    // 1. SMC write faults + unaligned-atomic repairs (existing classes).
+    if (SmcManager::GetInstance().HandleFault(sig, siginfo, uctx)) {
+        return true;
+    }
+    // 2. Guest synchronous traps raised through FEXCore's dispatcher
+    //    (ud2/int3/#GP/hlt-without-exit/...). Only signals FEXCore's fault
+    //    emitter can produce.
+    if (sig == SIGILL || sig == SIGTRAP || sig == SIGFPE || sig == SIGSEGV) {
+        if (GuestTrapRouter(sig, siginfo, uctx)) {
+            return true;
+        }
+    }
+    return false;   // unclaimed: genuine crash, full report follows
 }
 
 FEXCore::HostFeatures CreateHostFeatures() {
@@ -455,12 +554,13 @@ bool Initialize() {
     // invalidate too — the c423471 class.
     MemoryManager::GetInstance().SetCodeInvalidationNotify(OnMemoryCodeInvalidated);
 
-    // Fault routing: SMC + unaligned repairs are answered before any crash
-    // report. Unclaimed faults still crash loudly (CrashHandler contract).
-    CrashHandler::SetFaultIntercept(&FaultInterceptRouter);
+    // Fault routing: SMC + unaligned repairs + guest synchronous traps are
+    // answered before any crash report. Unclaimed faults still crash loudly
+    // (CrashHandler contract).
+    CrashHandler::SetFaultIntercept(&FaultInterceptRouterWithTraps);
 
     PX5_LOGI(LogCategory::FEX, "FEXCore Context initialized successfully "
-                               "(SMC tracking + fault routing armed)");
+                               "(SMC tracking + guest-trap routing armed)");
     return true;
 }
 
@@ -513,6 +613,11 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop) {
 
     g_execThread = thread;
     SmcManager::GetInstance().SetExecThread(thread);
+    // Clear any previous run's synchronous-fault record BEFORE execution so
+    // the trap router's gate reflects THIS run only (no stale-flag lies).
+    memset(&thread->CurrentFrame->SynchronousFaultData, 0,
+           sizeof(thread->CurrentFrame->SynchronousFaultData));
+    g_lastGuestTrap = GuestTrapInfo{};
 
     PX5_LOGI(LogCategory::FEX, "Guest thread created: RIP=%#llx SP=%#llx",
              (unsigned long long)hostRip, (unsigned long long)hostStackTop);
@@ -537,18 +642,22 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop) {
         res.exitedCleanly = false;
     }
     res.output = GuestSyscalls::TakeOutput();
+    res.guestTrap = g_lastGuestTrap;   // honest: fired=false when no trap
 
     g_execThread = nullptr;
     SmcManager::GetInstance().SetExecThread(nullptr);
 
     PX5_LOGI(LogCategory::FEX,
              "Guest execution finished in %.2f ms | RAX=%llu RDI=%llu | "
-             "exitCode=%llu clean=%d | outputLen=%zu | %s",
+             "exitCode=%llu clean=%d | outputLen=%zu | %s%s",
              res.elapsedMs,
              (unsigned long long)rax, (unsigned long long)rdi,
              (unsigned long long)res.exitCode,
              res.exitedCleanly ? 1 : 0, res.output.size(),
-             SmcManager::GetInstance().SummaryString().c_str());
+             SmcManager::GetInstance().SummaryString().c_str(),
+             res.guestTrap.fired
+                 ? " | guestTrap=fired (see trap-routed line above)"
+                 : "");
 
     g_context->DestroyThread(thread);
     return res;
@@ -636,6 +745,8 @@ std::string GetEngineCounters() {
              "syscalls: total=%llu handled=%llu unhandled=%llu bytesOut=%llu\n"
              "SMC: pagesProtected=%llu faults=%llu invalidations=%llu "
              "unalignedRepairs=%llu liveProtected=%zu\n"
+             "guestTraps: count=%llu lastSignal=%u lastTrapNo=%u "
+             "lastGuestRIP=0x%llx\n"
              "memory: %s\n"
              "guestThreads: lastRun=%s",
              IsInitialized() ? "initialized" : "not initialized",
@@ -648,6 +759,10 @@ std::string GetEngineCounters() {
              (unsigned long long)smc.CounterInvalidations(),
              (unsigned long long)smc.CounterUnalignedRepairs(),
              smc.LiveProtectedCount(),
+             (unsigned long long)g_guestTrapCount,
+             (unsigned)g_lastGuestTrap.signal,
+             (unsigned)g_lastGuestTrap.trapNo,
+             (unsigned long long)g_lastGuestTrap.guestRip,
              mm.GetWindowInfoString().c_str(),
              g_execThread ? "active" : "idle");
     return buf;

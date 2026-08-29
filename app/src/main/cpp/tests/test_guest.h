@@ -64,4 +64,11 @@ static constexpr uint8_t TEST_GUEST_ELF_V2[] = {
     0x50, 0x41, 0x53, 0x53, 0x21, 0x0A, 0x00
 };
 
+// ---- v3 contract: guest synchronous trap routing (ud2) -------------------
+static constexpr uint8_t TEST_GUEST_UD2_CODE[]      = { 0x0F, 0x0B };
+static constexpr unsigned int TEST_GUEST_UD2_SIZE   = 2;
+static constexpr unsigned int TEST_GUEST_UD2_SIGNAL = 4;  // SIGILL
+static constexpr unsigned int TEST_GUEST_UD2_TRAPNO = 6;  // x86 #UD
+static constexpr unsigned int TEST_GUEST_UD2_SICODE = 2;  // ILL_ILLOPN
+
 #endif // PX5_TESTS_TEST_GUEST_H

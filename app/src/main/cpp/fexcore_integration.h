@@ -6,6 +6,16 @@
 
 namespace PX5::FexCoreIntegration {
 
+// One guest-visible synchronous trap (ud2/int3/div0/...) that the fault
+// router unwound instead of killing the process. Zeroes reported too.
+struct GuestTrapInfo {
+    bool     fired   = false;
+    uint32_t signal  = 0;    // host signal FEXCore's generated fault raised
+    uint32_t trapNo  = 0;    // x86 trap number FEXCore synthesized (GP/UD/BP...)
+    uint32_t siCode  = 0;    // si_code FEXCore synthesized (ILL_ILLOPN etc.)
+    uint64_t guestRip = 0;   // guest instruction that caused the trap
+};
+
 // Honest result of one guest-execution attempt.
 struct ExecResult {
     bool        started   = false;   // FEXCore created and ran a thread
@@ -14,6 +24,7 @@ struct ExecResult {
     std::string output;              // guest stdout/stderr text
     double      elapsedMs = 0.0;
     std::string error;               // non-empty => start/run failure reason
+    GuestTrapInfo guestTrap;         // populated when the guest trapped
 };
 
 bool Initialize();                    // Config -> features -> context -> core

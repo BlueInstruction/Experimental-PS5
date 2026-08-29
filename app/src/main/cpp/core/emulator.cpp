@@ -299,18 +299,65 @@ std::string Emulator::SelfTestFoundation() {
         if (!v2ok) goto done;
     }
 
-    // --- Step 7: GPU logical device + offscreen submission proof --------
+    // --- Step 7: guest synchronous trap (ud2) routed, app survives ------
+    // Proves the FEX frontend signal contract on Android end-to-end:
+    // guest ud2 -> FEXCore SynchronousFaultData + dispatcher GuestSignal
+    // block -> host SIGILL -> PX5 fault router -> clean unwind. Before this
+    // routing existed, a guest ud2 KILLED the whole app as a "native crash"
+    // with a confusing report (the Let's Build A Zoo failure class).
+    {
+        auto& mm = MemoryManager::GetInstance();
+        const size_t ps = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+        constexpr uint64_t kTrapVa = 0x140000000ULL + 0x00400000ULL;
+        mm.MapMemory(kTrapVa, TEST_GUEST_UD2_SIZE,
+                     MemoryFlags::PAGE_READ | MemoryFlags::PAGE_WRITE |
+                     MemoryFlags::PAGE_EXEC, "ud2_test");
+        memcpy(mm.GetHostPointer(kTrapVa), TEST_GUEST_UD2_CODE,
+               TEST_GUEST_UD2_SIZE);
+        constexpr uint64_t kTrapStackTop = 0x148000000ULL;
+        mm.MapMemory(kTrapStackTop - ps * 4, ps * 4,
+                     MemoryFlags::PAGE_READ | MemoryFlags::PAGE_WRITE,
+                     "ud2_stack");
+
+        auto r = FexCoreIntegration::ExecuteAtHostRip(
+            reinterpret_cast<uint64_t>(mm.GetHostPointer(kTrapVa)),
+            reinterpret_cast<uint64_t>(mm.GetHostPointer(kTrapStackTop)));
+
+        mm.UnmapMemory(kTrapVa, TEST_GUEST_UD2_SIZE);
+        mm.UnmapMemory(kTrapStackTop - ps * 4, ps * 4);
+
+        // We are still executing — that IS the app-survival proof. The
+        // contract also demands the trap be recorded with exact values,
+        // not a generic "something faulted".
+        const bool trapOk = r.started && r.guestTrap.fired &&
+                            r.guestTrap.signal  == TEST_GUEST_UD2_SIGNAL &&
+                            r.guestTrap.trapNo  == TEST_GUEST_UD2_TRAPNO &&
+                            r.guestTrap.siCode  == TEST_GUEST_UD2_SICODE;
+        char trapLine[160];
+        snprintf(trapLine, sizeof(trapLine),
+                 "%s 7. Guest trap routing | ud2 -> %s | signal=%u trapNo=%u "
+                 "si_code=%u guestRIP=0x%llx | app survived",
+                 trapOk ? "[PASS]" : "[FAIL]",
+                 r.guestTrap.fired ? "routed+unwound" : "NOT ROUTED",
+                 (unsigned)r.guestTrap.signal, (unsigned)r.guestTrap.trapNo,
+                 (unsigned)r.guestTrap.siCode,
+                 (unsigned long long)r.guestTrap.guestRip);
+        push(trapLine);
+        if (!trapOk) goto done;
+    }
+
+    // --- Step 8: GPU logical device + offscreen submission proof --------
     {
         std::string gpuDetail;
         const bool gok = VulkanGpuDevice::GetInstance()
                              .RunOffscreenClearProof(gpuDetail);
-        lines.push_back(std::string(gok ? "[PASS] 7. GPU submission | "
-                                        : "[FAIL] 7. GPU submission | ") +
+        lines.push_back(std::string(gok ? "[PASS] 8. GPU submission | "
+                                        : "[FAIL] 8. GPU submission | ") +
                         gpuDetail);
         if (!gok) goto done;   // honest: real device must submit commands
     }
 
-    // --- Step 8: libkernel HLE DirectMemory exercise ---------------------
+    // --- Step 9: libkernel HLE DirectMemory exercise ---------------------
     {
         auto& kHle = SceKernelHle::KernelHle::GetInstance();
         kHle.RegisterAll();
@@ -319,7 +366,7 @@ std::string Emulator::SelfTestFoundation() {
         uint64_t rc = kHle.AllocateDirectMemory(0, 0, 4096, 4096,
                                                 reinterpret_cast<uint64_t>(&phys));
         if (rc != SceKernelHle::SCE_OK) {
-            lines.push_back("[FAIL] 8. libkernel DM allocate rc=" + std::to_string(rc));
+            lines.push_back("[FAIL] 9. libkernel DM allocate rc=" + std::to_string(rc));
             goto done;
         }
         const uint64_t mapped =
@@ -344,8 +391,8 @@ std::string Emulator::SelfTestFoundation() {
         hleOk = hleOk && wrc == sizeof(tag) &&
                 GuestSyscalls::TakeOutput().find("SCE-HLE") != std::string::npos;
 
-        lines.push_back(std::string(hleOk ? "[PASS] 8. libkernel HLE | "
-                                          : "[FAIL] 8. libkernel HLE | ") +
+        lines.push_back(std::string(hleOk ? "[PASS] 9. libkernel HLE | "
+                                          : "[FAIL] 9. libkernel HLE | ") +
                         kHle.GetSummaryString() +
                         " phys=0x" + ([&]{ char b[24];
                             snprintf(b,sizeof(b),"%llx",(unsigned long long)phys); return std::string(b);}()));

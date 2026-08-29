@@ -147,7 +147,6 @@ add_library(
         memory/memory.cpp
         kernel/syscalls.cpp
         kernel/sce_kernel_hle.cpp
-        kernel/signals.cpp
         loader/elf_loader.cpp
         loader/self_loader.cpp
         gpu/vulkan_device.cpp

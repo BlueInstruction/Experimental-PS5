@@ -185,6 +185,16 @@ def build_v1():
 
 CODE1 = build_v1()
 
+# ---- v3 contract: guest synchronous trap (ud2) -> routed, app survives ---
+# FEXCore compiles guest ud2 to: SynchronousFaultData{FaultToTopAndGenerated
+# Exception=1, Signal=SIGILL(4), TrapNo=X86_TRAPNO_UD(6), si_code=2(ILL_ILLOPN)}
+# then branch to the dispatcher's GuestSignal_SIGILL block, which faults with
+# hlt(0) -> host SIGILL. PX5's fault router unwinds via ThreadStopHandler.
+TEST_GUEST_UD2        = b"\x0F\x0B"           # ud2
+TEST_GUEST_UD2_SIGNAL = 4                       # SIGILL
+TEST_GUEST_UD2_TRAPNO = 6                       # X86_TRAPNO_UD
+TEST_GUEST_UD2_SICODE = 2                       # ILL_ILLOPN
+
 def wrap_elf(code):
     ehdr = struct.pack(
         "<16sHHIQQQIHHHHHH",
@@ -258,6 +268,13 @@ static constexpr uint64_t TEST_GUEST_V2_EXIT_FAIL  = {V2_EXIT_FAIL};
 static constexpr unsigned int TEST_GUEST_ELF_V2_SIZE = {len(ELF2)};
 {c_array("TEST_GUEST_ELF_V2", ELF2)}
 
+// ---- v3 contract: guest synchronous trap routing (ud2) -------------------
+static constexpr uint8_t TEST_GUEST_UD2_CODE[]      = {{ 0x{TEST_GUEST_UD2[0]:02X}, 0x{TEST_GUEST_UD2[1]:02X} }};
+static constexpr unsigned int TEST_GUEST_UD2_SIZE   = {len(TEST_GUEST_UD2)};
+static constexpr unsigned int TEST_GUEST_UD2_SIGNAL = {TEST_GUEST_UD2_SIGNAL};  // SIGILL
+static constexpr unsigned int TEST_GUEST_UD2_TRAPNO = {TEST_GUEST_UD2_TRAPNO};  // x86 #UD
+static constexpr unsigned int TEST_GUEST_UD2_SICODE = {TEST_GUEST_UD2_SICODE};  // ILL_ILLOPN
+
 #endif // PX5_TESTS_TEST_GUEST_H
 """
 
@@ -267,4 +284,7 @@ with open("app/src/main/cpp/tests/test_guest.h", "w") as f:
 print(f"v1 code : {len(CODE1)} B | elf1: {len(ELF1)} B")
 print(f"v2 code : {len(CODE2)} B | elf2: {len(ELF2)} B "
       f"@ entry {TEST_GUEST_LOAD_VADDR+PAYLOAD_FILE_OFF:#x}")
+print(f"ud2 trap fixture: {TEST_GUEST_UD2.hex(' ')} "
+      f"-> signal={TEST_GUEST_UD2_SIGNAL} trapno={TEST_GUEST_UD2_TRAPNO} "
+      f"si_code={TEST_GUEST_UD2_SICODE}")
 print("Wrote app/src/main/cpp/tests/test_guest.h")
