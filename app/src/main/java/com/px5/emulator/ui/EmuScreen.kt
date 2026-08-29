@@ -25,6 +25,7 @@ import androidx.compose.runtime.*
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -71,6 +72,8 @@ fun EmuScreen(
     val scope = rememberCoroutineScope()
 
     var renderStats by remember { mutableStateOf("renderer idle") }
+    var fpsText by remember { mutableStateOf("") }
+    var frametimeText by remember { mutableStateOf("") }
     var gpuProof by remember { mutableStateOf<String?>(null) }
     var gnmSelfTest by remember { mutableStateOf<String?>(null) }
     var loaderSelfTest by remember { mutableStateOf<String?>(null) }
@@ -122,8 +125,11 @@ fun EmuScreen(
     val isStubAbi = fexCoreWrapper?.nativeGetArchitectureSummary()
         ?.contains("UI-smoke ABI") == true
 
-    // Virtual DualSense pad visibility (persisted; toggle in the top bar).
+    // Virtual DualSense pad visibility (persisted; toggle in Input settings).
     val showPad by Px5Settings.showTouchPad.collectAsState()
+    val padOpacity by Px5Settings.touchOpacityPct.collectAsState()
+    val showFps by Px5Settings.showFps.collectAsState()
+    val showFrametime by Px5Settings.showFrametime.collectAsState()
 
     // One-shot honest GPU proof (skipped on the UI-smoke x86_64 ABI).
     // Emits the boot story: on the 2026-08-29 paste the game screen produced
@@ -167,12 +173,28 @@ fun EmuScreen(
         }
     }
 
-    // Live HUD polling.
+    // Live HUD polling. FPS / frametime are computed from the engine's own
+    // monotonic frame counter (frames= in the stats string) between polls —
+    // no invented numbers: a stalled loop simply stops updating.
+    var lastFrames by remember { mutableLongStateOf(0L) }
+    var lastPollMs by remember { mutableLongStateOf(0L) }
     LaunchedEffect(Unit) {
         while (true) {
             try {
                 renderStats = fexCoreWrapper?.nativeGetRenderStats()
                     ?: "no engine"
+                val now = System.currentTimeMillis()
+                val m = Regex("frames=(\\d+)").find(renderStats)
+                val frames = m?.groupValues?.get(1)?.toLongOrNull() ?: -1L
+                if (frames >= 0 && lastPollMs > 0L && frames >= lastFrames) {
+                    val dFrames = frames - lastFrames
+                    val dMs = (now - lastPollMs).coerceAtLeast(1L)
+                    if (dFrames > 0) {
+                        fpsText = "FPS: %.1f".format(dFrames * 1000.0 / dMs)
+                        frametimeText = "frametime: %.1f ms".format(dMs.toDouble() / dFrames)
+                    }
+                }
+                if (frames >= 0) { lastFrames = frames; lastPollMs = now }
                 if (!isStubAbi) {
                     inputSummary = fexCoreWrapper?.nativeGetInputSummary()
                         ?: "-"
@@ -291,9 +313,25 @@ fun EmuScreen(
                 textAlign = TextAlign.Start,
                 modifier = Modifier.fillMaxWidth()
             )
+            if (showFps && fpsText.isNotEmpty()) {
+                Text(
+                    text = fpsText,
+                    fontSize = 11.sp,
+                    color = Color(0xFF7DD3FC),
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                )
+            }
+            if (showFrametime && frametimeText.isNotEmpty()) {
+                Text(
+                    text = frametimeText,
+                    fontSize = 11.sp,
+                    color = Color(0xFF7DD3FC),
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                )
+            }
             gpuProof?.let { p ->
                 Text(
-                    text = "GPU proof: $p",
+                    text = "GPU self-test: $p",
                     fontSize = 11.sp,
                     color = if (p.startsWith("PASS")) Color(0xFF7DD3FC)
                             else Color(0xFFFF8A65),
@@ -399,16 +437,18 @@ fun EmuScreen(
             // nativeSetTriggers, touchpad via nativeSetTouchpad. The
             // "input:" HUD line above proves events reach C++.
             if (showPad) {
-                DualSenseOverlay(
-                    enabled = !isStubAbi,
-                    onButton = { bit, down ->
-                        fexCoreWrapper?.nativeSetButtonState(bit, down)
-                    },
-                    onLeftStick = { x, y -> fexCoreWrapper?.nativeSetLeftStick(x, y) },
-                    onRightStick = { x, y -> fexCoreWrapper?.nativeSetRightStick(x, y) },
-                    onTriggers = { l2, r2 -> fexCoreWrapper?.nativeSetTriggers(l2, r2) },
-                    onTouchpad = { down -> fexCoreWrapper?.nativeSetTouchpad(down) }
-                )
+                Box(modifier = Modifier.alpha(padOpacity / 100f)) {
+                    DualSenseOverlay(
+                        enabled = !isStubAbi,
+                        onButton = { bit, down ->
+                            fexCoreWrapper?.nativeSetButtonState(bit, down)
+                        },
+                        onLeftStick = { x, y -> fexCoreWrapper?.nativeSetLeftStick(x, y) },
+                        onRightStick = { x, y -> fexCoreWrapper?.nativeSetRightStick(x, y) },
+                        onTriggers = { l2, r2 -> fexCoreWrapper?.nativeSetTriggers(l2, r2) },
+                        onTouchpad = { down -> fexCoreWrapper?.nativeSetTouchpad(down) }
+                    )
+                }
             }
             Spacer(Modifier.height(10.dp))
         }

@@ -74,13 +74,11 @@ fun PS5HomeScreen(
     fexCoreWrapper: FexCoreWrapper? = null,
     onGameSelected: (String) -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenSearch: () -> Unit,
     onImportFileClick: () -> Unit,
     onImportFolderClick: () -> Unit
 ) {
     var selectedTab by remember { mutableStateOf(0) } // 0: Games
     var selectedIndex by remember { mutableStateOf(0) }
-    var showControlCenter by remember { mutableStateOf(false) }
 
     val context = androidx.compose.ui.platform.LocalContext.current
 
@@ -146,17 +144,9 @@ fun PS5HomeScreen(
                     selectedIndex = 0
                     soundManager.playNavigationSound()
                 },
-                onSearchClick = {
-                    soundManager.playNavigationSound()
-                    onOpenSearch()
-                },
                 onSettingsClick = {
                     soundManager.playNavigationSound()
                     onOpenSettings()
-                },
-                onProfileClick = {
-                    soundManager.playNavigationSound()
-                    showControlCenter = true
                 },
                 onRotateClick = onRotate
             )
@@ -199,27 +189,6 @@ fun PS5HomeScreen(
                         gameViewModel = gameViewModel
                     )
                 }
-            }
-        }
-
-        // Overlay: Control Center (real engine telemetry + audio toggles)
-        if (showControlCenter) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(px5Colors().scrim)
-                    .clickable { showControlCenter = false },
-                contentAlignment = Alignment.BottomCenter
-            ) {
-                PS5ControlCenterSheet(
-                    soundManager = soundManager,
-                    fexCoreStatus = fexCoreStatus,
-                    fexCoreWrapper = fexCoreWrapper,
-                    onDismiss = { showControlCenter = false },
-                    onRestartRequested = {
-                        showControlCenter = false
-                    }
-                )
             }
         }
     }

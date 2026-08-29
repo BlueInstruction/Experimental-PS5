@@ -49,8 +49,8 @@ static std::string CopyString(JNIEnv* env, jstring s) {
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_stringFromJNI(JNIEnv* env, jobject) {
     return env->NewStringUTF(
-        "PX5 UI-smoke core (x86_64): Compose surface + REAL Vulkan "
-        "enumeration active; guest execution = arm64-v8a only.");
+        "PX5 UI-smoke core (x86_64): Compose surface + Vulkan enumeration; "
+        "guest execution = arm64-v8a only.");
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -183,7 +183,7 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeGetRenderStats(
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT void JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeApplySettings(
-        JNIEnv* env, jobject, jint, jboolean, jint, jboolean,
+        JNIEnv* env, jobject, jint, jboolean, jint, jboolean, jint,
         jstring logDirJ) {
     const std::string dir = CopyString(env, logDirJ);
     if (!dir.empty()) PX5::Logger::Initialize(dir);   // honest file logging

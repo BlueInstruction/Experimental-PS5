@@ -63,6 +63,7 @@ if(ANDROID_ABI STREQUAL "x86_64")
             gpu/gnm/gnm_submit.cpp
             loader/self_extract.cpp
             loader/self_extract_selftest.cpp
+            utils/breadcrumbs.cpp
             utils/crash_handler.cpp
             utils/logger.cpp
             utils/diag_bridge.cpp)
@@ -174,6 +175,7 @@ add_library(
         input/controller.cpp
         filesystem/vfs.cpp
         utils/logger.cpp
+        utils/breadcrumbs.cpp
         utils/crash_handler.cpp
         utils/diag_bridge.cpp
         utils/linker_ns_bypass.cpp

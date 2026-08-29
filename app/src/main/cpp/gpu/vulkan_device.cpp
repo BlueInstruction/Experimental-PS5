@@ -2,6 +2,7 @@
 #include "driver_manager.h"
 #include "../core/settings.h"
 #include "../utils/logger.h"
+#include "../utils/breadcrumbs.h"
 
 #include <dlfcn.h>
 #include <cstring>
@@ -22,6 +23,44 @@ std::string VkVersion(uint32_t v) {
              VK_API_VERSION_MAJOR(v), VK_API_VERSION_MINOR(v),
              VK_API_VERSION_PATCH(v));
     return b;
+}
+
+// Memory-type selection honouring EngineSettings::vramUsageMode. Runs on the
+// caller's thread against freshly-queried device properties; every branch
+// picks a type that satisfies reqs, so this can never return an invalid
+// index when the device reports at least one usable type.
+uint32_t SelectImageMemoryType(
+        const VkPhysicalDeviceMemoryProperties& mp,
+        uint32_t allowedBits) {
+    const int mode = EngineSettings::vramUsageMode.load();
+
+    // conservative (0): first HOST_VISIBLE type wins; device-local-only
+    // types are skipped so allocations land in shared memory.
+    if (mode == 0) {
+        for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
+            if ((allowedBits & (1u << i)) &&
+                (mp.memoryTypes[i].propertyFlags &
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) return i;
+    }
+    // aggressive (2): DEVICE_LOCAL required; no fallback to non-local.
+    if (mode == 2) {
+        for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
+            if ((allowedBits & (1u << i)) &&
+                (mp.memoryTypes[i].propertyFlags &
+                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) return i;
+        // No DEVICE_LOCAL type satisfies reqs (should not happen for images
+        // on any real device): fall through so the caller gets a valid type
+        // instead of a guaranteed allocation failure.
+    }
+    // balanced (1) + aggressive fallback: DEVICE_LOCAL preferred, any type
+    // acceptable.
+    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
+        if ((allowedBits & (1u << i)) &&
+            (mp.memoryTypes[i].propertyFlags &
+             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) return i;
+    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
+        if (allowedBits & (1u << i)) return i;
+    return 0;
 }
 
 } // namespace
@@ -331,10 +370,15 @@ bool VulkanGpuDevice::RunOffscreenClearProof(std::string& detailOut) {
 }
 
 bool VulkanGpuDevice::RunOffscreenProofLocked(std::string& err) {
+    // Every step below stamps a breadcrumb BEFORE executing. If the driver
+    // hangs or faults inside one of them, the crash report (or the next
+    // paste) names the exact step instead of a silent death.
+    Breadcrumb::Set("gpu.proof: enter");
     if (!EnsureLogicalDeviceUnlocked()) {
         err = "device: " + m_stats.LastError();
         return false;
     }
+    Breadcrumb::Set("gpu.proof: device ready");
 
     constexpr uint32_t W = 64, H = 64;
 
@@ -350,10 +394,12 @@ bool VulkanGpuDevice::RunOffscreenProofLocked(std::string& err) {
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     VkImage img = VK_NULL_HANDLE;
+    Breadcrumb::Set("gpu.proof: create_image");
     if (m_tbl.CreateImage(m_device, &ici, nullptr, &img) != VK_SUCCESS) {
         err = "CreateImage failed";
         return false;
     }
+    Breadcrumb::Set("gpu.proof: image created");
 
     bool ok = false;
     VkDeviceMemory mem  = VK_NULL_HANDLE;
@@ -372,30 +418,29 @@ bool VulkanGpuDevice::RunOffscreenProofLocked(std::string& err) {
         VkPhysicalDeviceMemoryProperties mp{};
         pfnMemProps(reinterpret_cast<VkPhysicalDevice>(m_physDev), &mp);
 
-        uint32_t memType = 0xFFFFFFFFu;
-        for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
-            if ((reqs.memoryTypeBits & (1u << i)) &&
-                (mp.memoryTypes[i].propertyFlags &
-                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) { memType = i; break; }
-        if (memType == 0xFFFFFFFFu)
-            for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
-                if (reqs.memoryTypeBits & (1u << i)) { memType = i; break; }
+        uint32_t memType = SelectImageMemoryType(mp, reqs.memoryTypeBits);
+        Breadcrumb::Set("gpu.proof: memtype=%u mode=%d",
+                        memType, EngineSettings::vramUsageMode.load());
 
         VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         mai.allocationSize  = reqs.size;
         mai.memoryTypeIndex = memType;
 
+        Breadcrumb::Set("gpu.proof: alloc_memory");
         if (m_tbl.AllocateMemory(m_device, &mai, nullptr, &mem)
                 != VK_SUCCESS) { err = "AllocateMemory failed"; break; }
+        Breadcrumb::Set("gpu.proof: bind_image_memory");
         if (m_tbl.BindImageMemory(m_device, img, mem, 0) != VK_SUCCESS) {
             err = "BindImageMemory failed"; break;
         }
+        Breadcrumb::Set("gpu.proof: image bound");
 
         VkCommandPoolCreateInfo pci{
             VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         pci.flags            =
             VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         pci.queueFamilyIndex = m_queueFamily;
+        Breadcrumb::Set("gpu.proof: create_cmd_pool");
         if (m_tbl.CreateCommandPool(m_device, &pci, nullptr, &pool)
                 != VK_SUCCESS) { err = "CreateCommandPool failed"; break; }
 

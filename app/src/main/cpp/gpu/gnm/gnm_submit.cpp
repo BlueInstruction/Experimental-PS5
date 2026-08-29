@@ -36,8 +36,13 @@ const void* GnmSubmit::ResolveDefault(uint64_t addr, size_t bytes) const {
     if (mem.IsValidAddress(addr, bytes ? bytes : 1)) {
         return mem.GetHostPointer(addr);
     }
-    // Evidence-test fallback (same policy as kernel HLE Open/Write).
-    return reinterpret_cast<const void*>(addr);
+    // NO fallback. The previous "evidence-test fallback" reinterpreted the
+    // raw guest VA as a host pointer and the first dereference killed the
+    // whole process on real devices (SIGSEGV, no named error, no evidence).
+    // An address outside the guest window is simply unresolvable: nullptr
+    // -> caller emits a named EFAULT. Tests that legitimately hold HOST
+    // pointers inject identity resolution via SetAddressResolverForTest.
+    return nullptr;
 #endif
 }
 
@@ -52,6 +57,7 @@ void GnmSubmit::ResetForTest() {
     m_submissions = 0;
     m_dwordsDecoded = 0;
     m_errors.clear();
+    m_logTag = "";
 }
 
 bool GnmSubmit::SubmitBuffer(const uint32_t* dwords, size_t dwordCount,
@@ -133,7 +139,8 @@ int64_t GnmSubmit::SubmitDescriptors(uint64_t count, uint64_t descriptorsPtr,
             hex += b;
         }
         PX5_LOGI(LogCategory::GPU,
-                 "sceGnmSubmitCommandBuffers: count=%llu descriptors=[%s%s]",
+                 "%ssceGnmSubmitCommandBuffers: count=%llu descriptors=[%s%s]",
+                 m_logTag,
                  (unsigned long long)count, hex.c_str(),
                  count > 8 ? " ..." : "");
     }

@@ -141,11 +141,14 @@ public class FexCoreWrapper {
      * Pushes UI settings into the engine atomics. Real effects:
      * resScalePct clamps to [50..200]; vsync picks MAILBOX/IMMEDIATE vs
      * FIFO at swapchain build; verboseLog flips the C++ logger level;
-     * logDir enables on-disk rotating logs (idempotent, first call wins).
+     * vramUsageMode (0=conservative 1=balanced 2=aggressive) biases image
+     * memory-type selection in VulkanGpuDevice; logDir enables on-disk
+     * rotating logs (idempotent, first call wins).
      */
     public native void nativeApplySettings(int resScalePct, boolean vsync,
                                            int driverModeSlot,
-                                           boolean verboseLog, String logDir);
+                                           boolean verboseLog,
+                                           int vramUsageMode, String logDir);
 
     /** libkernel HLE symbol-table summary (counts real invocations). */
     public native String nativeGetKernelHleSummary();

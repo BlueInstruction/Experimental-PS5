@@ -48,7 +48,6 @@ import com.px5.emulator.core.Px5Settings
 import com.px5.emulator.ui.EmuScreen
 import com.px5.emulator.ui.PS5HomeScreen
 import com.px5.emulator.ui.PS5LogsScreen
-import com.px5.emulator.ui.PS5SearchScreen
 import com.px5.emulator.ui.PS5SettingsScreen
 import com.px5.emulator.ui.PS5TurnipDriverSheet
 import com.px5.emulator.ui.PX5Theme
@@ -682,23 +681,12 @@ fun AppNavigation(
                     onOpenSettings = {
                         navController.navigate("settings")
                     },
-                    onOpenSearch = {
-                        navController.navigate("search")
-                    },
                     onImportFileClick = {
                         importFileLauncher.launch(arrayOf("*/*"))
                     },
                     onImportFolderClick = {
                         importFolderLauncher.launch(null)
                     }
-                )
-            }
-
-            composable("search") {
-                PS5SearchScreen(
-                    games = games,
-                    onGameSelected = { game -> navController.navigate("emulation?path=${game.path}") },
-                    onBackClick = { navController.popBackStack() }
                 )
             }
 

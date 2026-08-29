@@ -1,5 +1,6 @@
 #include "crash_handler.h"
 #include "logger.h"
+#include "utils/breadcrumbs.h"
 
 #include <android/log.h>
 #include <csignal>
@@ -7,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <atomic>
 #include <fcntl.h>
 #include <unistd.h>
 #include <unwind.h>
@@ -30,6 +32,22 @@ _Unwind_Reason_Code BtFn(struct _Unwind_Context* c, void* p) {
 }
 std::string g_logsDir;
 FaultIntercept g_faultIntercept = nullptr;
+
+// Re-entrancy guard: a fault raised while the handler itself is reporting
+// means the reporting path faulted. Previously this died silently inside
+// the handler with ZERO evidence — the 2026-08-29 pattern. Now the nested
+// entry writes a one-line marker and restores the default disposition.
+std::atomic<bool> g_inHandler{false};
+
+// Claim-loop watchdog: an intercept that claims the SAME faulting PC over
+// and over is not "handling" anything — it resumes into the same faulting
+// instruction forever (screen freezes, then the system SIGKILLs the app
+// silently — the other 2026-08-29 death mode). After kMaxSamePcClaims
+// consecutive claims of one PC the intercept verdict is overridden to
+// "unclaimed" so the real crash report gets written.
+constexpr int kMaxSamePcClaims = 4;
+std::atomic<void*> g_lastClaimedPc{nullptr};
+std::atomic<int> g_samePcClaims{0};
 
 const char* SignalName(int sig) {
     switch (sig) {
@@ -95,6 +113,20 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {   // NOLINT(bugpro
              info ? static_cast<int>(info->si_pid) : -1,
              static_cast<unsigned long>(gettid()));
     append(line);
+
+    // The last known native steps (fixed preallocated ring — async-signal-
+    // safe drain). This is what pins WHICH engine step was in flight when
+    // the process died, the exact information the 2026-08-29 pastes lacked.
+    append("last breadcrumbs:\n");
+    {
+        // DumpToFd writes to one fd; call it for both targets.
+        long n1 = Breadcrumb::DumpToFd(fd);
+        (void)n1;
+        if (latestFd >= 0) {
+            long n2 = Breadcrumb::DumpToFd(latestFd);
+            (void)n2;
+        }
+    }
 
     if (uctx) {
         auto* uc = static_cast<ucontext_t*>(uctx);
@@ -190,10 +222,57 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {   // NOLINT(bugpro
 }
 
 void Handler(int sig, siginfo_t* info, void* uctx) {
+    // Nested fault while reporting: the report path itself faulted. Get a
+    // minimal marker on stderr and die with the true signal — a corrupted
+    // half-report is worse than a short honest marker.
+    bool expected = false;
+    if (!g_inHandler.compare_exchange_strong(expected, true)) {
+        const char msg[] = "PX5: nested fault inside crash handler\n";
+        ssize_t n = write(STDERR_FILENO, msg, sizeof(msg) - 1);
+        (void)n;
+        signal(sig, SIG_DFL);
+        raise(sig);
+        return;
+    }
+
     // Routing question order (see class contract): engine-owned fault
     // classes are offered the fault BEFORE anything is written. A fault
     // nobody claims is a real crash and gets the full report below.
-    if (g_faultIntercept && g_faultIntercept(sig, info, uctx)) {
+    bool claimed = false;
+    if (g_faultIntercept) {
+        claimed = g_faultIntercept(sig, info, uctx);
+        if (claimed) {
+            // Loop detection on claimed PCs (see constant comment).
+            void* pc = uctx
+                ? reinterpret_cast<void*>(
+                      reinterpret_cast<ucontext_t*>(uctx)->uc_mcontext.pc)
+                : nullptr;
+            if (pc != nullptr && g_lastClaimedPc.load() == pc) {
+                if (g_samePcClaims.fetch_add(1) + 1 >= kMaxSamePcClaims) {
+                    // This "handled" class is actually a live-lock: fall
+                    // through to the full crash report instead of
+                    // resuming into the same fault forever.
+                    claimed = false;
+                    g_samePcClaims.store(0);
+                    g_lastClaimedPc.store(nullptr);
+                    const char msg[] =
+                        "PX5: fault intercept claimed the same PC repeatedly "
+                        "— overriding to crash report (live-lock guard)\n";
+                    ssize_t n = write(STDERR_FILENO, msg, sizeof(msg) - 1);
+                    (void)n;
+                }
+            } else {
+                g_lastClaimedPc.store(pc);
+                g_samePcClaims.store(1);
+            }
+        } else {
+            g_lastClaimedPc.store(nullptr);
+            g_samePcClaims.store(0);
+        }
+    }
+
+    if (claimed) {
+        g_inHandler.store(false);
         return;
     }
     WriteCrashReport(sig, info, uctx);

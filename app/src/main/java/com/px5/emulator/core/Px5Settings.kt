@@ -41,6 +41,24 @@ object Px5Settings {
     private val _showTouchPad = MutableStateFlow(true)
     val showTouchPad: StateFlow<Boolean> = _showTouchPad
 
+    /** Opacity of the on-screen pad overlay (40..100 %). UI-only. */
+    private val _touchOpacityPct = MutableStateFlow(100)
+    val touchOpacityPct: StateFlow<Int> = _touchOpacityPct
+
+    /** Overlay: show live FPS (computed from the real frame counter). */
+    private val _showFps = MutableStateFlow(false)
+    val showFps: StateFlow<Boolean> = _showFps
+
+    /** Overlay: show live frame time in milliseconds. */
+    private val _showFrametime = MutableStateFlow(false)
+    val showFrametime: StateFlow<Boolean> = _showFrametime
+
+    /** VRAM usage mode: 0=conservative 1=balanced 2=aggressive.
+     *  Pushed to native and consumed by VulkanGpuDevice memory-type
+     *  selection (see settings.h / vulkan_device.cpp). */
+    private val _vramUsageMode = MutableStateFlow(1)
+    val vramUsageMode: StateFlow<Int> = _vramUsageMode
+
     /** Explicit engine log level: 0=none 1=error 2=warn 3=info 4=debug 5=trace,
      *  -1 = never chosen (legacy verbose toggle decides). */
     private val _logLevel = MutableStateFlow(-1)
@@ -69,6 +87,10 @@ object Px5Settings {
         _themeMode.value     = prefs?.getInt("themeMode", 0) ?: 0
         _orientationMode.value = prefs?.getInt("orientationMode", 0) ?: 0
         _showTouchPad.value  = prefs?.getBoolean("showTouchPad", true) ?: true
+        _touchOpacityPct.value = prefs?.getInt("touchOpacityPct", 100) ?: 100
+        _showFps.value       = prefs?.getBoolean("showFps", false) ?: false
+        _showFrametime.value = prefs?.getBoolean("showFrametime", false) ?: false
+        _vramUsageMode.value = prefs?.getInt("vramUsageMode", 1) ?: 1
         _logLevel.value      = prefs?.getInt("logLevel", -1) ?: -1
         _presentMode.value   = prefs?.getInt("presentMode", 0) ?: 0
         _enginePresetName.value = prefs?.getString("enginePresetName", "Balanced")
@@ -127,6 +149,28 @@ object Px5Settings {
         prefs?.edit()?.putBoolean("showTouchPad", on)?.apply()
     }
 
+    fun setTouchOpacityPct(v: Int) {
+        _touchOpacityPct.value = v.coerceIn(40, 100)
+        prefs?.edit()?.putInt("touchOpacityPct", _touchOpacityPct.value)?.apply()
+    }
+
+    fun setShowFps(on: Boolean) {
+        _showFps.value = on
+        prefs?.edit()?.putBoolean("showFps", on)?.apply()
+    }
+
+    fun setShowFrametime(on: Boolean) {
+        _showFrametime.value = on
+        prefs?.edit()?.putBoolean("showFrametime", on)?.apply()
+    }
+
+    fun setVramUsageMode(mode: Int) {
+        val v = mode.coerceIn(0, 2)
+        _vramUsageMode.value = v
+        prefs?.edit()?.putInt("vramUsageMode", v)?.apply()
+        push()
+    }
+
     fun setLogLevel(level: Int) {
         val v = level.coerceIn(-1, 5)
         _logLevel.value = v
@@ -165,6 +209,7 @@ object Px5Settings {
             vsyncEnabled.value,
             driverMode.value,
             verboseLogging.value,
+            vramUsageMode.value,
             dir.ifEmpty { null }
         )
     }

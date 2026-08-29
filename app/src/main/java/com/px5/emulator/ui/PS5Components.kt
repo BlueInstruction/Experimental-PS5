@@ -15,10 +15,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.ScreenRotation
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -64,20 +61,18 @@ fun safePainterResource(@DrawableRes id: Int): Painter? {
 /**
  * Shared header / tile components.
  *
- * Removed in the honesty pass: the live system clock and the battery
- * meter (the OS already shows both — an emulator shell duplicating them
- * was decoration, and the battery row previously sat next to a fake
- * "DualSense connected" claim). The header now carries only controls
- * that actually do something.
+ * Removed: the live system clock and battery meter (the OS already shows
+ * both), the Search screen entry (the library is small and offline; a
+ * full-screen search added nothing), and the profile avatar that opened
+ * the Control Center sheet (its contents are Settings entries — see the
+ * Settings tabs). The header carries only controls that do something.
  */
 
 @Composable
 fun PS5TopHeader(
     selectedTab: Int, // 0: Games
     onTabSelected: (Int) -> Unit,
-    onSearchClick: () -> Unit,
     onSettingsClick: () -> Unit,
-    onProfileClick: () -> Unit,
     onRotateClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -125,21 +120,6 @@ fun PS5TopHeader(
             }
 
             IconButton(
-                onClick = onSearchClick,
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(px5Colors().control)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Search,
-                    contentDescription = "Search",
-                    tint = px5Colors().text,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-
-            IconButton(
                 onClick = onSettingsClick,
                 modifier = Modifier
                     .size(40.dp)
@@ -151,23 +131,6 @@ fun PS5TopHeader(
                     contentDescription = "Settings",
                     tint = px5Colors().text,
                     modifier = Modifier.size(20.dp)
-                )
-            }
-
-            // Profile avatar opens the Control Center (real telemetry).
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .border(1.5.dp, PS5AccentBlue, CircleShape)
-                    .clickable { onProfileClick() },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Person,
-                    contentDescription = "Profile",
-                    tint = px5Colors().text,
-                    modifier = Modifier.padding(8.dp)
                 )
             }
         }

@@ -309,12 +309,37 @@ SubResult TestSubmitPipeline() {
     return r;
 }
 
+// RAII guard: test-scoped resolver + log tag, restored on EVERY exit path
+// (early returns included) — a leaked test resolver would silently change
+// production resolution policy for the rest of the process lifetime.
+struct TestResolveScope {
+    TestResolveScope() {
+        GnmSubmit::GetInstance().SetAddressResolverForTest(
+            [](uint64_t addr, size_t) -> const void* {
+                return reinterpret_cast<const void*>(addr);
+            });
+        GnmSubmit::GetInstance().SetLogTagForTest("[selftest] ");
+    }
+    ~TestResolveScope() {
+        GnmSubmit::GetInstance().SetAddressResolverForTest(nullptr);
+        GnmSubmit::GetInstance().SetLogTagForTest("");
+    }
+};
+
 // 11. Descriptor path: provisional packing (addr=low48, dwords=high16)
 //     resolves a host buffer and decodes it; bad descriptors produce NAMED
 //     errors without crashing or decoding garbage.
 SubResult TestSubmitDescriptors() {
     SubResult r{"submit_descriptors", false, ""};
     GnmSubmit::GetInstance().ResetForTest();
+
+    // This test holds HOST pointers (std::vector data), not guest VAs. The
+    // production resolver only resolves the guest window and returns
+    // nullptr for anything else (named EFAULT) — so the test injects
+    // identity resolution through the documented seam and tags its log
+    // lines. No test may rely on raw pointer fallbacks ever again (that
+    // fallback crashed real devices).
+    TestResolveScope scope;
 
     std::vector<uint32_t> stream;
     stream.push_back(Type3Header::Encode(kItNumInstances, 1));

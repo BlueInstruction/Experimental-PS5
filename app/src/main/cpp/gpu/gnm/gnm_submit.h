@@ -20,9 +20,12 @@
 //   wrong assumption shows up as named validation errors + raw evidence,
 //   never as silently misdecoded streams.
 //
-// Platform-independent C++ (host-testable); address resolution mirrors the
-// kernel HLE pattern (guest window first, raw host pointer fallback for
-// evidence tests — same policy as sceKernelOpen/Write).
+// Platform-independent C++ (host-testable); address resolution goes through
+// the guest memory window (MemoryManager). An address that does not resolve
+// is an ERROR (named EFAULT) — it is never reinterpreted as a raw host
+// pointer. The old "evidence fallback" produced dereferenceable garbage and
+// crashed the process on real devices (2026-08-29 A750 logs); tests that
+// need identity resolution inject it via SetAddressResolverForTest.
 
 #ifndef PX5_GPU_GNM_GNM_SUBMIT_H
 #define PX5_GPU_GNM_GNM_SUBMIT_H
@@ -46,11 +49,15 @@ public:
     static GnmSubmit& GetInstance();
 
     // Address-resolution seam. Default resolves through the guest memory
-    // window (MemoryManager) with a raw-host-pointer fallback for evidence
-    // tests — identical policy to the kernel HLE layer. Host unit tests
-    // inject a passthrough instead of linking the Android memory backend.
+    // window (MemoryManager) ONLY; unresolvable addresses yield nullptr and
+    // become named EFAULT errors. Host unit tests inject a passthrough
+    // instead of linking the Android memory backend.
     using AddressResolver = std::function<const void*(uint64_t addr, size_t bytes)>;
     void SetAddressResolverForTest(AddressResolver fn);
+
+    // Prefix for the descriptor hex-log line. Test code sets "[selftest] "
+    // so its synthetic submissions can never be misread in a pasted GPU log
+    // as real game traffic. Production leaves it empty.
 
     // HLE-shaped entry: an array of `count` uint64 descriptors.
     // Returns SCE-style 0 on success, negative errno-style on failure
@@ -71,6 +78,7 @@ public:
     bool EmptySoFar() const { return m_submissions == 0; }
 
     void ResetForTest();
+    void SetLogTagForTest(const char* tag) { m_logTag = tag ? tag : ""; }
 
 private:
     GnmSubmit() = default;
@@ -86,6 +94,7 @@ private:
     uint64_t    m_dwordsDecoded = 0;
     std::vector<std::string> m_errors;   // bounded ring (last 16)
     AddressResolver m_testResolver;      // empty => default policy
+    const char* m_logTag = "";           // hex-log prefix ("[selftest] " in tests)
 };
 
 } // namespace PX5::Gnm

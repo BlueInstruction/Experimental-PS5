@@ -530,7 +530,7 @@ bool Initialize() {
         return false;
     }
 
-    PX5_LOGI(LogCategory::FEX, "Initialize: step 3 — SetSyscallHandler(REAL bridge)");
+    PX5_LOGI(LogCategory::FEX, "Initialize: step 3 — SetSyscallHandler");
     g_context->SetSyscallHandler(&g_syscallHandler);
 
     PX5_LOGI(LogCategory::FEX, "Initialize: step 4 — SetSignalDelegator");
@@ -560,7 +560,7 @@ bool Initialize() {
     CrashHandler::SetFaultIntercept(&FaultInterceptRouterWithTraps);
 
     PX5_LOGI(LogCategory::FEX, "FEXCore Context initialized successfully "
-                               "(SMC tracking + guest-trap routing armed)");
+                               "(SMC tracking + guest-trap routing installed)");
     return true;
 }
 
@@ -727,8 +727,7 @@ std::string GetArchitectureSummary() {
     // .fex-pin (CMake passes PX5_FEXCORE_PIN). No hardcoded hash that can
     // drift from the tree that is actually compiled.
     return IsInitialized()
-        ? "FEXCore " PX5_FEXCORE_PIN " initialized | REAL syscall bridge "
-          "ACTIVE | SMC mtrack + fault routing armed"
+        ? "FEXCore " PX5_FEXCORE_PIN " initialized (x86-64 → ARM64)"
         : "FEXCore " PX5_FEXCORE_PIN " not initialized";
 }
 

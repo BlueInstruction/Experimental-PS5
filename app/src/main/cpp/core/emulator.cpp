@@ -122,7 +122,7 @@ std::string Emulator::GetStatusString() const {
 }
 
 // ---------------------------------------------------------------------------
-// SelfTestFoundation — the honest end-to-end proof pipeline.
+// SelfTestFoundation — ordered end-to-end self-test of the engine pieces.
 // ---------------------------------------------------------------------------
 void Emulator::EnsureMemoryWindow(std::vector<std::string>& report,
                                   bool& ok, bool& fatal) {
@@ -165,7 +165,7 @@ std::string Emulator::SelfTestFoundation() {
         lines.push_back("[FAIL] 3. FEXCore context (see logcat FEX tag)");
         goto done;
     }
-    lines.push_back("[PASS] 3. FEXCore context + REAL syscall bridge");
+    lines.push_back("[PASS] 3. FEXCore context + syscall bridge");
 
     // --- Step 4: raw blob write/exit/hlt --------------------------------
     {
@@ -190,7 +190,7 @@ std::string Emulator::SelfTestFoundation() {
         const bool rawOk = r.started && r.output.find("PX5-OK!") !=
                                                        std::string::npos &&
                            r.exitCode == TEST_GUEST_EXPECTED_EXIT_CODE;
-        if (!rawOk) { ok = false; r.error = "raw run did not meet proof contract"; }
+        if (!rawOk) { ok = false; r.error = "raw run did not meet the pass contract"; }
         lines.push_back(std::string(rawOk ? "[PASS] 4. RAW x86-64 | write+exit42+halt "
                                           : "[FAIL] 4. RAW x86-64 | ") +
                         "| out=\"" + r.output.substr(0, 64) + "\"" +
@@ -219,7 +219,7 @@ std::string Emulator::SelfTestFoundation() {
 
         LoadedElfImage img;
         if (!ElfLoader::LoadElfFile(elfPath, img)) {
-            lines.push_back("[FAIL] 5. REAL loader: " + img.error);
+            lines.push_back("[FAIL] 5. loader: " + img.error);
             goto done;
         }
         if (img.entryPoint != TEST_GUEST_LOAD_VADDR + 0x80 ||
@@ -244,8 +244,8 @@ std::string Emulator::SelfTestFoundation() {
             r.started && r.exitCode == 42 &&
             r.output.find(TEST_GUEST_EXPECTED_OUTPUT) != std::string::npos;
 
-        lines.push_back(std::string(elfOk ? "[PASS] 5. REAL ELF pipeline | parse->map->bridge->JIT->write+exit42 "
-                                          : "[FAIL] 5. REAL ELF pipeline |") +
+        lines.push_back(std::string(elfOk ? "[PASS] 5. ELF pipeline | parse->map->bridge->JIT->write+exit42 "
+                                          : "[FAIL] 5. ELF pipeline |") +
                         " out=\"" + r.output.substr(0, 48) + "\"" +
                         " exit=" + std::to_string(r.exitCode));
         if (!elfOk) goto done;
@@ -292,7 +292,7 @@ std::string Emulator::SelfTestFoundation() {
             r.started && r.exitCode == TEST_GUEST_V2_EXIT_OK &&
             r.output.find(TEST_GUEST_V2_EXPECTED_OUTPUT) != std::string::npos;
         lines.push_back(std::string(
-                v2ok ? "[PASS] 6. ELFv2 REAL mmap round-trip | "
+                v2ok ? "[PASS] 6. ELFv2 mmap round-trip | "
                      : "[FAIL] 6. ELFv2 mmap | ") +
                 "out=\"" + r.output.substr(0, 40) + "\"" +
                 " exit=" + std::to_string(r.exitCode));

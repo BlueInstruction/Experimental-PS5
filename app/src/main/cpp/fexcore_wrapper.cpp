@@ -17,6 +17,7 @@
 #include "core/settings.h"
 #include "utils/logger.h"
 #include "utils/diag_bridge.h"
+#include "utils/breadcrumbs.h"
 
 namespace fs = std::filesystem;
 
@@ -32,8 +33,8 @@ namespace fs = std::filesystem;
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_stringFromJNI(JNIEnv* env, jobject) {
     return env->NewStringUTF(
-        "PX5 Foundation Core: FEXCore ARM64 CPU bridge | REAL Linux syscall "
-        "HLE | Vulkan runtime enumeration");
+        "PX5 core: FEXCore x86-64→ARM64 CPU translation, Vulkan GPU device, "
+        "libkernel HLE seam");
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -74,6 +75,7 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadElf(JNIEnv* env, jobject,
                                                         jstring pathStr) {
     if (!pathStr) return JNI_FALSE;
     const char* p = env->GetStringUTFChars(pathStr, nullptr);
+    PX5::Breadcrumb::Set("jni: LoadElf %s", p);
     const bool res =
         PX5::Emulator::GetInstance().LoadExecutable(p, /*isSelf=*/false);
     env->ReleaseStringUTFChars(pathStr, p);
@@ -85,6 +87,7 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadSelf(JNIEnv* env, jobject,
                                                          jstring pathStr) {
     if (!pathStr) return JNI_FALSE;
     const char* p = env->GetStringUTFChars(pathStr, nullptr);
+    PX5::Breadcrumb::Set("jni: LoadSelf %s", p);
     const bool res =
         PX5::Emulator::GetInstance().LoadExecutable(p, /*isSelf=*/true);
     env->ReleaseStringUTFChars(pathStr, p);
@@ -176,9 +179,10 @@ std::string RunIsolated(const char* name,
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunCpuConformanceTest(
         JNIEnv* env, jobject) {
+    PX5::Breadcrumb::Set("jni: CpuConformanceTest enter");
     // Fork-isolated: a JIT fault reports evidence instead of killing the app.
     const std::string report = RunIsolated(
-        "FEXCore JIT conformance",
+        "CPU conformance",
         []() -> std::string {
             const bool ok = PX5::FexCoreIntegration::RunConformanceTest();
             return ok
@@ -218,9 +222,10 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeGetArchitectureSummary(
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunFoundationSelfTest(
         JNIEnv* env, jobject) {
+    PX5::Breadcrumb::Set("jni: EngineSelfTest enter");
     // Fork-isolated like the conformance test: evidence over fatal crashes.
     const std::string report = RunIsolated(
-        "foundation proof pipeline",
+        "engine self-test",
         []() -> std::string {
             return PX5::Emulator::GetInstance().SelfTestFoundation();
         });
@@ -297,9 +302,11 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeGetVulkanSummary(JNIEnv* env,
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGpuProof(JNIEnv* env,
                                                             jobject) {
+    PX5::Breadcrumb::Set("jni: GpuProof enter");
     std::string detail;
     const bool ok = PX5::VulkanGpuDevice::GetInstance()
                         .RunOffscreenClearProof(detail);
+    PX5::Breadcrumb::Set("jni: GpuProof done ok=%d", ok ? 1 : 0);
     return env->NewStringUTF(
         (std::string(ok ? "PASS | " : "FAIL | ") + detail).c_str());
 }
@@ -310,6 +317,7 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGpuProof(JNIEnv* env,
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGnmSelfTest(JNIEnv* env,
                                                                jobject) {
+    PX5::Breadcrumb::Set("jni: GnmSelfTest enter");
     std::string report;
     PX5::Gnm::RunGnmSelfTest(&report);
     return env->NewStringUTF(report.c_str());
@@ -321,6 +329,7 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGnmSelfTest(JNIEnv* env,
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunLoaderSelfTest(JNIEnv* env,
                                                                   jobject) {
+    PX5::Breadcrumb::Set("jni: LoaderSelfTest enter");
     std::string report;
     PX5::SelfExtract::RunSelfExtractSelfTest(&report);
     return env->NewStringUTF(report.c_str());
@@ -368,7 +377,8 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeGetRenderStats(
 extern "C" JNIEXPORT void JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeApplySettings(
         JNIEnv* env, jobject, jint resScalePct, jboolean vsync,
-        jint driverModeSlot, jboolean verboseLog, jstring logDirJ) {
+        jint driverModeSlot, jboolean verboseLog, jint vramMode,
+        jstring logDirJ) {
     using namespace PX5;
     EngineSettings::resScalePct.store(
         resScalePct < 50 ? 50 : (resScalePct > 200 ? 200 : resScalePct));
@@ -376,6 +386,8 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeApplySettings(
     EngineSettings::verboseLogging.store(verboseLog == JNI_TRUE);
     EngineSettings::driverMode.store(
         static_cast<uint32_t>(driverModeSlot < 0 ? 0 : driverModeSlot));
+    EngineSettings::vramUsageMode.store(
+        vramMode < 0 ? 0 : (vramMode > 2 ? 1 : vramMode));
 
     GpuDriverManager::GetInstance().SetActiveMode(EngineSettings::driverMode.load());
 
@@ -393,11 +405,13 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeApplySettings(
         if (d) env->ReleaseStringUTFChars(logDirJ, d);
     }
     PX5_LOGI(LogCategory::SETTINGS,
-             "settings applied: scale=%d%% vsync=%d verbose=%d driverMode=%u",
+             "settings applied: scale=%d%% vsync=%d verbose=%d driverMode=%u "
+             "vramMode=%d",
              static_cast<int>(EngineSettings::resScalePct.load()),
              static_cast<int>(EngineSettings::vsyncEnabled.load()),
              static_cast<int>(EngineSettings::verboseLogging.load()),
-             EngineSettings::driverMode.load());
+             EngineSettings::driverMode.load(),
+             EngineSettings::vramUsageMode.load());
 }
 
 extern "C" JNIEXPORT jstring JNICALL
