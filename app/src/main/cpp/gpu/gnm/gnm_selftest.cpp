@@ -8,7 +8,9 @@
 #include <string>
 #include <vector>
 
+#include "gpu/gnm/gnm_selftest.h"
 #include "gpu/gnm/gnm_state.h"
+#include "gpu/gnm/gnm_submit.h"
 #include "gpu/gnm/pm4_decoder.h"
 #include "gpu/gnm/pm4_packet.h"
 
@@ -273,6 +275,79 @@ SubResult TestEmptyAndShSpace() {
     return r;
 }
 
+// 10. Submission pipeline through GnmSubmit (the seam the HLE hook uses):
+//     buffer entry decodes into the owned state and evidence accumulates.
+SubResult TestSubmitPipeline() {
+    SubResult r{"submit_pipeline", false, ""};
+    GnmSubmit::GetInstance().ResetForTest();
+
+    std::vector<uint32_t> stream;
+    stream.push_back(Type3Header::Encode(kItIndexType, 1));
+    stream.push_back(kIndexTypeSel32);
+    stream.push_back(Type3Header::Encode(kItNumInstances, 1));
+    stream.push_back(2);
+    stream.push_back(Type3Header::Encode(kItDrawIndexAuto, 2));
+    stream.push_back(60);
+    stream.push_back(0x4);
+
+    std::string err;
+    if (!GnmSubmit::GetInstance().SubmitBuffer(
+            stream.data(), stream.size(), "selftest-cb", &err)) {
+        r.detail = "SubmitBuffer rejected: " + err; return r;
+    }
+    const auto& st = GnmSubmit::GetInstance().Stats();
+    if (st.drawCalls != 1 || GnmSubmit::GetInstance().Submissions() != 1 ||
+        GnmSubmit::GetInstance().State().NumInstances() != 2) {
+        r.detail = "pipeline state wrong: " +
+                   GnmSubmit::GetInstance().GetStatsString(); return r;
+    }
+    if (GnmSubmit::GetInstance().GetStatsString().find("draws=1") ==
+        std::string::npos) {
+        r.detail = "stats string incomplete"; return r;
+    }
+    r.pass = true;
+    return r;
+}
+
+// 11. Descriptor path: provisional packing (addr=low48, dwords=high16)
+//     resolves a host buffer and decodes it; bad descriptors produce NAMED
+//     errors without crashing or decoding garbage.
+SubResult TestSubmitDescriptors() {
+    SubResult r{"submit_descriptors", false, ""};
+    GnmSubmit::GetInstance().ResetForTest();
+
+    std::vector<uint32_t> stream;
+    stream.push_back(Type3Header::Encode(kItNumInstances, 1));
+    stream.push_back(9);
+    const uint64_t desc =
+        (reinterpret_cast<uintptr_t>(stream.data()) & kDescAddrMask) |
+        (static_cast<uint64_t>(stream.size()) << 48);
+    // SubmitDescriptors takes a POINTER TO a descriptor array.
+    const uint64_t descArray[1] = { desc };
+
+    std::string err;
+    const int64_t rc = GnmSubmit::GetInstance().SubmitDescriptors(
+        1, reinterpret_cast<uintptr_t>(descArray), 0, &err);
+    if (rc != 0) { r.detail = "descriptor submit failed: " + err; return r; }
+    if (GnmSubmit::GetInstance().State().NumInstances() != 9) {
+        r.detail = "descriptor decode wrong"; return r;
+    }
+
+    // Bad descriptor VALUE (dwords=0) held at a VALID address -> named
+    // EINVAL, state untouched. The badness lives in the descriptor VALUE,
+    // not in the array pointer — the array must stay readable or the
+    // probe itself would crash (that would prove nothing).
+    const uint64_t badDescArray[1] = { 0x0000000000000000ull };
+    const int64_t bad = GnmSubmit::GetInstance().SubmitDescriptors(
+        1, reinterpret_cast<uintptr_t>(badDescArray), 0, &err);
+    if (bad >= 0) { r.detail = "bad descriptor accepted"; return r; }
+    if (err.find("implausible") == std::string::npos) {
+        r.detail = "error not named: " + err; return r;
+    }
+    r.pass = true;
+    return r;
+}
+
 } // namespace
 
 bool RunGnmSelfTest(std::string* report) {
@@ -286,6 +361,8 @@ bool RunGnmSelfTest(std::string* report) {
         TestNonType3(),
         TestDrawIndex2(),
         TestEmptyAndShSpace(),
+        TestSubmitPipeline(),
+        TestSubmitDescriptors(),
     };
 
     size_t passed = 0;

@@ -2,6 +2,8 @@ package com.px5.emulator.ui
 
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.content.Context
+import android.provider.DocumentsContract
 import com.px5.emulator.PhysicalControllerBridge
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -71,6 +73,7 @@ fun EmuScreen(
     var renderStats by remember { mutableStateOf("renderer idle") }
     var gpuProof by remember { mutableStateOf<String?>(null) }
     var gnmSelfTest by remember { mutableStateOf<String?>(null) }
+    var loaderSelfTest by remember { mutableStateOf<String?>(null) }
     var inputSummary by remember { mutableStateOf("input: -") }
     var loadResult by remember { mutableStateOf<String?>(null) }
 
@@ -131,19 +134,11 @@ fun EmuScreen(
         // Same facts into the NATIVE log stream: a paste of the engine log
         // must show the game-boot path even if the process dies right after.
         try {
-            val bootDir = java.io.File(path)
-            val eboot = if (bootDir.isDirectory)
-                bootDir.listFiles()?.firstOrNull { it.isFile && it.name.equals("eboot.bin", true) }
-            else null
+            val ebootStatus = probeEbootStatus(path, context)
             fexCoreWrapper?.nativeLogEvent("gameBoot",
                     "screen_entered game=${game?.name ?: "?"} titleId=${game?.titleId ?: "?"} " +
                     "format=${game?.format ?: "?"} size=${game?.sizeBytes ?: 0L} " +
-                    "eboot=" + (when {
-                        eboot != null -> "present(${eboot.length()}B)"
-                        bootDir.isDirectory -> "ABSENT"
-                        bootDir.isFile -> "file(${bootDir.length()}B)"
-                        else -> "path-missing"
-                    }))
+                    "eboot=$ebootStatus")
         } catch (_: Throwable) {}
         if (!isStubAbi) {
             launch(Dispatchers.Default) {
@@ -161,6 +156,14 @@ fun EmuScreen(
             } catch (t: Throwable) { "FAIL | ${t.message}" }
             com.px5.emulator.core.PX5EventLog.event("gameBoot", "gnm_selftest",
                     "result=${gnmSelfTest?.lineSequence()?.firstOrNull() ?: "?"}")
+        }
+        launch(Dispatchers.Default) {
+            // Real on BOTH ABIs: the SELF extractor is pure C++ too.
+            loaderSelfTest = try {
+                fexCoreWrapper?.nativeRunLoaderSelfTest() ?: "wrapper missing"
+            } catch (t: Throwable) { "FAIL | ${t.message}" }
+            com.px5.emulator.core.PX5EventLog.event("gameBoot", "loader_selftest",
+                    "result=${loaderSelfTest?.lineSequence()?.firstOrNull() ?: "?"}")
         }
     }
 
@@ -302,6 +305,15 @@ fun EmuScreen(
                     text = "GNM PM4: ${g.lineSequence().firstOrNull() ?: g}",
                     fontSize = 11.sp,
                     color = if (g.startsWith("PASS")) Color(0xFF7DD3FC)
+                            else Color(0xFFFF8A65),
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                )
+            }
+            loaderSelfTest?.let { s ->
+                Text(
+                    text = "SELF loader: ${s.lineSequence().firstOrNull() ?: s}",
+                    fontSize = 11.sp,
+                    color = if (s.startsWith("PASS")) Color(0xFF7DD3FC)
                             else Color(0xFFFF8A65),
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                 )
@@ -680,3 +692,87 @@ private fun PadKey(
         Text(label, color = tint, fontSize = 12.sp, fontWeight = FontWeight.Bold)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Honest eboot.bin probe for the boot-report line.
+//
+// Root cause (device log 2026-08-29): a plain java.io.File listing on API
+// 30+ scoped storage returns null for SAF-imported game folders, and the
+// old probe then printed "eboot=ABSENT" for a folder that CONTAINS
+// eboot.bin (the competitor log ran that exact file from that exact path).
+// A report line that lies is worse than no line — the probe is now tiered:
+//   1. Direct java.io listing (definitive when storage is readable).
+//   2. SAF listing through persisted tree permissions (covers SAF-imported
+//      games: docId "primary:<rest>" maps to /storage/emulated/0/<rest>).
+//   3. "unknown(no-list-permission)" — we never fabricate ABSENT.
+// ---------------------------------------------------------------------------
+private fun probeEbootStatus(path: String, context: Context): String = try {
+    val bootDir = java.io.File(path)
+    if (bootDir.isFile) {
+        "file(${bootDir.length()}B)"
+    } else if (bootDir.isDirectory) {
+        val listed = bootDir.listFiles()
+        val direct = listed?.firstOrNull {
+            it.isFile && it.name.equals("eboot.bin", true)
+        }
+        when {
+            direct != null -> "present(${direct.length()}B)"
+            listed != null -> "ABSENT"   // listing worked; genuinely absent
+            else -> probeEbootViaSaf(path, context)
+                    ?: "unknown(no-list-permission)"
+        }
+    } else {
+        // File API cannot even see the node — SAF is the only witness left.
+        probeEbootViaSaf(path, context) ?: "path-missing"
+    }
+} catch (_: Throwable) {
+    "unknown(probe-error)"
+}
+
+/** SAF fallback: look for eboot.bin among the children of `path`'s
+ *  document inside any persisted read-permission tree that contains it.
+ *  Returns null when no persisted tree covers the path. */
+private fun probeEbootViaSaf(path: String, context: Context): String? = runCatching {
+    val cr = context.contentResolver
+    for (perm in cr.persistedUriPermissions) {
+        if (!perm.isReadPermission) continue
+        val treeUri = perm.uri
+        if (treeUri.scheme != "content") continue
+        val treeDocId = DocumentsContract.getTreeDocumentId(treeUri)
+        val root = treeDocId.substringBefore(':')
+        if (root != "primary") continue
+        val rootRest = treeDocId.substringAfter(':', "")
+        val rootPath = if (rootRest.isBlank()) "/storage/emulated/0"
+                       else "/storage/emulated/0/$rootRest"
+        val normPath = path.trimEnd('/')
+        val normRoot = rootPath.trimEnd('/')
+        if (!(normPath == normRoot || normPath.startsWith("$normRoot/"))) continue
+
+        val rel = if (normPath.length > normRoot.length)
+            normPath.substring(normRoot.length + 1) else ""
+        val targetDocId = if (rel.isBlank()) treeDocId
+                          else "$treeDocId/$rel"
+        val docUri = DocumentsContract.buildDocumentUriUsingTree(
+                treeUri, targetDocId)
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(docUri)
+        cr.query(
+            childrenUri,
+            arrayOf(
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+                DocumentsContract.Document.COLUMN_SIZE),
+            null, null, null)?.use { c ->
+            while (c.moveToNext()) {
+                val name = c.getString(0) ?: continue
+                if (!name.equals("eboot.bin", true)) continue
+                val mime = c.getString(1) ?: ""
+                if (mime == DocumentsContract.Document.MIME_TYPE_DIR) continue
+                val size = if (!c.isNull(2)) c.getLong(2) else -1L
+                return@runCatching if (size >= 0) "present(${size}B,SAF)"
+                                   else "present(SAF)"
+            }
+            return@runCatching "ABSENT(SAF)"
+        }
+    }
+    null
+}.getOrNull()

@@ -60,14 +60,23 @@ if(ANDROID_ABI STREQUAL "x86_64")
             gpu/gnm/gnm_state.cpp
             gpu/gnm/pm4_decoder.cpp
             gpu/gnm/gnm_selftest.cpp
+            gpu/gnm/gnm_submit.cpp
+            loader/self_extract.cpp
+            loader/self_extract_selftest.cpp
             utils/crash_handler.cpp
             utils/logger.cpp
             utils/diag_bridge.cpp)
+    # The stub target ships no MemoryManager backend; gnm_submit's default
+    # resolver therefore compiles down to the identity path (the same policy
+    # the host tests use) instead of pulling in memory/memory.cpp.
+    set_source_files_properties(gpu/gnm/gnm_submit.cpp PROPERTIES
+            COMPILE_DEFINITIONS PX5_HOST_TEST)
     find_library(log-lib log)
     find_library(android-lib android)
     target_include_directories(px5 PRIVATE ${CMAKE_CURRENT_LIST_DIR})
     target_compile_features(px5 PRIVATE cxx_std_20)
-    target_link_libraries(px5 ${log-lib} ${android-lib})
+    # z: SELF extractor inflate/deflate (NDK ships libz).
+    target_link_libraries(px5 ${log-lib} ${android-lib} z)
     return()
 endif()
 
@@ -152,11 +161,14 @@ add_library(
         kernel/sce_kernel_hle.cpp
         loader/elf_loader.cpp
         loader/self_loader.cpp
+        loader/self_extract.cpp
+        loader/self_extract_selftest.cpp
         gpu/vulkan_device.cpp
         gpu/driver_manager.cpp
         gpu/gnm/gnm_state.cpp
         gpu/gnm/pm4_decoder.cpp
         gpu/gnm/gnm_selftest.cpp
+        gpu/gnm/gnm_submit.cpp
         audio/audio.cpp
         audio_input_native.cpp
         input/controller.cpp
@@ -182,11 +194,13 @@ find_library(log-lib log)
 find_library(android-lib android)
 find_library(aaudio-lib aaudio)
 
+# z: SELF extractor (segment inflate) — NDK ships libz.
 target_link_libraries(
         px5
         ${log-lib}
         ${android-lib}
         ${aaudio-lib}
+        z
         FEXCore
         FEXCore_Base
         JemallocDummy)

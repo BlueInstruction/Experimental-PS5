@@ -117,6 +117,16 @@ public class FexCoreWrapper {
      */
     public native String nativeRunGnmSelfTest();
 
+    /**
+     * Phase C milestone 2a: SELF container extractor self-test (synthetic
+     * SELF images: plain segment, zlib-compressed segment, encrypted
+     * segment refused BY NAME, bad magic refused). Proves loader
+     * mechanics only — real game SELF files are parsed in the loader
+     * milestone, and encrypted segments are never decrypted (no keys,
+     * no pretending).
+     */
+    public native String nativeRunLoaderSelfTest();
+
     /** Attach an android.view.Surface; creates the Vulkan swapchain lazily. */
     public native boolean nativeAttachRenderSurface(Surface surface);
 

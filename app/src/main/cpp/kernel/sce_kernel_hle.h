@@ -74,6 +74,13 @@ public:
     uint64_t IsNeoMode();                              // always 0 (base)
     uint64_t GetCompiledSdkVersion();                  // 0 until a real value
 
+    // int64 sceGnmSubmitCommandBuffers(uint32 count, void* descArray,
+    //                                  void* userData)
+    // Phase C milestone 2b: routes to GnmSubmit -> Pm4Decoder -> GnmState.
+    // SCE-style 0 on success, negative errno-style on failure.
+    uint64_t GnmSubmitCommandBuffers(uint64_t count, uint64_t descriptorsPtr,
+                                     uint64_t userDataPtr);
+
 private:
     KernelHle() = default;
 

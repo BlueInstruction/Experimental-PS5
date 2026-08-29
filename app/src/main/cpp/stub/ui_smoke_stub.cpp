@@ -27,6 +27,7 @@
 
 #include "../gpu/vulkan_device.h"
 #include "../gpu/gnm/gnm_selftest.h"
+#include "../loader/self_extract_selftest.h"
 #include "../utils/logger.h"
 
 namespace fs = std::filesystem;
@@ -207,6 +208,15 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGnmSelfTest(
         JNIEnv* env, jobject) {
     std::string report;
     PX5::Gnm::RunGnmSelfTest(&report);
+    return env->NewStringUTF(report.c_str());
+}
+// Same policy: the SELF extractor self-test is pure C++ (synthetic
+// containers + zlib) — the smoke ABI runs the REAL thing.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeRunLoaderSelfTest(
+        JNIEnv* env, jobject) {
+    std::string report;
+    PX5::SelfExtract::RunSelfExtractSelfTest(&report);
     return env->NewStringUTF(report.c_str());
 }
 extern "C" JNIEXPORT void JNICALL

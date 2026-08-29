@@ -1,5 +1,6 @@
 #include "sce_kernel_hle.h"
 
+#include "../gpu/gnm/gnm_submit.h"
 #include "../memory/memory.h"
 #include "../filesystem/vfs.h"
 #include "syscalls.h"          // GuestSyscalls::AppendOutput (evidence channel)
@@ -68,6 +69,12 @@ void KernelHle::RegisterAll() {
     add("sceKernelUsleep");
     add("sceKernelIsNeoMode");
     add("sceKernelGetCompiledSdkVersion");
+
+    // Phase C milestone 2b: the ONE GNM seam that carries PM4 command
+    // buffers (GNM is statically linked into games; this symbol is the
+    // submit interface the dossier mandates hooking). Routed to GnmSubmit
+    // -> Pm4Decoder -> GnmState; evidence counters + stats are live.
+    add("sceGnmSubmitCommandBuffers");
 
     m_registered = true;
     PX5_LOGI(LogCategory::KERNEL,
@@ -262,6 +269,26 @@ uint64_t KernelHle::GetCompiledSdkVersion() {
     return 0;    // honest: no SDK banner parsed yet
 }
 
+uint64_t KernelHle::GnmSubmitCommandBuffers(uint64_t count,
+                                            uint64_t descriptorsPtr,
+                                            uint64_t userDataPtr) {
+    Bump("sceGnmSubmitCommandBuffers");
+    std::string err;
+    const int64_t rc = Gnm::GnmSubmit::GetInstance()
+                           .SubmitDescriptors(count, descriptorsPtr,
+                                              userDataPtr, &err);
+    if (rc != 0) {
+        PX5_LOGW(LogCategory::GPU,
+                 "sceGnmSubmitCommandBuffers(count=%llu) rc=%lld: %s",
+                 (unsigned long long)count, (long long)rc, err.c_str());
+    } else {
+        PX5_LOGI(LogCategory::GPU,
+                 "sceGnmSubmitCommandBuffers ok: %s",
+                 Gnm::GnmSubmit::GetInstance().GetStatsString().c_str());
+    }
+    return static_cast<uint64_t>(rc);
+}
+
 // ---------------------------------------------------------------------------
 
 uint64_t KernelHle::InvokeByName(const std::string& symbol,
@@ -286,6 +313,7 @@ uint64_t KernelHle::InvokeByName(const std::string& symbol,
     if (symbol == "sceKernelUsleep")                  return SleepSeconds(0);
     if (symbol == "sceKernelIsNeoMode")               return IsNeoMode();
     if (symbol == "sceKernelGetCompiledSdkVersion")   return GetCompiledSdkVersion();
+    if (symbol == "sceGnmSubmitCommandBuffers")       return GnmSubmitCommandBuffers(a0, a1, a2);
     return static_cast<uint64_t>(kErrInval);
 }
 

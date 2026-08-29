@@ -289,6 +289,7 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeGetVulkanSummary(JNIEnv* env,
 #include "kernel/sce_kernel_hle.h"
 #include "gpu/driver_manager.h"
 #include "gpu/gnm/gnm_selftest.h"
+#include "loader/self_extract_selftest.h"
 #include "utils/crash_handler.h"
 
 #include <android/native_window_jni.h>
@@ -311,6 +312,17 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGnmSelfTest(JNIEnv* env,
                                                                jobject) {
     std::string report;
     PX5::Gnm::RunGnmSelfTest(&report);
+    return env->NewStringUTF(report.c_str());
+}
+
+// Phase C milestone 2a: SELF container extractor self-test (synthetic
+// round-trip: plain / compressed / encrypted-refused / bad-magic). Proves
+// the loader mechanics — real dumps arrive in the loader milestone.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeRunLoaderSelfTest(JNIEnv* env,
+                                                                  jobject) {
+    std::string report;
+    PX5::SelfExtract::RunSelfExtractSelfTest(&report);
     return env->NewStringUTF(report.c_str());
 }
 
