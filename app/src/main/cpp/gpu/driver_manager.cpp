@@ -129,6 +129,101 @@ void NamespaceDlopenProbe(const std::string& dir, const std::string& soname) {
     }
 }
 
+// The LAST thing adrenotools does (pinned fork src/driver.cpp:116) is
+// linkernsbypass_namespace_dlopen_unique("/system/lib64/libvulkan.so",
+// tmpLibDir, flags, hookNs) — and it is the only failure point in the whole
+// call chain that emits NO logcat line at all: the fd creation, the soname
+// patch and the final android_dlopen_ext all fail silently there. This
+// probe reproduces that exact step with a namespace of our own and reads
+// the dlerror() string adrenotools never reads.
+// Honest scope note: our namespace is not the hook's (ld path differs), so
+// a probe SUCCESS narrows the remaining failure to the hook's own plumbing
+// (its namespace link / its hook libs — those DO log to logcat tag
+// 'adrenotools'), while a probe FAILURE names the real linker error either
+// way. Both outcomes add a fact; neither guesses.
+void FinalStepProbe(const std::string& tmpLibDir, int dlopenMode) {
+    const bool memfdMode = tmpLibDir.empty();
+    if (memfdMode) {
+        PX5_LOGI(LogCategory::GPU,
+                 "FinalStep probe: no tmpLibDir configured — adrenotools "
+                 "runs its last step through memfd (a silent ENOSYS there "
+                 "fails the call with zero log output)");
+    } else if (access(tmpLibDir.c_str(), W_OK) != 0) {
+        PX5_LOGE(LogCategory::GPU,
+                 "FinalStep probe: tmpLibDir '%s' is NOT writable (errno=%d)"
+                 " — dlopen_unique cannot create its <N>_patched.so copy "
+                 "there, the call dies silently at that exact point",
+                 tmpLibDir.c_str(), errno);
+        return;
+    } else {
+        // How far earlier attempts actually got: dlopen_unique names its
+        // artifacts "<N>_patched.so" (N increments per call).
+        DIR* d = opendir(tmpLibDir.c_str());
+        int artifacts = 0;
+        std::string names;
+        if (d) {
+            struct dirent* e;
+            while ((e = readdir(d)) != nullptr) {
+                const std::string name = e->d_name;
+                static constexpr const char kSuffix[] = "_patched.so";
+                if (name.size() >= sizeof kSuffix - 1 &&
+                    name.compare(name.size() - (sizeof kSuffix - 1),
+                                 sizeof kSuffix - 1, kSuffix) == 0) {
+                    ++artifacts;
+                    if (names.size() < 160) names += name + " ";
+                }
+            }
+            closedir(d);
+        }
+        PX5_LOGI(LogCategory::GPU,
+                 "FinalStep probe: tmpLibDir writable, %d previous "
+                 "_patched.so artifacts%s%s", artifacts,
+                 artifacts ? ": " : "(none yet)", names.c_str());
+    }
+
+    struct stat sysv{};
+    if (stat("/system/lib64/libvulkan.so", &sysv) != 0) {
+        PX5_LOGE(LogCategory::GPU,
+                 "FinalStep probe: /system/lib64/libvulkan.so stat failed "
+                 "(errno=%d) — the soname patch would fail reading it",
+                 errno);
+        return;
+    }
+
+    struct android_namespace_t* ns = android_create_namespace(
+            "px5-final-step-diag",
+            nullptr,                                   // ld_library_path
+            nullptr,                                   // default_library_path
+            ANDROID_NAMESPACE_TYPE_SHARED,             // share system libs
+            memfdMode ? nullptr : tmpLibDir.c_str(),   // permitted path
+            nullptr);                                  // caller namespace
+    if (!ns) {
+        const char* err = dlerror();
+        PX5_LOGE(LogCategory::GPU,
+                 "FinalStep probe: android_create_namespace failed: %s",
+                 err ? err : "(dlerror empty)");
+        return;
+    }
+
+    void* h = linkernsbypass_namespace_dlopen_unique(
+            "/system/lib64/libvulkan.so",
+            memfdMode ? nullptr : tmpLibDir.c_str(), dlopenMode, ns);
+    if (h) {
+        PX5_LOGI(LogCategory::GPU,
+                 "FinalStep probe: patched system libvulkan loads FINE — "
+                 "an adrenotools null is then inside its own hook plumbing "
+                 "(hook-namespace link or hook lib load; those paths DO "
+                 "log to logcat tag 'adrenotools')");
+        dlclose(h);
+    } else {
+        const char* err = dlerror();
+        PX5_LOGE(LogCategory::GPU,
+                 "FinalStep probe: EXACT last-step replication FAILED: %s — "
+                 "this is the error string adrenotools never surfaces",
+                 err ? err : "(dlerror empty — linker failed silently)");
+    }
+}
+
 #endif  // PX5_HAVE_ADRENOTOOLS
 
 } // namespace
@@ -229,8 +324,14 @@ void* GpuDriverManager::OpenHostVulkanLibrary(int dlopenMode) {
             nullptr,               // fileRedirectDir unused for now
             nullptr);              // userMappingHandle: null without the flag
     if (handle) {
+        // Honest wording: the returned handle is the patched SYSTEM
+        // libvulkan. The custom ICD itself is dlopened LATER, inside the
+        // hook, at the loader's first android_dlopen_ext for the driver —
+        // a failure there logs to logcat and falls back to the system
+        // driver silently. VerifyActiveDriverMapped() is the real proof.
         PX5_LOGI(LogCategory::GPU,
-                 "Custom driver loaded through linker-namespace hook");
+                 "Custom driver wired through linker-namespace hook — ICD "
+                 "loads at first vkCreateInstance; proof pending maps check");
         return handle;
     }
 
@@ -260,11 +361,13 @@ void* GpuDriverManager::OpenHostVulkanLibrary(int dlopenMode) {
                      m_hookLibDir.c_str());
         } else if (haveDriver) {
             // All files exist, so the null came from deeper. Produce the
-            // two facts that separate a bad package from hook plumbing:
-            // what the slot dir actually contains, and whether the driver
-            // soname loads in a properly-built linker namespace at all.
+            // facts that separate a bad package from hook plumbing: what
+            // the slot dir actually contains, whether the driver soname
+            // loads in a properly-built linker namespace at all, and a
+            // replication of adrenotools' silent final step.
             LogSlotInventory(slot.dir, soname);
             NamespaceDlopenProbe(slot.dir, soname);
+            FinalStepProbe(m_tmpLibDir, dlopenMode);
         }
     }
     SetActiveMode(0);   // honest fallback, reflected in summaries

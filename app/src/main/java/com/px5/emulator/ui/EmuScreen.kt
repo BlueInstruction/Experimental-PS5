@@ -86,6 +86,20 @@ fun EmuScreen(
         onDispose {
             val seconds = (System.currentTimeMillis() - startedAt) / 1000
             game?.let { gameViewModel?.addPlayTime(it.id, seconds) }
+            // Session END must be visible: a pasted log that stops mid-play
+            // previously gave no clue whether the user backed out or the
+            // process died. game_exit with the exact session length closes
+            // that ambiguity (a native crash additionally writes its FATAL
+            // line via CrashHandler before the process goes away).
+            com.px5.emulator.core.PX5EventLog.event(
+                "gameBoot", "game_exit", "path=$path seconds=$seconds")
+            try {
+                fexCoreWrapper?.nativeLogEvent(
+                    "gameBoot", "game_exit seconds=$seconds path=$path")
+            } catch (_: Throwable) {
+                // Engine may already be gone during teardown — the Kotlin
+                // event above is the guaranteed record.
+            }
         }
     }
 
