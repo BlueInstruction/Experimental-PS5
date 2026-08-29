@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "loader/self_extract.h"
+#include "loader/self_fixtures.h"
 
 namespace PX5::SelfExtract {
 
@@ -57,52 +58,16 @@ std::vector<uint8_t> Deflate(const std::vector<uint8_t>& in) {
 }
 
 // ---- Builder per the documented layout ------------------------------------
-struct BuiltSelf {
-    std::vector<uint8_t> bytes;
-    std::vector<SegmentInfo> entries;
-};
+// Moved to loader/self_fixtures.cpp in milestone 3: the foundation
+// self-test (emulator.cpp step 5b) must wrap the SAME fixture format,
+// so one shared builder feeds both proofs.
+using SelfFixtures::BuiltSelf;
+using SelfFixtures::BuildSelfContainer;
 
 BuiltSelf BuildSelf(const std::vector<std::vector<uint8_t>>& payloads,
                     const std::vector<uint64_t>& flags,
                     const std::vector<uint64_t>& memSizes) {
-    BuiltSelf b;
-    const uint32_t count = static_cast<uint32_t>(payloads.size());
-    const uint64_t headerSize = 0x100ull;   // header + meta + table + slack
-
-    // Segment data area begins at headerSize (aligned 4).
-    std::vector<uint8_t> data;
-    uint64_t off = headerSize;
-    for (size_t i = 0; i < payloads.size(); ++i) {
-        b.entries.push_back({flags[i], off, payloads[i].size(), memSizes[i]});
-        data.insert(data.end(), payloads[i].begin(), payloads[i].end());
-        off += payloads[i].size();
-    }
-
-    b.bytes.resize(static_cast<size_t>(headerSize) + data.size(), 0);
-    // SelfHeader
-    memcpy(b.bytes.data() + 0x00, &kSelfMagic, 4);
-    uint32_t version = 0;
-    memcpy(b.bytes.data() + 0x04, &version, 4);
-    uint32_t metaSize = 0x20 + 0x20ull * count;
-    memcpy(b.bytes.data() + 0x0C, &metaSize, 4);
-    uint64_t hs = headerSize, fs = b.bytes.size();
-    memcpy(b.bytes.data() + 0x10, &hs, 8);
-    memcpy(b.bytes.data() + 0x18, &fs, 8);
-    // MetadataHeader
-    uint64_t sig = 0;
-    memcpy(b.bytes.data() + 0x20, &sig, 8);
-    memcpy(b.bytes.data() + 0x34, &count, 4);
-    // SegmentEntry table @ 0x40
-    for (uint32_t i = 0; i < count; ++i) {
-        uint8_t* e = b.bytes.data() + 0x40 + i * 0x20;
-        memcpy(e + 0x00, &b.entries[i].flags, 8);
-        memcpy(e + 0x08, &b.entries[i].fileOffset, 8);
-        memcpy(e + 0x10, &b.entries[i].storedSize, 8);
-        memcpy(e + 0x18, &b.entries[i].memorySize, 8);
-    }
-    // Data
-    memcpy(b.bytes.data() + headerSize, data.data(), data.size());
-    return b;
+    return BuildSelfContainer(payloads, flags, memSizes);
 }
 
 // ---- Subtests --------------------------------------------------------------

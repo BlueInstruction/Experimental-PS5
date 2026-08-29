@@ -25,7 +25,9 @@ struct LoadedElfImage {
     uint64_t             imageLowVa = ~0ull;
     uint64_t             imageHighVa = 0;     // program break suggestion
     std::vector<Segment> segments;
-    bool                 isSelf = false;      // SELF detected & NOT decrypted
+    bool                 isSelf = false;      // image came out of a SELF
+                                              // container (extracted inner
+                                              // ELF) or was detected as SELF
     std::string          error;
 
     size_t TotalMemSize() const { return imageHighVa - imageLowVa; }
@@ -36,8 +38,17 @@ public:
     // Parses + maps a real x86-64 ELF into the guest window.
     static bool LoadElfFile(const std::string& filePath, LoadedElfImage& out);
 
-    // SELF containers: detected honestly. Decryption is Phase-C scope;
-    // we NEVER claim to have loaded an encrypted image.
+    // Same parse/map work for an ELF image already held in memory — the
+    // path the SELF extractor feeds (its inner ELF never touches disk).
+    // `origin` is only used for logs/errors.
+    static bool LoadElfFromMemory(const uint8_t* data, size_t size,
+                                  const std::string& origin,
+                                  LoadedElfImage& out);
+
+    // SELF containers: parsed by the real extractor (loader/self_extract.cpp).
+    // Unencrypted/fake-signed dumps load their inner ELF for real; segments
+    // that are ENCRYPTED are counted and refused by name — we do not have
+    // Sony keys and will not pretend otherwise.
     static bool LoadSelf(const std::string& filePath, LoadedElfImage& out);
 };
 

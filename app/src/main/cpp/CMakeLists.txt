@@ -63,6 +63,7 @@ if(ANDROID_ABI STREQUAL "x86_64")
             gpu/gnm/gnm_submit.cpp
             loader/self_extract.cpp
             loader/self_extract_selftest.cpp
+            loader/self_fixtures.cpp
             utils/breadcrumbs.cpp
             utils/crash_handler.cpp
             utils/logger.cpp
@@ -164,6 +165,7 @@ add_library(
         loader/self_loader.cpp
         loader/self_extract.cpp
         loader/self_extract_selftest.cpp
+        loader/self_fixtures.cpp
         gpu/vulkan_device.cpp
         gpu/driver_manager.cpp
         gpu/gnm/gnm_state.cpp

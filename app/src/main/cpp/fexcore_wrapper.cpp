@@ -94,6 +94,38 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadSelf(JNIEnv* env, jobject,
     return res ? JNI_TRUE : JNI_FALSE;
 }
 
+// Milestone 3: one honest entry point for the game-boot button. The file
+// format is detected from ITS OWN magic bytes (SELF containers start with
+// 0x1D22154F; eboot.bin dumps are SELF, homebrew payloads are ELF) instead
+// of the caller guessing — the previous UI flow always called nativeLoadElf,
+// so a real eboot.bin died on "bad ELF magic" before the loader ever saw
+// the container.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadExecutable(
+        JNIEnv* env, jobject, jstring pathStr) {
+    if (!pathStr) return JNI_FALSE;
+    const char* p = env->GetStringUTFChars(pathStr, nullptr);
+    PX5::Breadcrumb::Set("jni: LoadExecutable(auto) %s", p);
+
+    bool isSelf = false;
+    {
+        std::ifstream f(p, std::ios::binary);
+        uint8_t magic[4] = {0, 0, 0, 0};
+        if (f.read(reinterpret_cast<char*>(magic), 4)) {
+            uint32_t m = 0;
+            memcpy(&m, magic, 4);
+            isSelf = (m == 0x1D22154FU);
+        }
+    }
+    PX5_LOGI(PX5::LogCategory::LOADER,
+             "LoadExecutable: %s -> %s", p, isSelf ? "SELF" : "ELF");
+
+    const bool res =
+        PX5::Emulator::GetInstance().LoadExecutable(p, isSelf);
+    env->ReleaseStringUTFChars(pathStr, p);
+    return res ? JNI_TRUE : JNI_FALSE;
+}
+
 // --- Foundation evidence additions ----------------------------------------
 
 namespace {

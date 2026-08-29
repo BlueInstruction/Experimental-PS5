@@ -7,6 +7,8 @@
 #include "filesystem/vfs.h"
 #include "audio/audio.h"
 #include "../tests/test_guest.h"
+#include "loader/elf_loader.h"
+#include "loader/self_fixtures.h"
 #include "utils/logger.h"
 
 #include <unistd.h>
@@ -249,6 +251,75 @@ std::string Emulator::SelfTestFoundation() {
                         " out=\"" + r.output.substr(0, 48) + "\"" +
                         " exit=" + std::to_string(r.exitCode));
         if (!elfOk) goto done;
+    }
+
+    // --- Step 5b: SELF container -> real LoadSelf -> guest execution -----
+    // Phase C milestone 3: the SAME synthetic container layout the
+    // extractor self-test validates wraps the REAL executable guest
+    // (TEST_GUEST_ELF_V2). The container goes through the production
+    // path only: ElfLoader::LoadSelf -> SelfExtract::ExtractInnerElf ->
+    // LoadElfFromMemory -> FEXCore ExecuteThread. No shortcut re-parses
+    // the inner ELF outside the loader, so this step is the first
+    // end-to-end proof that a SELF-carried image runs, not merely parses.
+    {
+        auto& mm = MemoryManager::GetInstance();
+        const std::string selfPath = m_baseDir.empty()
+            ? "/data/local/tmp/px5_guest.self" : m_baseDir + "/px5_guest.self";
+
+        const std::vector<uint8_t> innerElf(
+            TEST_GUEST_ELF_V2, TEST_GUEST_ELF_V2 + TEST_GUEST_ELF_V2_SIZE);
+        const auto built = SelfFixtures::BuildSelfContainer(
+            {innerElf}, {SelfExtract::kSegFlagSigned}, {innerElf.size()});
+
+        std::ofstream f(selfPath, std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(built.bytes.data()),
+                static_cast<std::streamsize>(built.bytes.size()));
+        const bool wroteFixture = f.good();
+        f.close();
+        if (!wroteFixture) {
+            lines.push_back("[FAIL] 5b. SELF fixture write failed (" +
+                            selfPath + ")");
+            goto done;
+        }
+
+        LoadedElfImage img;
+        if (!ElfLoader::LoadSelf(selfPath, img)) {
+            lines.push_back("[FAIL] 5b. SELF->loader: " + img.error);
+            goto done;
+        }
+        if (!img.isSelf || img.segments.empty() || img.entryPoint == 0) {
+            lines.push_back("[FAIL] 5b. SELF metadata invalid (isSelf/entry/segments)");
+            goto done;
+        }
+
+        const size_t ps5b = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+        constexpr uint64_t kSelfStackTop = 0x148000000ULL;
+        mm.MapMemory(kSelfStackTop - ps5b * 4, ps5b * 4,
+                     MemoryFlags::PAGE_READ | MemoryFlags::PAGE_WRITE,
+                     "self_stack");
+
+        GuestSyscalls::ResetRun();
+        void* ripHost5b = mm.GetHostPointer(img.entryPoint);
+        void* spHost5b  = mm.GetHostPointer(kSelfStackTop - 256);
+        if (!ripHost5b || !spHost5b) {
+            lines.push_back("[FAIL] 5b. SELF host bridge missing");
+            goto done;
+        }
+        auto r5b = FexCoreIntegration::ExecuteAtHostRip(
+            reinterpret_cast<uint64_t>(ripHost5b),
+            reinterpret_cast<uint64_t>(spHost5b));
+
+        mm.UnmapMemory(kSelfStackTop - ps5b * 4, ps5b * 4);
+
+        const bool selfOk =
+            r5b.started && r5b.exitCode == TEST_GUEST_V2_EXIT_OK &&
+            r5b.output.find(TEST_GUEST_V2_EXPECTED_OUTPUT) != std::string::npos;
+        lines.push_back(std::string(
+                selfOk ? "[PASS] 5b. SELF container pipeline | extract->map->JIT->exec "
+                       : "[FAIL] 5b. SELF container pipeline | ") +
+                "out=\"" + r5b.output.substr(0, 40) + "\"" +
+                " exit=" + std::to_string(r5b.exitCode));
+        if (!selfOk) goto done;
     }
 
     // --- Step 6: ADVANCED ELF v2 — real mmap + memory round-trip --------

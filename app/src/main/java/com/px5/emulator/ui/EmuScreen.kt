@@ -384,27 +384,30 @@ fun EmuScreen(
                                 } else path
                             }
                             com.px5.emulator.core.PX5EventLog.event("gameBoot",
-                                    "elf_load_started", "target=$target")
+                                    "exec_load_started", "target=$target")
                             fexCoreWrapper?.nativeLogEvent("gameBoot",
-                                    "elf_load_started target=$target")
+                                    "exec_load_started target=$target")
                             loadResult = if (target.isBlank()) {
                                 com.px5.emulator.core.PX5EventLog.event("gameBoot",
-                                        "elf_load_failed", "reason=no eboot.bin in folder")
+                                        "exec_load_failed", "reason=no eboot.bin in folder")
                                 "LOAD FAILED: no eboot.bin in folder"
                             } else {
                                 try {
-                                    val ok = fexCoreWrapper.nativeLoadElf(target)
+                                    // Magic-based dispatch on the native side:
+                                    // SELF (eboot.bin dumps) -> extractor path,
+                                    // ELF (homebrew payloads) -> direct loader.
+                                    val ok = fexCoreWrapper.nativeLoadExecutable(target)
                                     com.px5.emulator.core.PX5EventLog.event("gameBoot",
-                                            "elf_load", "target=${target.substringAfterLast('/')}",
+                                            "exec_load", "target=${target.substringAfterLast('/')}",
                                             result = ok.toString())
                                     fexCoreWrapper.nativeLogEvent("gameBoot",
-                                            "elf_load result=$ok target=${target.substringAfterLast('/')}")
+                                            "exec_load result=$ok target=${target.substringAfterLast('/')}")
                                     if (ok) "LOADED: $target mapped into guest window"
                                     else "LOAD FAILED: loader rejected $target (see logcat)"
                                 } catch (t: Throwable) {
-                                    com.px5.emulator.core.PX5EventLog.exception("gameBoot.elfLoad", t)
+                                    com.px5.emulator.core.PX5EventLog.exception("gameBoot.execLoad", t)
                                     fexCoreWrapper.nativeLogEvent("gameBoot",
-                                            "elf_load EXCEPTION ${t.javaClass.simpleName}: ${t.message}")
+                                            "exec_load EXCEPTION ${t.javaClass.simpleName}: ${t.message}")
                                     "LOAD FAILED: ${t.message}"
                                 }
                             }
@@ -416,7 +419,7 @@ fun EmuScreen(
                     ),
                     shape = RoundedCornerShape(10.dp)
                 ) {
-                    Text("Attempt ELF load (experimental)", fontSize = 12.sp)
+                    Text("Attempt executable load (ELF/SELF, experimental)", fontSize = 12.sp)
                 }
                 loadResult?.let { res ->
                     Text(

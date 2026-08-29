@@ -1,4 +1,5 @@
 #include "elf_loader.h"
+#include "self_extract.h"
 #include "../utils/logger.h"
 #include "../memory/memory.h"
 
@@ -67,8 +68,13 @@ std::string ReadWholeFile(const std::string& path, std::vector<uint8_t>& data) {
 } // namespace
 
 bool ElfLoader::LoadSelf(const std::string& filePath, LoadedElfImage& out) {
-    // HONEST behavior — replaces v1 which logged "Decrypting..." and then
-    // silently passed the ENCRYPTED file to the ELF loader.
+    // Milestone 3: the container is parsed by the REAL extractor. v1 of
+    // this file logged "Decrypting..." and fed encrypted bytes onward;
+    // v2 refused everything with a "NOT implemented" banner; v3 does the
+    // honest, useful thing — extract what the container genuinely carries.
+    out = LoadedElfImage{};
+    out.path = filePath;
+
     std::vector<uint8_t> data;
     std::string err = ReadWholeFile(filePath, data);
     if (!err.empty()) {
@@ -76,20 +82,54 @@ bool ElfLoader::LoadSelf(const std::string& filePath, LoadedElfImage& out) {
         out.error = err;
         return false;
     }
-    if (data.size() >= 4 &&
-        *reinterpret_cast<const uint32_t*>(data.data()) == SELF_MAGIC) {
+    if (!(data.size() >= 4 &&
+          *reinterpret_cast<const uint32_t*>(data.data()) == SELF_MAGIC)) {
+        // Not actually a SELF: fall through to normal ELF handling so
+        // callers with plain ELFs misnamed as .self still work.
+        return LoadElfFile(filePath, out);
+    }
+
+    using PX5::SelfExtract::ExtractResult;
+    const ExtractResult ex =
+        PX5::SelfExtract::ExtractInnerElf(data.data(), data.size());
+
+    // Log the container facts either way — a dump that disagrees with the
+    // parser must leave named evidence in the log, not a bare false.
+    PX5_LOGI(LogCategory::LOADER,
+             "SELF %s: segments=%u extracted=%u inflated=%u encryptedRefused=%u",
+             filePath.c_str(), ex.segmentCount, ex.extractedSegments,
+             ex.inflatedSegments, ex.refusedEncrypted);
+
+    if (!ex.ok) {
         out.isSelf = true;
-        out.error = "PS5 SELF container detected: decryption/extract pipeline "
-                    "is a Phase-C milestone and is NOT implemented. Provide "
-                    "a decrypted ELF for foundation testing.";
-        PX5_LOGW(LogCategory::LOADER,
-                 "SELF image detected but decryption not implemented (honest "
-                 "rejection): %s", filePath.c_str());
+        out.error = "SELF container not loadable: " + ex.error +
+                    " [segments=" + std::to_string(ex.segmentCount) +
+                    " extracted=" + std::to_string(ex.extractedSegments) +
+                    " encryptedRefused=" + std::to_string(ex.refusedEncrypted) +
+                    "]";
+        PX5_LOGE(LogCategory::LOADER, "SELF extract failed: %s",
+                 out.error.c_str());
         return false;
     }
-    // Not actually a SELF: fall through to normal ELF handling so callers
-    // with plain ELFs misnamed as .self still work.
-    return LoadElfFile(filePath, out);
+
+    const uint8_t* elf = ex.elfBytes.data() + ex.elfOffset;
+    const size_t   elfSize = ex.elfBytes.size() - ex.elfOffset;
+    // NOTE: LoadElfFromMemory resets `out`, so isSelf is set on the loaded
+    // image only after that call — and on the failed-extract path above,
+    // where no reset happened.
+    const bool ok = LoadElfFromMemory(elf, elfSize,
+                                      filePath + " [SELF-extracted]", out);
+    if (ok) {
+        out.isSelf = true;
+        PX5_LOGI(LogCategory::LOADER,
+                 "SELF inner ELF mapped: image=[0x%llx..0x%llx] entry=0x%llx "
+                 "(container carried %u/%u usable segments)",
+                 (unsigned long long)out.imageLowVa,
+                 (unsigned long long)out.imageHighVa,
+                 (unsigned long long)out.entryPoint,
+                 ex.extractedSegments, ex.segmentCount);
+    }
+    return ok;
 }
 
 bool ElfLoader::LoadElfFile(const std::string& filePath, LoadedElfImage& out) {
@@ -102,17 +142,25 @@ bool ElfLoader::LoadElfFile(const std::string& filePath, LoadedElfImage& out) {
         out.error = err;
         return false;
     }
-    if (buffer.size() < sizeof(Elf64HeaderRaw)) {
-        out.error = "file smaller than ELF header";
+    return LoadElfFromMemory(buffer.data(), buffer.size(), filePath, out);
+}
+
+bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
+                                  const std::string& origin,
+                                  LoadedElfImage& out) {
+    out = LoadedElfImage{};
+    out.path = origin;
+    if (!data || size < sizeof(Elf64HeaderRaw)) {
+        out.error = "image smaller than ELF header";
         return false;
     }
 
     Elf64HeaderRaw ehdr{};
-    memcpy(&ehdr, buffer.data(), sizeof(ehdr));
+    memcpy(&ehdr, data, sizeof(ehdr));
 
     if (memcmp(ehdr.ident, "\x7f""ELF", 4) != 0) {
         out.error = "bad ELF magic";
-        PX5_LOGE(LogCategory::LOADER, "%s: bad magic", filePath.c_str());
+        PX5_LOGE(LogCategory::LOADER, "%s: bad magic", origin.c_str());
         return false;
     }
     if (ehdr.ident[4] != 2 /*ELFCLASS64*/) { out.error = "not ELF64";   return false; }
@@ -120,12 +168,12 @@ bool ElfLoader::LoadElfFile(const std::string& filePath, LoadedElfImage& out) {
     if (ehdr.machine != 62 /*EM_X86_64*/) {
         out.error = "machine is not EM_X86_64";
         PX5_LOGE(LogCategory::LOADER, "%s: unsupported machine %u",
-                 filePath.c_str(), ehdr.machine);
+                 origin.c_str(), ehdr.machine);
         return false;
     }
     if (ehdr.phnum == 0 || ehdr.phoff == 0 ||
         ehdr.phoff + static_cast<uint64_t>(ehdr.phnum) * ehdr.phentsize >
-            buffer.size()) {
+            size) {
         out.error = "program header table missing/corrupt";
         return false;
     }
@@ -134,19 +182,19 @@ bool ElfLoader::LoadElfFile(const std::string& filePath, LoadedElfImage& out) {
 
     PX5_LOGI(LogCategory::LOADER,
              "ELF %s: type=%u entry=0x%llx phnum=%u",
-             filePath.c_str(), ehdr.type,
+             origin.c_str(), ehdr.type,
              (unsigned long long)ehdr.entry, ehdr.phnum);
 
     bool mappedAny = false;
     for (uint16_t i = 0; i < ehdr.phnum; ++i) {
         const size_t off = static_cast<size_t>(ehdr.phoff) +
                            static_cast<size_t>(i) * ehdr.phentsize;
-        if (off + sizeof(Elf64PhdrRaw) > buffer.size()) {
+        if (off + sizeof(Elf64PhdrRaw) > size) {
             out.error = "phdr truncated";
             return false;
         }
         Elf64PhdrRaw ph{};
-        memcpy(&ph, buffer.data() + off, sizeof(ph));
+        memcpy(&ph, data + off, sizeof(ph));
 
         if (ph.type != PT_LOAD) continue;
         if (ph.memsz == 0)      continue;
@@ -172,11 +220,11 @@ bool ElfLoader::LoadElfFile(const std::string& filePath, LoadedElfImage& out) {
             return false;
         }
         if (seg.filesz > 0) {
-            if (static_cast<uint64_t>(ph.offset) + seg.filesz > buffer.size()) {
-                out.error = "segment file extent exceeds file";
+            if (static_cast<uint64_t>(ph.offset) + seg.filesz > size) {
+                out.error = "segment file extent exceeds image";
                 return false;
             }
-            memcpy(hostVa, buffer.data() + ph.offset, seg.filesz);
+            memcpy(hostVa, data + ph.offset, seg.filesz);
         }
         // memsz > filesz region stays zeroed (anonymous reservation).
 

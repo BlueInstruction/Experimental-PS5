@@ -25,10 +25,20 @@ public class FexCoreWrapper {
     // Real file copy install (std::filesystem backed)
     public native boolean nativeInstallPkg(String pkgPath, String destPath);
 
-    // Real ELF64 parse + map into guest window; SELF is honestly rejected
-    // until Phase C implements decryption.
+    // Real ELF64 parse + map into guest window; SELF containers go through
+    // the real extractor — unencrypted/fake-signed dumps load their inner
+    // ELF, encrypted segments are counted and refused by name (no keys,
+    // no pretending).
     public native boolean nativeLoadElf(String elfPath);
     public native boolean nativeLoadSelf(String selfPath);
+
+    /**
+     * Format-agnostic load for the game-boot flow: the native side peeks
+     * the file's own magic (SELF 0x1D22154F vs ELF 0x7F 'E' 'L' 'F') and
+     * dispatches to the matching loader. Returns the real result; the
+     * reason for any rejection is in logcat + the breadcrumb ring.
+     */
+    public native boolean nativeLoadExecutable(String path);
 
     /**
      * Fork-isolated JIT conformance (mov/add/hlt -> RAX=42).
