@@ -784,16 +784,14 @@ private fun LazyListScope.graphicsSection(
         // VRAM usage mode — biases image memory-type selection in
         // VulkanGpuDevice (real effect on where allocations land).
         val vramMode = Px5Settings.vramUsageMode.collectAsState()
+        val ctx = androidx.compose.ui.platform.LocalContext.current
         SettingsSegmented(
             label = "VRAM usage",
             options = listOf("Conservative", "Balanced", "Aggressive"),
             selectedIndex = vramMode.value,
             onSelect = { i ->
                 Px5Settings.setVramUsageMode(i)
-                fexCoreWrapper?.let { w ->
-                    val ctx = androidx.compose.ui.platform.LocalContext.current
-                    Px5Settings.push(w, ctx)
-                }
+                fexCoreWrapper?.let { w -> Px5Settings.push(w, ctx) }
                 soundManager.playNavigationSound()
             }
         )
