@@ -30,10 +30,16 @@ namespace PX5 {
 // ---------------------------------------------------------------------------
 class CrashHandler {
 public:
-    // Installs handlers. Call once from JNI_OnLoad. Re-calling is a no-op.
+    // Arms the signal handlers (ONCE, from JNI_OnLoad with an empty dir —
+    // no Android context exists yet) and sets the report directory (EVERY
+    // call with a non-empty dir wins; MainActivity supplies the real app
+    // logs dir via nativeInitRuntimeContext afterwards). The old
+    // first-call-wins rule froze the dir empty, sending every report to
+    // /data/local/tmp — unwritable for app processes — so real crashes
+    // left NO file and the UI claimed otherwise (fixed 2026-08-30).
     static void Install(const std::string& logsDir);
 
-    // Directory where px5_crash.log is written (must be app-writable).
+    // Directory where px5_crash_latest.log is written (must be app-writable).
     static const std::string& LogsDir();
 
     // Return true from the intercept when the fault was consumed (SMC write

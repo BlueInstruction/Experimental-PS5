@@ -41,11 +41,26 @@ public class FexCoreWrapper {
     public native boolean nativeLoadExecutable(String path);
 
     /**
+     * v1.12 crash containment: runs the ENTIRE load pipeline (file read,
+     * SELF extraction, ELF parse, guest-window mapping) inside a
+     * fork-isolated child. A load-stage native fault costs the probe
+     * child, never the app — the returned report names the real signal
+     * plus the VERIFIED crash-dump path (the parent stats the dump file
+     * before claiming it exists). Call this BEFORE
+     * {@link #nativeLoadExecutable(String)}: only a report starting with
+     * "LOAD OK" should promote to the real in-process mapping.
+     */
+    public native String nativeLoadExecutableIsolated(String path);
+
+    /**
      * Fork-isolated JIT conformance (mov/add/hlt -> RAX=42).
      * Returns the REAL report string: "PASSED — ...", "FAILED — ...", or
      * "... CRASHED in isolated child (signal N)" when the JIT faulted. A
-     * fault kills the test child, never the app; the crash handler writes a
-     * full register dump to px5_crash_<timestamp>.log either way.
+     * fault kills the test child, never the app. When the child's crash
+     * handler managed to write the register dump, the report names the
+     * VERIFIED dump path ("register dump verified: <path> (<n> bytes)");
+     * when it could not, the report says exactly that — no unverified
+     * promises either way.
      */
     public native String nativeRunCpuConformanceTest();
 

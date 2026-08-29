@@ -4,11 +4,13 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <filesystem>
 #include <functional>
 #include <string>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 
 #include "core/emulator.h"
@@ -18,6 +20,7 @@
 #include "utils/logger.h"
 #include "utils/diag_bridge.h"
 #include "utils/breadcrumbs.h"
+#include "utils/crash_handler.h"
 
 namespace fs = std::filesystem;
 
@@ -100,6 +103,23 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadSelf(JNIEnv* env, jobject,
 // of the caller guessing — the previous UI flow always called nativeLoadElf,
 // so a real eboot.bin died on "bad ELF magic" before the loader ever saw
 // the container.
+namespace {
+// Magic-based format dispatch shared by the direct and isolated loaders:
+// SELF containers (0x1D22154F) go to the extractor path, anything else to
+// the plain ELF loader (same rule as nativeLoadExecutable).
+bool PathLooksLikeSelf(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    uint8_t magic[4] = {0, 0, 0, 0};
+    if (f.read(reinterpret_cast<char*>(magic), 4)) {
+        uint32_t m = 0;
+        memcpy(&m, magic, 4);
+        return m == 0x1D22154FU;
+    }
+    return false;
+}
+
+} // namespace
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadExecutable(
         JNIEnv* env, jobject, jstring pathStr) {
@@ -107,16 +127,7 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadExecutable(
     const char* p = env->GetStringUTFChars(pathStr, nullptr);
     PX5::Breadcrumb::Set("jni: LoadExecutable(auto) %s", p);
 
-    bool isSelf = false;
-    {
-        std::ifstream f(p, std::ios::binary);
-        uint8_t magic[4] = {0, 0, 0, 0};
-        if (f.read(reinterpret_cast<char*>(magic), 4)) {
-            uint32_t m = 0;
-            memcpy(&m, magic, 4);
-            isSelf = (m == 0x1D22154FU);
-        }
-    }
+    const bool isSelf = PathLooksLikeSelf(p ? p : "");
     PX5_LOGI(PX5::LogCategory::LOADER,
              "LoadExecutable: %s -> %s", p, isSelf ? "SELF" : "ELF");
 
@@ -130,20 +141,52 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadExecutable(
 
 namespace {
 
+// The UI may only claim a dump exists when a dump file actually exists.
+// The forked child inherits the armed crash handler, whose report lands in
+// <logsDir>/px5_crash_latest.log BEFORE the child dies — so by the time
+// waitpid returns the file should be there. Poll briefly, then report the
+// verified path + size, or an explicit honest failure. This replaces the
+// v1.11 text that ASSERTED "full register dump was written" without ever
+// looking — exactly the unverified claim the 2026-08-30 device session
+// caught (two real crashes, zero dumps, one false message).
+std::string VerifyChildDump(time_t forkWall) {
+    const std::string& dir = PX5::CrashHandler::LogsDir();
+    if (dir.empty()) {
+        return "no dump captured: crash handler has no logs dir "
+               "(nativeInitRuntimeContext not wired?)";
+    }
+    const std::string latest = dir + "/px5_crash_latest.log";
+    struct stat st{};
+    for (int i = 0; i < 5; ++i) {
+        if (stat(latest.c_str(), &st) == 0 && st.st_size > 0 &&
+            st.st_mtime >= forkWall - 1) {
+            return "register dump verified: " + latest + " (" +
+                   std::to_string(static_cast<long long>(st.st_size)) +
+                   " bytes) — open Settings > Diagnostics > Logs";
+        }
+        usleep(50 * 1000);
+    }
+    return "no dump file appeared in '" + dir +
+           "' — the child's crash report could not be written there; "
+           "its stderr copy is in logcat";
+}
+
 // Runs `work` in a fork()ed child and returns its honest report.
 //
 // WHY: a JIT defect must kill the TEST, not the app. The 2026-08-28 device
 // logs show both proof buttons terminating the whole process right after
 // "Guest thread created" — the Kotlin try/catch cannot catch a native
 // signal. With this wrapper:
-//   * the child inherits the crash handler, so a fault still writes a full
-//     register dump (px5_crash_<timestamp>.log + px5_crash_latest.log);
+//   * the child inherits the crash handler, so a fault writes a register
+//     dump into the app logs dir (path + size VERIFIED by the parent, see
+//     VerifyChildDump — the report never promises a dump it did not see);
 //   * the parent survives and reports the real wait status (exit code or
 //     signal) back to the UI;
 //   * the child's own report line comes back through a pipe.
 std::string RunIsolated(const char* name,
                         const std::function<std::string()>& work) {
     std::fflush(nullptr);
+    const time_t forkWall = time(nullptr);
 
     int fds[2];
     if (pipe(fds) != 0) {
@@ -191,10 +234,8 @@ std::string RunIsolated(const char* name,
         const int sig = WTERMSIG(status);
         std::string out = std::string(name) + ": CRASHED in isolated child (signal " +
                           std::to_string(sig) + ")\n";
-        out += rep.empty()
-            ? std::string("full register dump was written to the crash log "
-                          "(Settings > Diagnostics > Logs)")
-            : ("partial report before death: " + rep);
+        out += VerifyChildDump(forkWall);
+        if (!rep.empty()) out += "\npartial report before death: " + rep;
         return out;
     }
     if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
@@ -207,6 +248,49 @@ std::string RunIsolated(const char* name,
 }
 
 } // namespace
+
+// v1.12 crash containment: the ENTIRE load pipeline (file read, SELF
+// extraction, ELF parse, guest-window mapping) runs in a fork-isolated
+// throwaway child. A load-stage native fault now costs the probe child —
+// not the app: the parent survives, reports the real signal plus the
+// VERIFIED dump path, and the UI never reaches the in-process load.
+// The 2026-08-30 device session showed the alternative: a real eboot.bin
+// killed the whole app instantly and left zero evidence behind.
+// On success the child's mapping is discarded (fork copy-on-write) and the
+// caller maps the image again in-process — the process that will actually
+// execute it re-validates everything.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadExecutableIsolated(
+        JNIEnv* env, jobject, jstring pathStr) {
+    if (!pathStr) return env->NewStringUTF("isolated load: no path given");
+    const char* p = env->GetStringUTFChars(pathStr, nullptr);
+    const std::string path = p ? p : "";
+    if (p) env->ReleaseStringUTFChars(pathStr, p);
+    PX5::Breadcrumb::Set("jni: isolated load probe %s", path.c_str());
+
+    const std::string report = RunIsolated(
+        "isolated load",
+        [path]() -> std::string {
+            const bool isSelf = PathLooksLikeSelf(path);
+            auto& emu = PX5::Emulator::GetInstance();
+            const bool ok = emu.LoadExecutable(path, isSelf);
+            const auto& img = emu.LoadedImage();
+            if (ok) {
+                char line[256];
+                snprintf(line, sizeof(line),
+                         "LOAD OK — image=[0x%llx..0x%llx] entry=0x%llx "
+                         "(probe child; app maps again for real)",
+                         (unsigned long long)img.imageLowVa,
+                         (unsigned long long)img.imageHighVa,
+                         (unsigned long long)img.entryPoint);
+                return line;
+            }
+            return "LOAD FAILED: " +
+                   (img.error.empty() ? std::string("(no detail — see engine log)")
+                                      : img.error);
+        });
+    return env->NewStringUTF(report.c_str());
+}
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunCpuConformanceTest(

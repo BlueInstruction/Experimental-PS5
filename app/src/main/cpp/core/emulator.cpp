@@ -10,6 +10,7 @@
 #include "loader/elf_loader.h"
 #include "loader/self_fixtures.h"
 #include "utils/logger.h"
+#include "utils/breadcrumbs.h"
 
 #include <unistd.h>
 #include <cstdio>
@@ -56,15 +57,24 @@ void Emulator::Shutdown() {
 
 bool Emulator::LoadExecutable(const std::string& path, bool isSelf) {
     std::lock_guard<std::mutex> lock(m_runMutex);
+    // Stage breadcrumbs: a crash anywhere below now names the exact stage
+    // in the dump (the 2026-08-30 eboot.bin death left the stage unknown).
+    Breadcrumb::Set("load: enter isSelf=%d", isSelf ? 1 : 0);
     // Lazy memory init keeps legacy JNI callers working without UI flow.
-    if (!MemoryManager::GetInstance().Initialize()) return false;
+    if (!MemoryManager::GetInstance().Initialize()) {
+        Breadcrumb::Set("load: memmgr init FAILED");
+        return false;
+    }
+    Breadcrumb::Set("load: memmgr ready");
     if (m_baseDir.empty()) {
         m_baseDir = "/data/local/tmp/px5_fallback";
         VirtualFileSystem::GetInstance().Initialize(m_baseDir);
     }
 
+    Breadcrumb::Set("load: %s dispatch", isSelf ? "SELF" : "ELF");
     const bool ok = isSelf ? ElfLoader::LoadSelf(path, m_image)
                            : ElfLoader::LoadElfFile(path, m_image);
+    Breadcrumb::Set("load: done ok=%d", ok ? 1 : 0);
     PX5_LOGI(LogCategory::CORE, "%s load: %s",
              isSelf ? "SELF" : "ELF", ok ? "OK" : m_image.error.c_str());
     return ok;

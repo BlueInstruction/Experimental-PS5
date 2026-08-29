@@ -1,6 +1,7 @@
 #include "elf_loader.h"
 #include "self_extract.h"
 #include "../utils/logger.h"
+#include "../utils/breadcrumbs.h"
 #include "../memory/memory.h"
 
 #include <algorithm>
@@ -82,16 +83,21 @@ bool ElfLoader::LoadSelf(const std::string& filePath, LoadedElfImage& out) {
         out.error = err;
         return false;
     }
+    Breadcrumb::Set("self: read %zu bytes", data.size());
     if (!(data.size() >= 4 &&
           *reinterpret_cast<const uint32_t*>(data.data()) == SELF_MAGIC)) {
         // Not actually a SELF: fall through to normal ELF handling so
         // callers with plain ELFs misnamed as .self still work.
+        Breadcrumb::Set("self: no SELF magic -> ELF path");
         return LoadElfFile(filePath, out);
     }
 
     using PX5::SelfExtract::ExtractResult;
+    Breadcrumb::Set("self: extract begin");
     const ExtractResult ex =
         PX5::SelfExtract::ExtractInnerElf(data.data(), data.size());
+    Breadcrumb::Set("self: extract done ok=%d segs=%u",
+                    ex.ok ? 1 : 0, ex.segmentCount);
 
     // Log the container facts either way — a dump that disagrees with the
     // parser must leave named evidence in the log, not a bare false.
@@ -117,6 +123,7 @@ bool ElfLoader::LoadSelf(const std::string& filePath, LoadedElfImage& out) {
     // NOTE: LoadElfFromMemory resets `out`, so isSelf is set on the loaded
     // image only after that call — and on the failed-extract path above,
     // where no reset happened.
+    Breadcrumb::Set("self: map inner elf (%zu bytes)", elfSize);
     const bool ok = LoadElfFromMemory(elf, elfSize,
                                       filePath + " [SELF-extracted]", out);
     if (ok) {
@@ -184,6 +191,7 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
              "ELF %s: type=%u entry=0x%llx phnum=%u",
              origin.c_str(), ehdr.type,
              (unsigned long long)ehdr.entry, ehdr.phnum);
+    Breadcrumb::Set("elf: parse ok phnum=%u", (unsigned)ehdr.phnum);
 
     bool mappedAny = false;
     for (uint16_t i = 0; i < ehdr.phnum; ++i) {
@@ -199,6 +207,9 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
         if (ph.type != PT_LOAD) continue;
         if (ph.memsz == 0)      continue;
 
+        Breadcrumb::Set("elf: PT_LOAD#%u va=0x%llx sz=%llu",
+                        (unsigned)i, (unsigned long long)ph.vaddr,
+                        (unsigned long long)ph.memsz);
         LoadedElfImage::Segment seg{};
         seg.vaddr  = ph.vaddr;
         seg.filesz = static_cast<size_t>(ph.filesz);

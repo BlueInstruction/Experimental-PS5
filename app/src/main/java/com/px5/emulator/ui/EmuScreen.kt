@@ -393,17 +393,46 @@ fun EmuScreen(
                                 "LOAD FAILED: no eboot.bin in folder"
                             } else {
                                 try {
-                                    // Magic-based dispatch on the native side:
-                                    // SELF (eboot.bin dumps) -> extractor path,
-                                    // ELF (homebrew payloads) -> direct loader.
-                                    val ok = fexCoreWrapper.nativeLoadExecutable(target)
+                                    // v1.12 crash containment: the load
+                                    // pipeline first runs inside a fork-
+                                    // isolated probe child. A load-stage
+                                    // native fault (the 2026-08-30 "game
+                                    // kills the whole app" pattern) then
+                                    // costs the probe child — the app
+                                    // survives and the report names the
+                                    // verified dump file. Only a probe that
+                                    // actually succeeded promotes to the
+                                    // real in-process mapping below.
+                                    val probe = fexCoreWrapper.nativeLoadExecutableIsolated(target)
                                     com.px5.emulator.core.PX5EventLog.event("gameBoot",
-                                            "exec_load", "target=${target.substringAfterLast('/')}",
-                                            result = ok.toString())
+                                            "exec_probe",
+                                            "target=${target.substringAfterLast('/')}",
+                                            result = probe.lineSequence().firstOrNull()?.take(120) ?: "?")
                                     fexCoreWrapper.nativeLogEvent("gameBoot",
-                                            "exec_load result=$ok target=${target.substringAfterLast('/')}")
-                                    if (ok) "LOADED: $target mapped into guest window"
-                                    else "LOAD FAILED: loader rejected $target (see logcat)"
+                                            "exec_probe ${probe.lineSequence().firstOrNull()?.take(160) ?: probe.take(160)} " +
+                                            "target=${target.substringAfterLast('/')}")
+                                    if (probe.startsWith("LOAD OK")) {
+                                        // Magic-based dispatch on the native side:
+                                        // SELF (eboot.bin dumps) -> extractor path,
+                                        // ELF (homebrew payloads) -> direct loader.
+                                        val ok = fexCoreWrapper.nativeLoadExecutable(target)
+                                        com.px5.emulator.core.PX5EventLog.event("gameBoot",
+                                                "exec_load", "target=${target.substringAfterLast('/')}",
+                                                result = ok.toString())
+                                        fexCoreWrapper.nativeLogEvent("gameBoot",
+                                                "exec_load result=$ok target=${target.substringAfterLast('/')}")
+                                        if (ok) "LOADED: $target mapped into guest window"
+                                        else "LOAD FAILED: loader rejected $target (see logcat)"
+                                    } else {
+                                        // Probe crashed or rejected the file:
+                                        // surface the FULL report (it names the
+                                        // verified dump path on a crash) and do
+                                        // NOT attempt the in-process load.
+                                        com.px5.emulator.core.PX5EventLog.event("gameBoot",
+                                                "exec_probe_blocked",
+                                                "report=${probe.take(200)}")
+                                        "ISOLATED LOAD STOPPED THE CRASH — app survived:\n$probe"
+                                    }
                                 } catch (t: Throwable) {
                                     com.px5.emulator.core.PX5EventLog.exception("gameBoot.execLoad", t)
                                     fexCoreWrapper.nativeLogEvent("gameBoot",

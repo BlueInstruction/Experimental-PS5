@@ -299,11 +299,42 @@ void Handler(int sig, siginfo_t* info, void* uctx) {
 } // namespace
 
 void CrashHandler::Install(const std::string& logsDir) {
-    static bool installed = false;
-    if (installed) return;
-    installed = true;
+    // ---- directory handling (EVERY call) ---------------------------------
+    // JNI_OnLoad arms the handlers at library-load time with an EMPTY dir
+    // (no Android context exists yet); MainActivity's
+    // nativeInitRuntimeContext supplies the real app logs dir afterwards.
+    // The old first-call-wins rule froze g_logsDir at "" forever, so every
+    // report went to /data/local/tmp — unwritable for app processes — and
+    // the evidence vanished while the UI claimed a dump had been written
+    // (2026-08-30 device session: two self-test crashes, zero dumps).
+    // Last non-empty dir wins now.
+    if (!logsDir.empty() && logsDir != g_logsDir) {
+        g_logsDir = logsDir;
+        // Honest writability probe: better to learn EACCES here, in normal
+        // execution with a logger, than inside a signal handler when the
+        // process is already dying.
+        const std::string probe = logsDir + "/px5_crash_probe.tmp";
+        const int pfd = open(probe.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (pfd >= 0) {
+            close(pfd);
+            unlink(probe.c_str());
+            PX5_LOGI(LogCategory::CORE,
+                     "CrashHandler: logs dir writable: %s", logsDir.c_str());
+        } else {
+            PX5_LOGW(LogCategory::CORE,
+                     "CrashHandler: logs dir NOT writable (%s): errno=%d — "
+                     "crash reports will fall back to stderr/logcat",
+                     logsDir.c_str(), errno);
+        }
+    }
 
-    g_logsDir = logsDir;
+    // ---- handler arming (ONCE) -------------------------------------------
+    // Assignment to g_logsDir happens at startup, single-threaded, before
+    // any engine threads exist — the crash handler reads it without a lock
+    // by design (locking inside a signal handler can deadlock).
+    static std::atomic<bool> armed{false};
+    bool expected = false;
+    if (!armed.compare_exchange_strong(expected, true)) return;
 
     // SA_ONSTACK without sigaltstack is a lie: on a real stack overflow the
     // handler would fault again on the dead stack. Allocate an honest one.
