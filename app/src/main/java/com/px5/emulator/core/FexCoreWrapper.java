@@ -109,6 +109,14 @@ public class FexCoreWrapper {
      */
     public native String nativeRunGpuProof();
 
+    /**
+     * Phase C milestone 1: synthetic-stream GNM PM4 decoder self-test
+     * (pure CPU). Returns the decoder's own multi-line report starting
+     * with "PASS" or "FAIL" plus per-subtest results. Proves decoder +
+     * state-model mechanics only — not game compatibility.
+     */
+    public native String nativeRunGnmSelfTest();
+
     /** Attach an android.view.Surface; creates the Vulkan swapchain lazily. */
     public native boolean nativeAttachRenderSurface(Surface surface);
 

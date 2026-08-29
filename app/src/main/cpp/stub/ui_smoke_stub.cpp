@@ -26,6 +26,7 @@
 #include <string>
 
 #include "../gpu/vulkan_device.h"
+#include "../gpu/gnm/gnm_selftest.h"
 #include "../utils/logger.h"
 
 namespace fs = std::filesystem;
@@ -198,6 +199,15 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGpuProof(
         JNIEnv* env, jobject) {
     return env->NewStringUTF("FAIL | GPU proof requires the arm64-v8a "
                              "engine ABI (ui-smoke stub)");
+}
+// The GNM decoder self-test is pure C++ with no engine dependency, so the
+// smoke ABI runs the REAL test (no stub-fake needed).
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGnmSelfTest(
+        JNIEnv* env, jobject) {
+    std::string report;
+    PX5::Gnm::RunGnmSelfTest(&report);
+    return env->NewStringUTF(report.c_str());
 }
 extern "C" JNIEXPORT void JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeInitRuntimeContext(

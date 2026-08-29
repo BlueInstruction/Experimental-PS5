@@ -57,6 +57,9 @@ if(ANDROID_ABI STREQUAL "x86_64")
             stub/ui_smoke_stub.cpp
             gpu/vulkan_device.cpp
             gpu/driver_manager.cpp
+            gpu/gnm/gnm_state.cpp
+            gpu/gnm/pm4_decoder.cpp
+            gpu/gnm/gnm_selftest.cpp
             utils/crash_handler.cpp
             utils/logger.cpp
             utils/diag_bridge.cpp)
@@ -151,6 +154,9 @@ add_library(
         loader/self_loader.cpp
         gpu/vulkan_device.cpp
         gpu/driver_manager.cpp
+        gpu/gnm/gnm_state.cpp
+        gpu/gnm/pm4_decoder.cpp
+        gpu/gnm/gnm_selftest.cpp
         audio/audio.cpp
         audio_input_native.cpp
         input/controller.cpp

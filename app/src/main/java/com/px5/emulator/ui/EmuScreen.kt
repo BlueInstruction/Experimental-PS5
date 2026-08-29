@@ -70,6 +70,7 @@ fun EmuScreen(
 
     var renderStats by remember { mutableStateOf("renderer idle") }
     var gpuProof by remember { mutableStateOf<String?>(null) }
+    var gnmSelfTest by remember { mutableStateOf<String?>(null) }
     var inputSummary by remember { mutableStateOf("input: -") }
     var loadResult by remember { mutableStateOf<String?>(null) }
 
@@ -152,6 +153,14 @@ fun EmuScreen(
                 com.px5.emulator.core.PX5EventLog.event("gameBoot", "gpu_proof",
                         "result=${gpuProof?.take(120)}")
             }
+        }
+        launch(Dispatchers.Default) {
+            // Real on BOTH ABIs: the GNM decoder is pure C++, no engine dep.
+            gnmSelfTest = try {
+                fexCoreWrapper?.nativeRunGnmSelfTest() ?: "wrapper missing"
+            } catch (t: Throwable) { "FAIL | ${t.message}" }
+            com.px5.emulator.core.PX5EventLog.event("gameBoot", "gnm_selftest",
+                    "result=${gnmSelfTest?.lineSequence()?.firstOrNull() ?: "?"}")
         }
     }
 
@@ -284,6 +293,15 @@ fun EmuScreen(
                     text = "GPU proof: $p",
                     fontSize = 11.sp,
                     color = if (p.startsWith("PASS")) Color(0xFF7DD3FC)
+                            else Color(0xFFFF8A65),
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                )
+            }
+            gnmSelfTest?.let { g ->
+                Text(
+                    text = "GNM PM4: ${g.lineSequence().firstOrNull() ?: g}",
+                    fontSize = 11.sp,
+                    color = if (g.startsWith("PASS")) Color(0xFF7DD3FC)
                             else Color(0xFFFF8A65),
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                 )

@@ -288,6 +288,7 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeGetVulkanSummary(JNIEnv* env,
 #include "input/controller.h"
 #include "kernel/sce_kernel_hle.h"
 #include "gpu/driver_manager.h"
+#include "gpu/gnm/gnm_selftest.h"
 #include "utils/crash_handler.h"
 
 #include <android/native_window_jni.h>
@@ -300,6 +301,17 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGpuProof(JNIEnv* env,
                         .RunOffscreenClearProof(detail);
     return env->NewStringUTF(
         (std::string(ok ? "PASS | " : "FAIL | ") + detail).c_str());
+}
+
+// Phase C milestone 1: runs the synthetic-stream GNM PM4 decoder self-test
+// (pure CPU, no Vulkan involved). The report is the decoder's own output —
+// it proves decoder/state-model mechanics, nothing about game compat.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGnmSelfTest(JNIEnv* env,
+                                                               jobject) {
+    std::string report;
+    PX5::Gnm::RunGnmSelfTest(&report);
+    return env->NewStringUTF(report.c_str());
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
