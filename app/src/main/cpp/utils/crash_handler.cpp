@@ -49,6 +49,23 @@ constexpr int kMaxSamePcClaims = 4;
 std::atomic<void*> g_lastClaimedPc{nullptr};
 std::atomic<int> g_samePcClaims{0};
 
+// Faulting PC from a ucontext. The member layout is architecture-specific:
+// aarch64 exposes uc_mcontext.pc, x86_64 keeps RIP in uc_mcontext.gregs.
+// Getting this wrong fails the foreign-ABI build (CI, 2026-08-29), so it
+// lives in exactly one guarded function.
+void* FaultingPc(void* uctx) {
+    if (!uctx) return nullptr;
+    auto* uc = static_cast<ucontext_t*>(uctx);
+#if defined(__aarch64__)
+    return reinterpret_cast<void*>(uc->uc_mcontext.pc);
+#elif defined(__x86_64__)
+    return reinterpret_cast<void*>(
+        static_cast<uintptr_t>(uc->uc_mcontext.gregs[REG_RIP]));
+#else
+    return nullptr;
+#endif
+}
+
 const char* SignalName(int sig) {
     switch (sig) {
     case SIGSEGV: return "SIGSEGV";
@@ -243,10 +260,7 @@ void Handler(int sig, siginfo_t* info, void* uctx) {
         claimed = g_faultIntercept(sig, info, uctx);
         if (claimed) {
             // Loop detection on claimed PCs (see constant comment).
-            void* pc = uctx
-                ? reinterpret_cast<void*>(
-                      reinterpret_cast<ucontext_t*>(uctx)->uc_mcontext.pc)
-                : nullptr;
+            void* pc = FaultingPc(uctx);
             if (pc != nullptr && g_lastClaimedPc.load() == pc) {
                 if (g_samePcClaims.fetch_add(1) + 1 >= kMaxSamePcClaims) {
                     // This "handled" class is actually a live-lock: fall
