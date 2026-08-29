@@ -752,9 +752,9 @@ private fun probeEbootViaSaf(path: String, context: Context): String? = runCatch
             normPath.substring(normRoot.length + 1) else ""
         val targetDocId = if (rel.isBlank()) treeDocId
                           else "$treeDocId/$rel"
-        val docUri = DocumentsContract.buildDocumentUriUsingTree(
+        // Children of the game-folder document: (treeUri, parentDocId).
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
                 treeUri, targetDocId)
-        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(docUri)
         cr.query(
             childrenUri,
             arrayOf(
