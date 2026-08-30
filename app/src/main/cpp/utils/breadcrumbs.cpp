@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <sys/types.h>
 #include <unistd.h>
 
 namespace PX5::Breadcrumb {
@@ -34,10 +35,17 @@ void Set(const char* fmt, ...) {
     Ring& r = RingInstance();
     const uint32_t idx = r.next.fetch_add(1, std::memory_order_relaxed) % kSlots;
 
+    // v1.16: every crumb is stamped with its thread id. The v1.15 session
+    // produced a dump whose global ring mixed three threads (engine preset,
+    // GPU proof, GNM self-test) — without the tid the report could not say
+    // WHICH step belonged to the crashing thread.
     char buf[kSlotBytes];
+    const unsigned long tid = static_cast<unsigned long>(gettid());
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
+    int n = snprintf(buf, sizeof(buf), "[%lu] ", tid);
+    if (n < 0 || static_cast<size_t>(n) >= sizeof(buf)) n = 0;
+    vsnprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), fmt, ap);
     va_end(ap);
 
     std::lock_guard<std::mutex> lk(r.mu);

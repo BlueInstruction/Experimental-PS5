@@ -18,6 +18,8 @@
 #include <mutex>
 #include <string_view>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 #include <sys/auxv.h>
 #include <sys/mman.h>
 #include <sys/sysconf.h>
@@ -25,6 +27,7 @@
 
 #include "kernel/syscalls.h"
 #include "memory/memory.h"
+#include "utils/breadcrumbs.h"
 #include "utils/crash_handler.h"
 #include "utils/logger.h"
 
@@ -44,6 +47,41 @@ std::mutex g_mutex;
 std::unique_ptr<FEXCore::Context::Context> g_context;
 bool g_configInitialized = false;
 FEXCore::SignalDelegator g_signalDelegator;
+
+// v1.16: config overrides that arrive while a context is already live are
+// no longer dropped. The v1.15 session showed the Performance preset's
+// seven overrides hitting an initialized engine and being ignored — the
+// user's choice never applied anywhere, silently. They are now stored and
+// applied at the NEXT engine start; a fork-isolated probe child IS an
+// engine start (it rebuilds the engine via ResetForChild).
+std::vector<std::pair<std::string, std::string>>& PendingOverrides() {
+    static std::vector<std::pair<std::string, std::string>> v;
+    return v;
+}
+
+// Direct key -> FEXCore config store mapping (no pending-queue logic).
+// The caller ensures Config::Initialize() ran. Returns false on unknown key.
+bool SetConfigKey(const std::string& key, const std::string& value) {
+    namespace FC = FEXCore::Config;
+    std::string_view v = value;
+    if      (key == "TSOEnabled")            FC::Set(FC::CONFIG_TSOENABLED, v);
+    else if (key == "VectorTSOEnabled")      FC::Set(FC::CONFIG_VECTORTSOENABLED, v);
+    else if (key == "HalfBarrierTSOEnabled") FC::Set(FC::CONFIG_HALFBARRIERTSOENABLED, v);
+    else if (key == "MemcpySetTSOEnabled")   FC::Set(FC::CONFIG_MEMCPYSETTSOENABLED, v);
+    else if (key == "X87ReducedPrecision")   FC::Set(FC::CONFIG_X87REDUCEDPRECISION, v);
+    else if (key == "Multiblock")            FC::Set(FC::CONFIG_MULTIBLOCK, v);
+    else if (key == "MaxInst")               FC::Set(FC::CONFIG_MAXINST, v);
+    else if (key == "HostFeatures")          FC::Set(FC::CONFIG_HOSTFEATURES, v);
+    else if (key == "SmallTSCScale")         FC::Set(FC::CONFIG_SMALLTSCSCALE, v);
+    else if (key == "SMCChecks")             FC::Set(FC::CONFIG_SMCCHECKS, v);
+    else if (key == "VolatileMetadata")      FC::Set(FC::CONFIG_VOLATILEMETADATA, v);
+    else if (key == "MonoHacks")             FC::Set(FC::CONFIG_MONOHACKS, v);
+    else if (key == "HideHypervisorBit")     FC::Set(FC::CONFIG_HIDEHYPERVISORBIT, v);
+    else if (key == "DisableL2Cache")        FC::Set(FC::CONFIG_DISABLEL2CACHE, v);
+    else if (key == "DynamicL1Cache")        FC::Set(FC::CONFIG_DYNAMICL1CACHE, v);
+    else return false;
+    return true;
+}
 
 // The single guest thread currently executing translated code, or null.
 // Foundation embed is one-thread-at-a-time; the fault intercept needs the
@@ -514,6 +552,23 @@ bool Initialize() {
     FEXCore::Config::Initialize();
     g_configInitialized = true;
 
+    // v1.16: deferred overrides land here — strictly before
+    // CreateNewContext(), per the FEX_CONFIG_OPT read-at-construction
+    // contract in ApplyEngineConfigOverride's comment.
+    {
+        auto& pending = PendingOverrides();
+        if (!pending.empty()) {
+            int applied = 0;
+            for (const auto& kv : pending) {
+                if (SetConfigKey(kv.first, kv.second)) ++applied;
+            }
+            PX5_LOGI(LogCategory::FEX,
+                     "Initialize: applied %d/%zu deferred config override(s) "
+                     "(next-engine-start contract)", applied, pending.size());
+            pending.clear();
+        }
+    }
+
     // Engine default SMC mode is CONFIG_SMC_MTRACK (FEX-2608
     // Config.json.in). We never override it, so the SmcManager below is the
     // load-bearing half of that contract. Deliberate, not incidental.
@@ -604,6 +659,9 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop) {
 
     GuestSyscalls::ResetRun();
 
+    PX5::Breadcrumb::Set("exec: create_thread rip=0x%llx sp=0x%llx",
+                         (unsigned long long)hostRip,
+                         (unsigned long long)hostStackTop);
     auto* thread = g_context->CreateThread(hostRip, hostStackTop, nullptr);
     if (!thread) {
         res.error = "FEXCore CreateThread returned null";
@@ -623,7 +681,9 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop) {
              (unsigned long long)hostRip, (unsigned long long)hostStackTop);
 
     const auto t0 = std::chrono::steady_clock::now();
+    PX5::Breadcrumb::Set("exec: execute enter (dispatch)");
     g_context->ExecuteThread(thread);
+    PX5::Breadcrumb::Set("exec: execute returned");
     const auto t1 = std::chrono::steady_clock::now();
 
     res.elapsedMs =
@@ -775,42 +835,51 @@ bool ApplyEngineConfigOverride(const std::string& key, const std::string& value)
     // layer) and MUST precede CreateNewContext(): FEX_CONFIG_OPT members in
     // ContextImpl read the layered store at context construction.
     if (g_context) {
+        // v1.16: deferred, not dropped. The override is applied at the next
+        // engine start — for probe children that is the very next fork.
+        PendingOverrides().emplace_back(key, value);
         PX5_LOGW(LogCategory::FEX,
-                 "engine config override '%s' ignored — engine already "
-                 "initialized; takes effect on next engine start",
-                 key.c_str());
+                 "engine config override '%s' deferred to next engine start "
+                 "(engine already initialized; %zu override(s) pending)",
+                 key.c_str(), PendingOverrides().size());
         return false;
     }
     if (!g_configInitialized) {
         FEXCore::Config::Initialize();
         g_configInitialized = true;
     }
-    namespace FC = FEXCore::Config;
-    std::string_view v = value;
-        if      (key == "TSOEnabled")            FC::Set(FC::CONFIG_TSOENABLED, v);
-        else if (key == "VectorTSOEnabled")      FC::Set(FC::CONFIG_VECTORTSOENABLED, v);
-        else if (key == "HalfBarrierTSOEnabled") FC::Set(FC::CONFIG_HALFBARRIERTSOENABLED, v);
-        else if (key == "MemcpySetTSOEnabled")   FC::Set(FC::CONFIG_MEMCPYSETTSOENABLED, v);
-        else if (key == "X87ReducedPrecision")   FC::Set(FC::CONFIG_X87REDUCEDPRECISION, v);
-        else if (key == "Multiblock")            FC::Set(FC::CONFIG_MULTIBLOCK, v);
-        else if (key == "MaxInst")               FC::Set(FC::CONFIG_MAXINST, v);
-        else if (key == "HostFeatures")          FC::Set(FC::CONFIG_HOSTFEATURES, v);
-        else if (key == "SmallTSCScale")         FC::Set(FC::CONFIG_SMALLTSCSCALE, v);
-        else if (key == "SMCChecks")             FC::Set(FC::CONFIG_SMCCHECKS, v);
-        else if (key == "VolatileMetadata")      FC::Set(FC::CONFIG_VOLATILEMETADATA, v);
-        else if (key == "MonoHacks")             FC::Set(FC::CONFIG_MONOHACKS, v);
-        else if (key == "HideHypervisorBit")     FC::Set(FC::CONFIG_HIDEHYPERVISORBIT, v);
-        else if (key == "DisableL2Cache")        FC::Set(FC::CONFIG_DISABLEL2CACHE, v);
-        else if (key == "DynamicL1Cache")        FC::Set(FC::CONFIG_DYNAMICL1CACHE, v);
-        else {
-            PX5_LOGW(LogCategory::FEX,
-                     "engine config override rejected: unknown key '%s'",
-                     key.c_str());
-            return false;
-        }
+    if (!SetConfigKey(key, value)) {
+        PX5_LOGW(LogCategory::FEX,
+                 "engine config override rejected: unknown key '%s'",
+                 key.c_str());
+        return false;
+    }
     PX5_LOGI(LogCategory::FEX, "engine config override applied: %s=%s",
              key.c_str(), value.c_str());
     return true;
+}
+
+// v1.16 — fork-safe engine rebuild for probe children.
+//
+// The probe children inherit a FexCoreIntegration context that was built
+// in the PARENT while it was fully multithreaded (render loop, heartbeat,
+// coroutine workers). FEXCore state that references threads does not
+// survive fork(): the v1.15 device session showed BOTH execution children
+// dying at one deterministic host PC immediately after "Guest thread
+// created" — i.e. inside ContextImpl::ExecuteThread — for two different
+// guest images. Rebuilding the engine from scratch in the child removes
+// the whole fork-inheritance hazard class: fresh context, fresh compiler
+// objects, no locks held by threads that no longer exist in the child.
+// The parent's context is untouched (fork copy-on-write) and keeps serving
+// the UI; the child _exit()s without running destructors (no teardown
+// effects leak back into the parent).
+void ResetForChild() {
+    Shutdown();
+    if (!Initialize()) {
+        PX5_LOGE(LogCategory::FEX,
+                 "ResetForChild: fresh engine init failed — the child "
+                 "cannot execute guests; report reflects that honestly");
+    }
 }
 
 std::string GetSyscallStatsString() {

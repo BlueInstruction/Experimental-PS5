@@ -121,8 +121,22 @@ void DiagBridge::Forward(LogLevel level, LogCategory category,
     if (static_cast<size_t>(n) >= sizeof(line)) n = sizeof(line) - 1;
 
     std::lock_guard<std::mutex> lock(s.mtx);
+    // v1.16: the target is px5_main.log, which the logger ROTATES at 1 MB.
+    // A cached fd would keep appending to the renamed .1 file after a
+    // rotation — revalidate the fd's inode against the path each line and
+    // reopen on mismatch (one fstat+stat per bridged line; the session cap
+    // of 4000 lines bounds the cost).
+    if (s.fd >= 0) {
+        struct stat ffd{}, fpth{};
+        if (fstat(s.fd, &ffd) != 0 || stat(s.path.c_str(), &fpth) != 0 ||
+            ffd.st_ino != fpth.st_ino || ffd.st_dev != fpth.st_dev) {
+            ::close(s.fd);
+            s.fd = -1;
+        }
+    }
     if (s.fd < 0) {
-        // First use after Enable() failed to open (dir came late). Retry.
+        // First use after Enable() failed to open (dir came late), or the
+        // rotation check above invalidated the fd. Retry.
         s.fd = ::open(s.path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0660);
         if (s.fd < 0) return;
     }

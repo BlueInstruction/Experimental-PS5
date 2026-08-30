@@ -1038,4 +1038,23 @@ void VulkanGpuDevice::StopRenderLoop() {
     }
 }
 
+// v1.16 — GPU-proof containment window (see header comment). The join in
+// StopRenderLoop guarantees the render thread is fully out of any submit
+// before the probe child is forked; no mutex is held across fork (a
+// lock inherited by the child would deadlock its own proof submit).
+bool VulkanGpuDevice::StopRenderLoopForProbe() {
+    const bool wasRunning = m_rendering.load();
+    StopRenderLoop();
+    return wasRunning;
+}
+
+void VulkanGpuDevice::ResumeRenderLoopAfterProbe() {
+    if (!StartRenderLoop()) {
+        // Honest: a failed resume is a visible defect, not silence.
+        PX5_LOGE(LogCategory::GPU,
+                 "Render loop resume after GPU proof failed — screen stays "
+                 "static until surface re-attach");
+    }
+}
+
 } // namespace PX5

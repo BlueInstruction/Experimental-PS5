@@ -20,9 +20,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.px5.emulator.DriverSlotStore
 import com.px5.emulator.SoundManager
 import com.px5.emulator.core.FexCoreWrapper
@@ -50,7 +54,7 @@ fun PS5TurnipDriverSheet(
     onImportCustomDriverClick: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
     var slots by remember { mutableStateOf(DriverSlotStore.load(context)) }
@@ -63,7 +67,39 @@ fun PS5TurnipDriverSheet(
             .getOrDefault("engine unavailable")
     }
 
+    // v1.16: runs the REAL verification path (adrenotools load + maps
+    // check) for the active slot and returns the fresh summary — the
+    // manager stops answering "driverVerified=not-run" after a select or
+    // an import.
+    suspend fun verifyAndRefresh(slotIndex: Int) {
+        summary = runCatching {
+            fexCoreWrapper?.nativeVerifyDriverSlot(slotIndex) ?: "engine unavailable"
+        }.getOrDefault("engine unavailable")
+    }
+
     LaunchedEffect(Unit) { refreshSummary() }
+
+    // v1.16 — the v1.15 session's second driver complaint: a freshly
+    // imported slot did not appear until the user pressed "refresh driver
+    // status", because the sheet captured DriverSlotStore once at
+    // composition and the import finishes in an activity result AFTER
+    // that. Reload the store + re-verify the active driver on every
+    // ON_RESUME — returning from the file picker refreshes the sheet.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                slots = DriverSlotStore.load(context)
+                val mode = Px5Settings.driverMode.value
+                activeMode = mode
+                scope.launch {
+                    if (mode > 0) verifyAndRefresh(mode) else refreshSummary()
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     Box(
         modifier = Modifier
@@ -139,7 +175,7 @@ fun PS5TurnipDriverSheet(
                                 Px5Settings.setDriverMode(0)
                                 activeMode = 0
                                 soundManager.playActivationSound()
-                                refreshSummary()
+                                verifyAndRefresh(0)
                                 busy = false
                             }
                         }
@@ -163,7 +199,7 @@ fun PS5TurnipDriverSheet(
                                 Px5Settings.setDriverMode(idx)
                                 activeMode = idx
                                 soundManager.playActivationSound()
-                                refreshSummary()
+                                verifyAndRefresh(idx)
                                 busy = false
                             }
                         },
@@ -187,7 +223,7 @@ fun PS5TurnipDriverSheet(
                                     slots = remaining
                                     activeMode = newMode
                                     soundManager.playActivationSound()
-                                    refreshSummary()
+                                    verifyAndRefresh(newMode)
                                     busy = false
                                 }
                             }

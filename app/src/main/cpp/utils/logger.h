@@ -104,6 +104,13 @@ public:
     // string if file logging is not initialized.
     static std::string GetCurrentLogFilePath() noexcept;
 
+    // v1.16 — crash-handler-only accessor. Takes NO lock: the log path is
+    // set once at Initialize (single-threaded startup) and never changes
+    // (rotation renames FILES, not the path). Reading it from a signal
+    // handler is safe; GetCurrentLogFilePath() would deadlock there when
+    // the faulting thread (or any thread) held the logger mutex.
+    static const char* PeekLogFilePathUnsafe() noexcept;
+
 private:
     // Internal: appends one formatted line to the rotating file.
     static void WriteToFile(std::string_view formatted_line,

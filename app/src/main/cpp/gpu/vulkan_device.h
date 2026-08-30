@@ -61,6 +61,14 @@ public:
     bool StartRenderLoop();
     void StopRenderLoop();
 
+    // v1.16 — GPU-proof containment window. The offscreen proof runs in a
+    // fork-isolated child; the render loop MUST be paused for that window
+    // so the child is the only submitter on the shared drm context
+    // (external-synchronization contract). Returns whether the loop was
+    // actually running (so the resume is symmetric).
+    bool StopRenderLoopForProbe();
+    void ResumeRenderLoopAfterProbe();
+
     struct RenderStats {
         std::atomic<uint64_t> frames{0};
         std::atomic<uint32_t> recreations{0};

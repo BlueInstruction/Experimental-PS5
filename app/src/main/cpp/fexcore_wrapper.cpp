@@ -334,7 +334,8 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadExecutableIsolated(
             return "LOAD FAILED: " +
                    (img.error.empty() ? std::string("(no detail — see engine log)")
                                       : img.error);
-        });
+        },
+        20000);
     return env->NewStringUTF(report.c_str());
 }
 
@@ -385,6 +386,11 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunExecutionProbe(
     const std::string report = RunIsolated(
         "execution probe",
         [path]() -> std::string {
+            // v1.16: rebuild the engine in the child — the inherited context
+            // was built pre-fork in a multithreaded parent; both v1.15
+            // execution children died deterministically inside
+            // ExecuteThread. Also applies deferred (preset) overrides.
+            PX5::FexCoreIntegration::ResetForChild();
             const bool isSelf = PathLooksLikeSelf(path);
             auto& emu = PX5::Emulator::GetInstance();
             if (!emu.LoadExecutable(path, isSelf)) {
@@ -414,12 +420,15 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunCpuConformanceTest(
     const std::string report = RunIsolated(
         "CPU conformance",
         []() -> std::string {
+            // v1.16: fresh engine in the child (see execution probe note).
+            PX5::FexCoreIntegration::ResetForChild();
             const bool ok = PX5::FexCoreIntegration::RunConformanceTest();
             return ok
                 ? "PASSED — guest blob (mov eax,40; add eax,2; hlt) executed "
                   "on the ARM64 JIT and reached its HLT exit"
                 : "FAILED — guest blob did not run cleanly (see engine log)";
-        });
+        },
+        15000);
     return env->NewStringUTF(report.c_str());
 }
 
@@ -457,8 +466,13 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunFoundationSelfTest(
     const std::string report = RunIsolated(
         "engine self-test",
         []() -> std::string {
+            // v1.16: fresh engine in the child — SelfTestFoundation executes
+            // guests (conformance + raw pipeline) and must not inherit a
+            // pre-fork FEXCore context built by the multithreaded parent.
+            PX5::FexCoreIntegration::ResetForChild();
             return PX5::Emulator::GetInstance().SelfTestFoundation();
-        });
+        },
+        30000);
     return env->NewStringUTF(report.c_str());
 }
 
@@ -533,12 +547,41 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGpuProof(JNIEnv* env,
                                                             jobject) {
     PX5::Breadcrumb::Set("jni: GpuProof enter");
-    std::string detail;
-    const bool ok = PX5::VulkanGpuDevice::GetInstance()
-                        .RunOffscreenClearProof(detail);
-    PX5::Breadcrumb::Set("jni: GpuProof done ok=%d", ok ? 1 : 0);
-    return env->NewStringUTF(
-        (std::string(ok ? "PASS | " : "FAIL | ") + detail).c_str());
+    // v1.16 — THE last uncontained diagnostic is now fork-isolated.
+    //
+    // The v1.15 session's fatal crash (08:15:31, the one that restarted the
+    // whole app on game-boot) was exactly this proof: an in-process Vulkan
+    // submit on the user's Turnip slot faulted with si_addr=0x0 after the
+    // "submit" breadcrumb and never reached "fence_wait". Everything else
+    // had been contained since v1.15; this one entry kept killing the app.
+    //
+    // Containment discipline for Vulkan: the child works on the COW copy of
+    // the driver state and submits through the SHARED drm file description.
+    // A concurrent parent submit on the same kernel context is the one real
+    // hazard, so the parent stops its render loop (join, not just a flag)
+    // for the proof window — the child becomes the only submitter, exactly
+    // the external-synchronization contract. No mutex is held across fork:
+    // an inherited locked mutex would deadlock the child's own submit.
+    // If the driver faults, the child dies with a full module-resolved dump
+    // and the app survives — the v1.15 fatal class is gone.
+    auto& gpu = PX5::VulkanGpuDevice::GetInstance();
+    const bool wasRendering = gpu.StopRenderLoopForProbe();
+
+    const std::string report = RunIsolated(
+        "GPU proof",
+        [&gpu]() -> std::string {
+            std::string detail;
+            const bool ok = gpu.RunOffscreenClearProof(detail);
+            return std::string(ok ? "PASS | " : "FAIL | ") + detail;
+        },
+        15000);
+
+    if (wasRendering) gpu.ResumeRenderLoopAfterProbe();
+
+    // Keep the UI contract: PASS/FAIL/CRASHED prefix + detail. The crash
+    // path carries the verified dump path from VerifyChildDump.
+    PX5::Breadcrumb::Set("jni: GpuProof done rep=%.64s", report.c_str());
+    return env->NewStringUTF(report.c_str());
 }
 
 // Phase C milestone 1: runs the synthetic-stream GNM PM4 decoder self-test
@@ -557,7 +600,8 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGnmSelfTest(JNIEnv* env,
             std::string rep;
             PX5::Gnm::RunGnmSelfTest(&rep);
             return rep;
-        });
+        },
+        10000);
     return env->NewStringUTF(report.c_str());
 }
 
@@ -576,7 +620,8 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunLoaderSelfTest(JNIEnv* env,
             std::string rep;
             PX5::SelfExtract::RunSelfExtractSelfTest(&rep);
             return rep;
-        });
+        },
+        10000);
     return env->NewStringUTF(report.c_str());
 }
 
@@ -754,6 +799,30 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeGetDriverManagerSummary(
         PX5::GpuDriverManager::GetInstance().SummaryString().c_str());
 }
 
+// v1.16 — eager driver verification. The v1.15 session left the summary at
+// "driverVerified=not-run" until a full Vulkan init happened to run, and
+// the import UI never reflected a fresh slot until the user pressed
+// refresh. This entry runs the REAL load path (adrenotools dlopen via the
+// linker-namespace hook) for the given slot index (1-based; 0 = system ICD)
+// WITHOUT creating a Vulkan instance, then re-checks /proc/self/maps.
+// Loading the driver library alone creates no DRM context — it is safe in
+// the main process — and after it the same maps check the engine uses at
+// real init proves the driver actually mapped. The returned string is the
+// fresh manager summary (mode/slots/verify state) for the UI.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeVerifyDriverSlot(
+        JNIEnv* env, jobject, jint slotIndex) {
+    auto& mgr = PX5::GpuDriverManager::GetInstance();
+    if (slotIndex > 0) {
+        const bool loaded = mgr.PreloadActiveDriverForVerification();
+        PX5_LOGI(PX5::LogCategory::GPU,
+                 "Driver slot %d eager verification: adrenotools load %s",
+                 static_cast<int>(slotIndex), loaded ? "OK" : "FAILED");
+    }
+    mgr.VerifyActiveDriverMapped();
+    return env->NewStringUTF(mgr.SummaryString().c_str());
+}
+
 // ---------------------------------------------------------------------------
 // Runtime context wiring (diagnostics + driver directories).
 // Called once from MainActivity.onCreate before any engine use.
@@ -779,11 +848,14 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeInitRuntimeContext(
 
     PX5::CrashHandler::Install(logsDir);
     PX5::GpuDriverManager::GetInstance().SetRuntimeDirs(hookDir, tmpDir, rootDir);
-    // Mirror filtered native lines (driver loader outcomes, engine errors)
-    // into the same px5_diagnostic.log the Kotlin EVENT/STATE stream writes,
-    // so a pasted log is self-sufficient for diagnosis.
+    // v1.16 — LOG UNIFICATION. The EVENT/STATE stream (Kotlin PX5EventLog)
+    // and the bridged NATIVE lines now land in px5_main.log itself, not a
+    // separate px5_diagnostic.log. One pasted file carries the whole story:
+    // session banners, events, native evidence, and (since this build) the
+    // full crash reports inline. DiagBridge revalidates its fd per line, so
+    // the logger's 1 MB rotation cannot split the stream.
     if (!logsDir.empty()) {
-        PX5::DiagBridge::Enable(logsDir + "/px5_diagnostic.log");
+        PX5::DiagBridge::Enable(logsDir + "/px5_main.log");
     }
     // v1.14: SIGKILL-class death attribution. lmkd / ANR-watchdog kills
     // cannot run ANY in-process handler (the crash handler is structurally

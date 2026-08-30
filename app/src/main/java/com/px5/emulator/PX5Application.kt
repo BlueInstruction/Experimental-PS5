@@ -61,10 +61,16 @@ class PX5Application : Application() {
                     .exec(arrayOf("logcat", "-d", "-t", "2000"))
                 val out = proc.inputStream.bufferedReader().readText()
                 proc.waitFor()
+                // v1.16: "process_crashed" added — a HANDLED native crash
+                // (our crash handler reports and re-raises) never produces
+                // the OS's "Fatal signal" line, which is why every v1.15
+                // session answered markers=0 while real crashes were
+                // happening. Our own FATAL evidence is now counted.
                 val patterns = listOf(
                     "Fatal signal", "FATAL EXCEPTION", "has died",
                     "ANR in com.px5.emulator", "Force finishing",
-                    "lowmemorykiller", "Low Memory Killer", "tombstoned")
+                    "lowmemorykiller", "Low Memory Killer", "tombstoned",
+                    "process_crashed", "PX5: nested fault inside crash handler")
                 val hits = out.lineSequence().filter { line ->
                     patterns.any { line.contains(it, ignoreCase = true) } ||
                         line.contains("com.px5.emulator")
@@ -82,6 +88,21 @@ class PX5Application : Application() {
                         appendLine()
                         hits.forEach { appendLine(it) }
                     })
+                    // v1.16 UNIFIED LOG: a compact section lands in
+                    // px5_main.log too — the single file the user pastes
+                    // now also names the previous session's death.
+                    try {
+                        File(dir, "px5_main.log").appendText(buildString {
+                            appendLine()
+                            appendLine("==== PX5 POSTMORTEM @ $ts ====")
+                            appendLine("previous-session death markers (${hits.size}) — " +
+                                "full list: ${f.name}")
+                            hits.take(30).forEach { appendLine("  $it") }
+                            if (hits.size > 30) appendLine("  ... (${hits.size - 30} more)")
+                            appendLine("==== PX5 POSTMORTEM END ====")
+                            appendLine()
+                        })
+                    } catch (_: Throwable) {}
                     com.px5.emulator.core.PX5EventLog.event("diag", "postmortem",
                         "markers=${hits.size} file=${f.name}")
                 } else {

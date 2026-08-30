@@ -30,7 +30,12 @@ object PX5EventLog {
             val dir = context.getExternalFilesDir("logs")
                 ?: File(context.filesDir, "logs")
             if (!dir.exists()) dir.mkdirs()
-            logFile = File(dir, "px5_diagnostic.log")
+            // v1.16 LOG UNIFICATION: the EVENT/STATE stream lands in
+            // px5_main.log itself — one pasted file now carries the session
+            // banners, the Kotlin event story, the bridged native lines,
+            // and the full crash reports inline. No more juggling
+            // px5_diagnostic.log + px5_main.log to reconstruct a session.
+            logFile = File(dir, "px5_main.log")
         } catch (_: Throwable) {
             logFile = null
         }

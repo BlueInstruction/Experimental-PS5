@@ -15,6 +15,7 @@
 #include <unwind.h>
 #include <sys/uio.h>
 #include <sys/mman.h>
+#include <sys/types.h>
 
 namespace PX5 {
 
@@ -79,69 +80,206 @@ const char* SignalName(int sig) {
     }
 }
 
-// The single write path. Async-signal-safety: only open/write/dprintf are
-// used inside the handler; the backtrace call is best-effort (bionic's
-// implementation is unwind-based and does not take locks we hold).
-//
-// Naming contract with the Kotlin log store (PX5Application.listCrashLogs
-// reads "px5_crash_*.log", the live viewer tails "px5_crash_latest.log"):
-// the native report writes BOTH a timestamped file and refreshes latest,
-// otherwise real native crashes stay invisible in the Logs screen (this
-// is why the 2026-08-28 device crashes left no visible evidence).
+// ---------------------------------------------------------------------------
+// v1.16 — module resolution. The 2026-08-30 v1.15 session produced dumps
+// with ABSOLUTE backtrace addresses only ("#00 pc 0x79c5634308"). Without
+// the module table there is no way to say which library a frame belongs to,
+// so every crash stayed "unclear log" for the user. The table below is read
+// from /proc/self/maps INSIDE the handler (open/read only — async-signal-
+// safe on bionic), and every reported address gains "lib.so+0xOFFSET" using
+// the tombstone convention rel = addr - map_start + mapping_pgoff.
+// ---------------------------------------------------------------------------
+struct MapEntry { uintptr_t start; uintptr_t end; uintptr_t pgoff; char name[160]; };
+constexpr int kMaxMapEntries = 64;
+struct MapTable { MapEntry e[kMaxMapEntries]; int n = 0; };
+
+bool ParseHex(const char*& p, uintptr_t& out) {
+    while (*p == ' ') ++p;
+    uintptr_t v = 0;
+    int digits = 0;
+    for (; digits < 16; ++digits) {
+        const char c = *p;
+        unsigned d;
+        if (c >= '0' && c <= '9')      d = static_cast<unsigned>(c - '0');
+        else if (c >= 'a' && c <= 'f') d = static_cast<unsigned>(c - 'a') + 10u;
+        else if (c >= 'A' && c <= 'F') d = static_cast<unsigned>(c - 'A') + 10u;
+        else break;
+        v = (v << 4) | d;
+        ++p;
+    }
+    if (digits == 0) return false;
+    out = v;
+    return true;
+}
+
+void ParseMapLine(char* line, MapTable& t) {
+    if (t.n >= kMaxMapEntries) return;
+    const char* p = line;
+    uintptr_t start = 0, end = 0, pgoff = 0;
+    if (!ParseHex(p, start)) return;
+    if (*p != '-') return;
+    ++p;
+    if (!ParseHex(p, end)) return;
+    while (*p == ' ') ++p;
+    // perms "rwxp": only executable, file-backed entries are useful for
+    // symbolization; skipping the rest keeps the table small.
+    if (p[0] == '\0' || p[1] == '\0' || p[2] == '\0') return;
+    if (p[2] != 'x') return;
+    p += 4;
+    if (!ParseHex(p, pgoff)) return;
+    // Skip dev (nn:nn) and inode tokens, then the path is the remainder
+    // after the last space.
+    while (*p == ' ') ++p;                    // dev
+    while (*p != ' ' && *p != '\0') ++p;
+    while (*p == ' ') ++p;                    // inode
+    while (*p != ' ' && *p != '\0') ++p;
+    while (*p == ' ') ++p;
+    if (*p == '\0' || *p != '/') return;      // anonymous mapping
+    const size_t len = strlen(p);
+    if (len == 0 || len >= sizeof(MapEntry::name)) return;
+
+    MapEntry& e = t.e[t.n];
+    e.start = start; e.end = end; e.pgoff = pgoff;
+    memcpy(e.name, p, len + 1);
+    ++t.n;
+}
+
+void BuildMapTable(MapTable& t) {
+    int fd = open("/proc/self/maps", O_RDONLY);
+    if (fd < 0) return;
+    char buf[16384];
+    size_t len = 0;
+    for (;;) {
+        if (len >= sizeof(buf) - 1) break;
+        const ssize_t r = read(fd, buf + len, sizeof(buf) - 1 - len);
+        if (r <= 0) break;
+        len += static_cast<size_t>(r);
+        buf[len] = '\0';
+        char* line = buf;
+        char* nl;
+        while ((nl = strchr(line, '\n')) != nullptr) {
+            *nl = '\0';
+            ParseMapLine(line, t);
+            line = nl + 1;
+        }
+        const size_t rem = static_cast<size_t>(buf + len - line);
+        memmove(buf, line, rem);
+        len = rem;
+        if (t.n >= kMaxMapEntries) break;
+    }
+    close(fd);
+}
+
+int FindMap(const MapTable& t, uintptr_t addr) {
+    for (int i = 0; i < t.n; ++i) {
+        if (addr >= t.e[i].start && addr < t.e[i].end) return i;
+    }
+    return -1;
+}
+
+// Formats "0xADDR (lib.so+0xREL)" — the pair that makes a dump symbolizable
+// against the build's unstripped libraries without any other tooling.
+void FormatAddr(const MapTable& t, uintptr_t addr, char* out, size_t n) {
+    if (addr == 0) { snprintf(out, n, "0x0"); return; }
+    const int i = FindMap(t, addr);
+    if (i < 0) {
+        snprintf(out, n, "0x%lx", static_cast<unsigned long>(addr));
+        return;
+    }
+    const char* slash = strrchr(t.e[i].name, '/');
+    const char* base = slash ? slash + 1 : t.e[i].name;
+    snprintf(out, n, "0x%lx (%s+0x%lx)",
+             static_cast<unsigned long>(addr), base,
+             static_cast<unsigned long>(addr - t.e[i].start + t.e[i].pgoff));
+}
+
+// The two-target writer. Target 1: px5_crash_latest.log (the UI's quick
+// read + VerifyChildDump contract). Target 2: px5_main.log — v1.16
+// unification: the full report is appended to THE log the user pastes, so
+// one file carries the whole story (events + native lines + the crash).
+// Both opens are fresh O_APPEND opens inside the handler: rotation-proof
+// and lock-free.
+struct ReportWriter { int latestFd; int mainFd; };
+
+void WAppend(ReportWriter& w, const char* s) {
+    const size_t len = strlen(s);
+    if (w.latestFd >= 0) { ssize_t r = write(w.latestFd, s, len); (void)r; }
+    if (w.mainFd   >= 0) { ssize_t r = write(w.mainFd,   s, len); (void)r; }
+}
+
 void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {   // NOLINT(bugprone-easily-swappable-parameters)
-    char path[512];
     char latestPath[512];
     time_t now = time(nullptr);
     struct tm tmv{};
     localtime_r(&now, &tmv);
     char stamp[32];
     strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", &tmv);
-    snprintf(path, sizeof(path), "%s/px5_crash_%s.log",
-             g_logsDir.empty() ? "/data/local/tmp" : g_logsDir.c_str(), stamp);
     snprintf(latestPath, sizeof(latestPath), "%s/px5_crash_latest.log",
              g_logsDir.empty() ? "/data/local/tmp" : g_logsDir.c_str());
 
-    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    int latestFd = open(latestPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0 && latestFd < 0) {
-        fd = STDERR_FILENO;  // never lose the report entirely
-    } else if (fd < 0) {
-        fd = latestFd;       // at least the tail the UI reads
-        latestFd = -1;
+    ReportWriter w{-1, -1};
+    w.latestFd = open(latestPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    // Lock-free path read (PeekLogFilePathUnsafe): the locking getter could
+    // deadlock the handler when a thread died holding the logger mutex.
+    // No std::string here either — allocation inside a signal handler can
+    // deadlock on the allocator lock; raw pointer only.
+    const char* mainPath = Logger::PeekLogFilePathUnsafe();
+    if (mainPath && *mainPath) {
+        w.mainFd = open(mainPath, O_WRONLY | O_APPEND, 0644);
+    }
+    if (w.latestFd < 0 && w.mainFd < 0) {
+        // Never lose the report entirely.
+        w.latestFd = STDERR_FILENO;
     }
 
-    char line[256];
-    auto appendTo = [&](int target, const char* s) {
-        if (target >= 0) write(target, s, strlen(s));
-    };
-    auto append = [&](const char* s) {
-        appendTo(fd, s);
-        appendTo(latestFd, s);
-    };
+    char line[512];
+    auto append = [&](const char* s) { WAppend(w, s); };
 
     snprintf(line, sizeof(line), "\n==== PX5 CRASH %04d-%02d-%02d %02d:%02d:%02d ====\n",
              tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
              tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
     append(line);
 
-    snprintf(line, sizeof(line), "signal=%s(%d) si_addr=%p si_code=%d pid=%d tid=%lu\n",
+    // v1.16: pid comes from getpid() — si_pid is 0 for synchronous signals
+    // (the 2026-08-30 dumps read "pid=0", which is meaningless for a
+    // synchronous SEGV and confused the child-vs-parent attribution).
+    snprintf(line, sizeof(line),
+             "signal=%s(%d) si_addr=%p si_code=%d pid=%d tid=%lu stamp=%s\n",
              SignalName(sig), sig,
              info ? info->si_addr : nullptr,
              info ? info->si_code : 0,
-             info ? static_cast<int>(info->si_pid) : -1,
-             static_cast<unsigned long>(gettid()));
+             static_cast<int>(getpid()),
+             static_cast<unsigned long>(gettid()),
+             stamp);
     append(line);
 
-    // The last known native steps (fixed preallocated ring — async-signal-
-    // safe drain). This is what pins WHICH engine step was in flight when
-    // the process died, the exact information the 2026-08-29 pastes lacked.
-    append("last breadcrumbs:\n");
+    // Module table FIRST: every address below gains meaning from it.
+    MapTable maps;
+    BuildMapTable(maps);
+    if (maps.n > 0) {
+        append("modules (exec, file-backed — rel=addr-start+pgoff):\n");
+        for (int i = 0; i < maps.n; ++i) {
+            const char* slash = strrchr(maps.e[i].name, '/');
+            snprintf(line, sizeof(line), "  %08lx-%08lx %s+0..  %s\n",
+                     static_cast<unsigned long>(maps.e[i].start),
+                     static_cast<unsigned long>(maps.e[i].end),
+                     slash ? slash + 1 : maps.e[i].name,
+                     maps.e[i].name);
+            append(line);
+        }
+    } else {
+        append("modules: /proc/self/maps unavailable or no exec mappings\n");
+    }
+
+    // The last known native steps. v1.16: each crumb carries its tid, so
+    // parallel diagnostic threads can no longer blur which step belonged
+    // to which thread (the v1.15 08:15:31 dump mixed three threads).
+    append("last breadcrumbs (tid-prefixed):\n");
     {
-        // DumpToFd writes to one fd; call it for both targets.
-        long n1 = Breadcrumb::DumpToFd(fd);
+        long n1 = Breadcrumb::DumpToFd(w.latestFd);
         (void)n1;
-        if (latestFd >= 0) {
-            long n2 = Breadcrumb::DumpToFd(latestFd);
+        if (w.mainFd >= 0) {
+            long n2 = Breadcrumb::DumpToFd(w.mainFd);
             (void)n2;
         }
     }
@@ -159,29 +297,37 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {   // NOLINT(bugpro
                      i+2, (unsigned long long)(i+2 < 31 ? mc.regs[i+2] : 0));
             append(line);
         }
+        char pcBuf[256], lrBuf[256];
+        FormatAddr(maps, static_cast<uintptr_t>(mc.pc), pcBuf, sizeof(pcBuf));
+        FormatAddr(maps, static_cast<uintptr_t>(mc.regs[30]), lrBuf, sizeof(lrBuf));
         snprintf(line, sizeof(line),
-                 "  sp=0x%016llx pc=0x%016llx pstate=0x%08llx\n",
-                 (unsigned long long)mc.sp,
-                 (unsigned long long)mc.pc,
+                 "  sp=0x%016llx pc=%s lr(x30)=%s pstate=0x%08llx\n",
+                 (unsigned long long)mc.sp, pcBuf, lrBuf,
                  (unsigned long long)mc.pstate);
         append(line);
 
-        // Best-effort backtrace: addresses only on-device (symbolization is
-        // done by ndk-stack from the matching build). Honest about limits.
+        // v1.16: every frame resolved against the module table — the raw
+        // absolute address is kept alongside so ndk-stack still works.
         BtCtx bt{};
         _Unwind_Backtrace(BtFn, &bt);
-        append("backtrace (addresses; use ndk-stack with this build):\n");
+        append("backtrace (raw + module-resolved):\n");
         for (int i = 0; i < bt.n; ++i) {
-            snprintf(line, sizeof(line), "  #%02d pc %p\n", i, bt.frames[i]);
+            char addrBuf[256];
+            FormatAddr(maps, reinterpret_cast<uintptr_t>(bt.frames[i]),
+                       addrBuf, sizeof(addrBuf));
+            snprintf(line, sizeof(line), "  #%02d pc %s\n", i, addrBuf);
             append(line);
         }
 #else
         (void)uc;
         BtCtx bt{};
         _Unwind_Backtrace(BtFn, &bt);
-        append("backtrace (addresses; register dump is arm64-only):\n");
+        append("backtrace (register dump is arm64-only):\n");
         for (int i = 0; i < bt.n; ++i) {
-            snprintf(line, sizeof(line), "  #%02d pc %p\n", i, bt.frames[i]);
+            char addrBuf[256];
+            FormatAddr(maps, reinterpret_cast<uintptr_t>(bt.frames[i]),
+                       addrBuf, sizeof(addrBuf));
+            snprintf(line, sizeof(line), "  #%02d pc %s\n", i, addrBuf);
             append(line);
         }
 #endif
@@ -189,53 +335,17 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {   // NOLINT(bugpro
         append("ucontext unavailable (synthetic raise)\n");
     }
 
-    append(Logger::GetCurrentLogFilePath().c_str());
+    append("full session log: ");
+    append((mainPath && *mainPath) ? mainPath : "(logger not initialized)");
     append("\n");
 
-    // One-liner into the pasted diagnostic stream (px5_diagnostic.log).
-    // Process death is the one event a pasted log can never contain
-    // afterwards — the 2026-08-29 "Let's Build A Zoo" crash left the event
-    // stream silent because this report only went to its own file. Mirror
-    // the essentials while we are still running in the handler; same
-    // async-signal-safe discipline (open/write/fsync only).
-    {
-        char diagPath[512];
-        snprintf(diagPath, sizeof(diagPath), "%s/px5_diagnostic.log",
-                 g_logsDir.empty() ? "/data/local/tmp" : g_logsDir.c_str());
-        int dfd = open(diagPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (dfd >= 0) {
-            char diag[320];
-#if defined(__aarch64__)
-            const void* pc = uctx
-                ? reinterpret_cast<const void*>(
-                      reinterpret_cast<ucontext_t*>(uctx)->uc_mcontext.pc)
-                : nullptr;
-            snprintf(diag, sizeof(diag),
-                     "[%04d-%02d-%02d %02d:%02d:%02d] NATIVE level=FATAL "
-                     "cat=PX5_System process_crashed signal=%s(%d) pc=%p "
-                     "dump=%s\n",
-                     tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
-                     tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
-                     SignalName(sig), sig, pc, path);
-#else
-            snprintf(diag, sizeof(diag),
-                     "[%04d-%02d-%02d %02d:%02d:%02d] NATIVE level=FATAL "
-                     "cat=PX5_System process_crashed signal=%s(%d) dump=%s\n",
-                     tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
-                     tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
-                     SignalName(sig), sig, path);
-#endif
-            write(dfd, diag, strlen(diag));
-            fsync(dfd);
-            close(dfd);
-        }
+    if (w.latestFd >= 0 && w.latestFd != STDERR_FILENO) {
+        fsync(w.latestFd);
+        close(w.latestFd);
     }
-
-    fsync(fd);
-    if (fd >= 0 && fd != STDERR_FILENO) close(fd);
-    if (latestFd >= 0 && latestFd != STDERR_FILENO) {
-        fsync(latestFd);
-        close(latestFd);
+    if (w.mainFd >= 0) {
+        fsync(w.mainFd);
+        close(w.mainFd);
     }
 }
 
@@ -395,9 +505,9 @@ void CrashHandler::Install(const std::string& logsDir) {
         }
     }
     PX5_LOGI(LogCategory::CORE,
-             "CrashHandler installed: reports -> %s/px5_crash_<timestamp>.log"
-             " (+ px5_crash_latest.log)",
-             logsDir.c_str());
+             "CrashHandler installed: full report -> px5_crash_latest.log "
+             "AND appended into the unified px5_main.log (module-resolved "
+             "backtrace since v1.16)");
 }
 
 const std::string& CrashHandler::LogsDir() { return g_logsDir; }

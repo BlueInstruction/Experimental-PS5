@@ -31,6 +31,11 @@ bool Initialize();                    // Config -> features -> context -> core
 void Shutdown();
 bool IsInitialized();
 
+// v1.16: rebuild the engine from scratch inside a fork-isolated probe
+// child (Shutdown + Initialize). Removes the fork-inherited multithreaded
+// state that killed both v1.15 execution children at one deterministic PC.
+void ResetForChild();
+
 // Execute guest code that is ALREADY mapped inside the PX5 memory window.
 // Both pointers are HOST-side values bridged through MemoryManager.
 ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop);

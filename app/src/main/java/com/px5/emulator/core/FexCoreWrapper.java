@@ -217,6 +217,15 @@ public class FexCoreWrapper {
     public native void    nativeClearDriverSlots();
     public native String  nativeGetDriverManagerSummary();
 
+    /**
+     * v1.16 eager driver verification: dlopens the active slot's driver
+     * (no Vulkan instance, no GPU context) and re-runs the maps proof, so
+     * the manager summary answers driverVerified=yes/NO immediately after
+     * import or selection instead of staying "not-run". Returns the fresh
+     * manager summary string.
+     */
+    public native String  nativeVerifyDriverSlot(int slotIndex);
+
     /** Shared PadButtons bit definitions (mirrors cpp input/controller.h). */
     public static final int PAD_CROSS      = 1 << 0;
     public static final int PAD_CIRCLE     = 1 << 1;

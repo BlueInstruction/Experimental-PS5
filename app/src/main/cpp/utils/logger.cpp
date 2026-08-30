@@ -270,6 +270,13 @@ std::string Logger::GetCurrentLogFilePath() noexcept {
     return s.log_path;
 }
 
+// Lock-free read for the signal handler: the path is written once at
+// Initialize before any thread that could crash exists (see header note).
+const char* Logger::PeekLogFilePathUnsafe() noexcept {
+    auto& s = State();
+    return s.log_path.empty() ? "" : s.log_path.c_str();
+}
+
 // ============================================================================
 // Internal helpers
 // ============================================================================

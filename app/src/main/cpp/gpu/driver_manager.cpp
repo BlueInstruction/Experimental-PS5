@@ -260,6 +260,12 @@ void GpuDriverManager::ClearSlots() {
 
 void GpuDriverManager::SetActiveMode(uint32_t mode) {
     if (mode > m_slots.size()) mode = static_cast<uint32_t>(m_slots.size());
+    if (m_active != mode) {
+        // A verdict computed for the previous slot says nothing about the
+        // new one — recompute on demand (eager verify or real init).
+        m_verifyState = 0;
+        m_verifyDetail.clear();
+    }
     m_active = mode;
     PX5_LOGI(LogCategory::GPU, "Driver mode set: %u (%s)", mode,
              mode == 0 ? "system ICD" : m_slots[mode - 1].label.c_str());
@@ -481,6 +487,65 @@ bool GpuDriverManager::VerifyActiveDriverMapped() {
                  slot.label.c_str(), slot.soPath.c_str());
     }
     return found;
+#endif
+}
+
+bool GpuDriverManager::PreloadActiveDriverForVerification() {
+    // v1.16 — eager verification without a Vulkan instance.
+    // The hook wires the ICD at the loader's first vkCreateInstance, but on
+    // API >= 29 the driver file itself is dlopen-able from the app's own
+    // private storage. Preloading it maps the EXACT library the instance
+    // will bind, so the maps check becomes meaningful before any render
+    // work — and the driver manager stops reporting "not-run" for slots
+    // that were imported but never exercised yet. Loading a driver library
+    // without creating an instance starts no GPU context (safe in-process).
+    if (m_active == 0) {
+        m_verifyState = 1;
+        m_verifyDetail = "system ICD — nothing to verify";
+        return true;
+    }
+#ifndef PX5_HAVE_ADRENOTOOLS
+    m_verifyState = 3;
+    m_verifyDetail = "no adrenotools in build";
+    return false;
+#else
+    if (m_active > m_slots.size()) {
+        m_verifyState = 3;
+        m_verifyDetail = "active slot out of range";
+        return false;
+    }
+    const auto& slot = m_slots[m_active - 1];
+    const std::string soname =
+        slot.soname.empty() ? std::string(kCustomDriverSoname) : slot.soname;
+
+    std::vector<std::string> candidates;
+    candidates.push_back(slot.dir + "/" + soname);
+    if (!m_tmpLibDir.empty()) {
+        // API < 29 path: the hook's patched copy is what actually loads.
+        candidates.push_back(m_tmpLibDir + "/" + soname);
+    }
+
+    std::string firstErr;
+    for (const auto& cand : candidates) {
+        void* h = dlopen(cand.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (h) {
+            m_verifyDetail = "preloaded via dlopen: " + cand;
+            PX5_LOGI(LogCategory::GPU,
+                     "Driver preload for verification OK: %s", cand.c_str());
+            return true;
+        }
+        const char* e = dlerror();
+        if (firstErr.empty()) firstErr = e ? e : "unknown dlopen error";
+    }
+    // Unknown, not absent: a direct dlopen can fail for namespace reasons
+    // while the hooked load at vkCreateInstance still succeeds. Say so.
+    m_verifyState = 3;
+    m_verifyDetail = "preload dlopen failed (" + firstErr +
+                     "); final proof at first vkCreateInstance";
+    PX5_LOGW(LogCategory::GPU,
+             "Driver preload failed for '%s': %s",
+             slot.label.c_str(), firstErr.c_str());
+    return false;
 #endif
 }
 

@@ -69,6 +69,12 @@ public:
     // driver that did load. Result is computed once and cached.
     bool VerifyActiveDriverMapped();
 
+    // v1.16 — eager verification: dlopen the active slot's driver file
+    // directly (no instance needed, no GPU context started) so the maps
+    // check is meaningful the moment a driver is imported/selected instead
+    // of staying "not-run" until a render happens.
+    bool PreloadActiveDriverForVerification();
+
     std::string SummaryString() const;
 
 private:
