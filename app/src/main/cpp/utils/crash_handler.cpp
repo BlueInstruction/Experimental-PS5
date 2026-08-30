@@ -5,6 +5,7 @@
 #include <android/log.h>
 #include <csignal>
 #include <cerrno>
+#include <exception>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -335,6 +336,30 @@ void CrashHandler::Install(const std::string& logsDir) {
     static std::atomic<bool> armed{false};
     bool expected = false;
     if (!armed.compare_exchange_strong(expected, true)) return;
+
+    // v1.13: uncaught C++ exceptions land in std::terminate -> abort() ->
+    // SIGABRT. The register dump that follows is complete, but without
+    // the active exception's message a SIGABRT looks unmotivated — the
+    // 2026-08-30 device session captured exactly such a signal-6 dump and
+    // could only guess at the cause. Capture what() into the breadcrumb
+    // ring BEFORE abort() so the signal dump itself carries the reason.
+    // Normal (non-signal) context: normal library calls are fine here.
+    std::set_terminate([] {
+        std::string what = "(non-standard exception object)";
+        if (std::current_exception()) {
+            try {
+                std::rethrow_exception(std::current_exception());
+            } catch (const std::exception& e) {
+                what = e.what();
+            } catch (...) {
+            }
+        }
+        PX5_LOGE(LogCategory::CORE,
+                 "FATAL std::terminate — uncaught C++ exception: %s",
+                 what.c_str());
+        Breadcrumb::Set("terminate: uncaught exception: %s", what.c_str());
+        std::abort();  // SIGABRT -> the armed handler writes the full dump
+    });
 
     // SA_ONSTACK without sigaltstack is a lie: on a real stack overflow the
     // handler would fault again on the dead stack. Allocate an honest one.

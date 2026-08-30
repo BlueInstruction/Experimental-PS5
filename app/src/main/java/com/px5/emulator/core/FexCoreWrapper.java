@@ -53,6 +53,20 @@ public class FexCoreWrapper {
     public native String nativeLoadExecutableIsolated(String path);
 
     /**
+     * v1.13 execution containment: runs the FULL game pipeline — load
+     * (SELF extract / ELF parse / guest-window map) AND real guest
+     * execution at the image entry — inside a fork-isolated child with a
+     * hard timeout (timeoutMs; 0 waits forever). A fault then costs the
+     * probe child plus a VERIFIED register dump, and a hang costs the
+     * timeout budget — never the app process. Report contract:
+     * "EXEC EXIT n (…)", "EXEC RETURNED without clean exit (…)",
+     * "LOAD FAILED: <reason>", "execution probe: TIMEOUT after n ms (…)",
+     * or "execution probe: CRASHED in isolated child (signal N)" followed
+     * by the verified dump line. Headless by design: nothing renders.
+     */
+    public native String nativeRunExecutionProbe(String path, int timeoutMs);
+
+    /**
      * Fork-isolated JIT conformance (mov/add/hlt -> RAX=42).
      * Returns the REAL report string: "PASSED — ...", "FAILED — ...", or
      * "... CRASHED in isolated child (signal N)" when the JIT faulted. A

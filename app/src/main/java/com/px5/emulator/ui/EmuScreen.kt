@@ -421,8 +421,26 @@ fun EmuScreen(
                                                 result = ok.toString())
                                         fexCoreWrapper.nativeLogEvent("gameBoot",
                                                 "exec_load result=$ok target=${target.substringAfterLast('/')}")
-                                        if (ok) "LOADED: $target mapped into guest window"
-                                        else "LOAD FAILED: loader rejected $target (see logcat)"
+                                        if (ok) {
+                                            // v1.13 execution containment: the real
+                                            // guest execution runs in a fork-isolated
+                                            // probe child (headless, hard 8s timeout).
+                                            // A fault costs the child + a verified
+                                            // dump — the app survives and shows it.
+                                            val exec = fexCoreWrapper.nativeRunExecutionProbe(target, 8000)
+                                            com.px5.emulator.core.PX5EventLog.event("gameBoot",
+                                                    "exec_probe_run",
+                                                    "target=${target.substringAfterLast('/')}",
+                                                    result = exec.lineSequence().firstOrNull()?.take(120) ?: "?")
+                                            fexCoreWrapper.nativeLogEvent("gameBoot",
+                                                    "exec_probe_run ${exec.lineSequence().firstOrNull()?.take(160) ?: exec.take(160)}")
+                                            val prefix = if (exec.contains("CRASHED"))
+                                                "EXECUTION CONTAINED — app survived (dump on disk):\n"
+                                            else ""
+                                            "LOADED: $target mapped into guest window\n$prefix$exec"
+                                        } else {
+                                            "LOAD FAILED: loader rejected $target (see logcat)"
+                                        }
                                     } else {
                                         // Probe crashed or rejected the file:
                                         // surface the FULL report (it names the

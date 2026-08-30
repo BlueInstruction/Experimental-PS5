@@ -10,6 +10,8 @@
 #include <functional>
 #include <string>
 #include <unistd.h>
+#include <fcntl.h>
+#include <csignal>
 #include <sys/stat.h>
 #include <sys/wait.h>
 
@@ -184,7 +186,8 @@ std::string VerifyChildDump(time_t forkWall) {
 //     signal) back to the UI;
 //   * the child's own report line comes back through a pipe.
 std::string RunIsolated(const char* name,
-                        const std::function<std::string()>& work) {
+                        const std::function<std::string()>& work,
+                        int timeoutMs = 0) {
     std::fflush(nullptr);
     const time_t forkWall = time(nullptr);
 
@@ -217,18 +220,60 @@ std::string RunIsolated(const char* name,
         _exit(0);
     }
 
-    // Parent: drain the child report, then read the honest exit status.
+    // Parent: wait WITHOUT blocking forever. The pipe read end is made
+    // non-blocking and drained alongside a WNOHANG poll loop, so a guest
+    // that hangs (execution probe) cannot wedge the caller: past
+    // timeoutMs the child is SIGKILLed and the report says exactly that.
+    // (v1.13 — the load probe could rely on children that always
+    // terminate quickly; an EXECUTION probe cannot promise that.)
     close(fds[1]);
+    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
     std::string rep;
     char buf[512];
     ssize_t n;
-    while ((n = read(fds[0], buf, sizeof buf)) > 0) rep.append(buf, static_cast<size_t>(n));
+    int status = 0;
+    bool timedOut = false;
+    int waitedMs = 0;
+    for (;;) {
+        while ((n = read(fds[0], buf, sizeof buf)) > 0)
+            rep.append(buf, static_cast<size_t>(n));
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            close(fds[0]);
+            return std::string(name) + ": pipe read failed (errno=" +
+                   std::to_string(errno) + ")";
+        }
+        const pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w == pid) {
+            while ((n = read(fds[0], buf, sizeof buf)) > 0)
+                rep.append(buf, static_cast<size_t>(n));
+            break;
+        }
+        if (w < 0 && errno != EINTR) {
+            close(fds[0]);
+            return std::string(name) + ": waitpid failed (errno=" +
+                   std::to_string(errno) + ")";
+        }
+        if (timeoutMs > 0 && waitedMs >= timeoutMs) {
+            timedOut = true;
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);  // reap the killed child
+            while ((n = read(fds[0], buf, sizeof buf)) > 0)
+                rep.append(buf, static_cast<size_t>(n));
+            break;
+        }
+        usleep(20 * 1000);
+        waitedMs += 20;
+    }
     close(fds[0]);
 
-    int status = 0;
-    if (waitpid(pid, &status, 0) < 0) {
-        return std::string(name) + ": waitpid failed (errno=" +
-               std::to_string(errno) + ")";
+    if (timedOut) {
+        std::string out = std::string(name) + ": TIMEOUT after " +
+                          std::to_string(waitedMs) + " ms — the probe child "
+                          "was still running and was killed. NO CRASH: the "
+                          "guest simply did not exit within the budget.";
+        out += "\n" + VerifyChildDump(forkWall);
+        if (!rep.empty()) out += "\npartial report before kill: " + rep;
+        return out;
     }
     if (WIFSIGNALED(status)) {
         const int sig = WTERMSIG(status);
@@ -289,6 +334,74 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadExecutableIsolated(
                    (img.error.empty() ? std::string("(no detail — see engine log)")
                                       : img.error);
         });
+    return env->NewStringUTF(report.c_str());
+}
+
+// v1.13 execution containment: format one guest-run attempt honestly.
+namespace {
+std::string FormatExecResult(const PX5::FexCoreIntegration::ExecResult& res) {
+    if (!res.started) {
+        return std::string("EXEC FAILED: ") +
+               (res.error.empty() ? std::string("(no detail)") : res.error);
+    }
+    char line[512];
+    if (res.exitedCleanly) {
+        snprintf(line, sizeof(line),
+                 "EXEC EXIT %llu — guest ran %.1f ms and captured exit_group",
+                 (unsigned long long)res.exitCode, res.elapsedMs);
+    } else {
+        snprintf(line, sizeof(line),
+                 "EXEC RETURNED without clean exit — ran %.1f ms, "
+                 "guestTrap fired=%d signal=%u trapNo=%u guestRIP=0x%llx, "
+                 "captured output bytes=%zu",
+                 res.elapsedMs, res.guestTrap.fired ? 1 : 0,
+                 res.guestTrap.signal, res.guestTrap.trapNo,
+                 (unsigned long long)res.guestTrap.guestRip,
+                 res.output.size());
+    }
+    return line;
+}
+} // namespace
+
+// Runs the FULL game pipeline — load (SELF extract / ELF parse / map) AND
+// real guest execution at the image entry — in a fork-isolated child with
+// a hard timeout. This is the containment the self-tests have had since
+// v1.10, extended to EXECUTION (the 2026-08-30 session showed the
+// remaining gap: the app died on game boot with zero evidence). A fault
+// now costs the probe child + a verified register dump; a hang costs the
+// timeout budget and an honest "still running" report. The mapping the
+// child makes is discarded (fork copy-on-write); nothing here renders.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeRunExecutionProbe(
+        JNIEnv* env, jobject, jstring pathStr, jint timeoutMs) {
+    if (!pathStr) return env->NewStringUTF("execution probe: no path given");
+    const char* p = env->GetStringUTFChars(pathStr, nullptr);
+    const std::string path = p ? p : "";
+    if (p) env->ReleaseStringUTFChars(pathStr, p);
+    PX5::Breadcrumb::Set("jni: execution probe %s (%d ms budget)",
+                         path.c_str(), static_cast<int>(timeoutMs));
+
+    const std::string report = RunIsolated(
+        "execution probe",
+        [path]() -> std::string {
+            const bool isSelf = PathLooksLikeSelf(path);
+            auto& emu = PX5::Emulator::GetInstance();
+            if (!emu.LoadExecutable(path, isSelf)) {
+                const auto& err = emu.LoadedImage().error;
+                return std::string("LOAD FAILED: ") +
+                       (err.empty()
+                            ? std::string("(no detail — see engine log)")
+                            : err);
+            }
+            const auto& img = emu.LoadedImage();
+            PX5::Breadcrumb::Set("exec probe: load ok entry=0x%llx",
+                                 (unsigned long long)img.entryPoint);
+            const auto res = emu.ExecuteLoadedGuest();
+            PX5::Breadcrumb::Set("exec probe: exec done started=%d",
+                                 res.started ? 1 : 0);
+            return FormatExecResult(res);
+        },
+        static_cast<int>(timeoutMs));
     return env->NewStringUTF(report.c_str());
 }
 
