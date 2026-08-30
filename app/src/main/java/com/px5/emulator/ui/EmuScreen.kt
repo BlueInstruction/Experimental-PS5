@@ -470,7 +470,7 @@ fun EmuScreen(
                     )
                 }
                 val gpuProofOk = gpuProof == null ||
-                    (gpuProof?.lineSequence()?.firstOrNull() ?: "").contains("PASS |")
+                    gpuProof.orEmpty().contains("PASS |")
                 if (!isStubAbi && !gpuProofOk && gpuProof?.startsWith("SKIP") != true) {
                     Text(
                         text = "MILESTONE: GPU proof not passing — CPU/GPU work " +

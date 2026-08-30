@@ -188,7 +188,7 @@ std::string VerifyChildDump(time_t forkWall) {
 //     signal) back to the UI;
 //   * the child's own report line comes back through a pipe.
 //
-// v1.20 — streamed child trail. The work function emits "· step" lines
+// v1.22 — streamed child trail. The work function emits "# step" lines
 // straight into the pipe as it progresses (raw write(), no buffering).
 // When the child dies mid-run, the kernel has ALREADY copied every line
 // into the pipe buffer, so the parent still receives the exact step that
@@ -208,7 +208,13 @@ struct ChildTrail {
         va_end(ap);
         if (n < 0) return;
         if (n > static_cast<int>(sizeof(text)) - 1) n = sizeof(text) - 1;
-        ssize_t r = write(fd, "· ", 2);
+        // v1.22: ASCII prefix, byte-exact length. The v1.20 "· " prefix
+        // was UTF-8 (3 bytes) written with a 2-byte length — the missing
+        // space made the parent's split miss every trail line, and they
+        // leaked into the report body (seen on-device: the GPU-proof
+        // result began with "·self-contained proof enter"). That broke
+        // the LOAD OK / PASS prefix contracts. "# " is 2 ASCII bytes.
+        ssize_t r = write(fd, "# ", 2);
         r = write(fd, text, static_cast<size_t>(n));
         r = write(fd, "\n", 1);
         (void)r;
@@ -304,7 +310,7 @@ std::string RunIsolated(const char* name,
     }
     close(fds[0]);
 
-    // v1.20: split the pipe stream — "· " lines are the child's progress
+    // v1.22: split the pipe stream — "# " lines are the child's progress
     // trail, everything else is the report body. The body keeps the exact
     // string contract callers already match on (LOAD OK / EXEC EXIT / ...);
     // the trail is appended only in the free-form branches below.
@@ -316,7 +322,7 @@ std::string RunIsolated(const char* name,
             size_t nl = raw.find('\n', pos);
             if (nl == std::string::npos) nl = raw.size();
             const std::string ln = raw.substr(pos, nl - pos);
-            if (ln.rfind("· ", 0) == 0) trail += "  " + ln.substr(2) + "\n";
+            if (ln.rfind("# ", 0) == 0) trail += "  " + ln.substr(2) + "\n";
             else if (!ln.empty()) rep += ln + "\n";
             pos = nl + 1;
         }
