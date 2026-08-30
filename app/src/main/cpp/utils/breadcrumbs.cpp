@@ -45,6 +45,20 @@ void Set(const char* fmt, ...) {
     r.slots[idx][kSlotBytes - 1] = '\0';
 }
 
+void Last(char* out, size_t n) {
+    if (!out || n == 0) return;
+    out[0] = '\0';
+    Ring& r = RingInstance();
+    std::lock_guard<std::mutex> lk(r.mu);
+    const uint32_t prev = (r.next.load(std::memory_order_relaxed) + kSlots - 1) % kSlots;
+    const char* s = r.slots[prev];
+    const size_t len = strnlen(s, kSlotBytes);
+    if (len == 0) return;
+    const size_t copy = len < n - 1 ? len : n - 1;
+    memcpy(out, s, copy);
+    out[copy] = '\0';
+}
+
 long DumpToFd(int fd) {
     if (fd < 0) return 0;
     Ring& r = RingInstance();

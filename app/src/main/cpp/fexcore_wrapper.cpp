@@ -23,6 +23,7 @@
 #include "utils/diag_bridge.h"
 #include "utils/breadcrumbs.h"
 #include "utils/crash_handler.h"
+#include "utils/heartbeat.h"
 
 namespace fs = std::filesystem;
 
@@ -769,6 +770,11 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeInitRuntimeContext(
     if (!logsDir.empty()) {
         PX5::DiagBridge::Enable(logsDir + "/px5_diagnostic.log");
     }
+    // v1.14: SIGKILL-class death attribution. lmkd / ANR-watchdog kills
+    // cannot run ANY in-process handler (the crash handler is structurally
+    // blind to that class) — so the heartbeat keeps the last live breadcrumb
+    // on disk at 1 Hz at all times, and a silent death still names its stage.
+    PX5::Heartbeat::Start(logsDir);
     // Build identity in the NATIVE stream too. The 2026-08-29 paste proved
     // that users may paste the engine log (px5_main.log / native bridged
     // lines) while the Kotlin identity line only ever reached the app-log

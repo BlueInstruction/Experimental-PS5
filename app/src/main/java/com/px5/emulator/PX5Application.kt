@@ -46,6 +46,53 @@ class PX5Application : Application() {
         // throws, we capture it.
         installCrashHandler()
 
+        // v1.14 post-mortem: a SIGKILL-class death (lmkd / ANR watchdog /
+        // system force-stop) cannot run ANY in-process handler, so it
+        // leaves NO px5_crash_*.log — exactly the "app dies on game boot
+        // with zero logs" report. The OS still records the death in the
+        // logcat buffer, and an app may read its OWN buffer on the next
+        // launch. Capture the death markers into a file the Crashes list
+        // already surfaces (px5_crash_*_postmortem.log).
+        Thread {
+            try {
+                val dir = getLogDirectory(this)
+                dir.mkdirs()
+                val proc = Runtime.getRuntime()
+                    .exec(arrayOf("logcat", "-d", "-t", "2000"))
+                val out = proc.inputStream.bufferedReader().readText()
+                proc.waitFor()
+                val patterns = listOf(
+                    "Fatal signal", "FATAL EXCEPTION", "has died",
+                    "ANR in com.px5.emulator", "Force finishing",
+                    "lowmemorykiller", "Low Memory Killer", "tombstoned")
+                val hits = out.lineSequence().filter { line ->
+                    patterns.any { line.contains(it, ignoreCase = true) } ||
+                        line.contains("com.px5.emulator")
+                }.toList()
+                if (hits.isNotEmpty()) {
+                    val ts = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US)
+                        .format(Date())
+                    val f = File(dir, "px5_crash_${ts}_postmortem.log")
+                    f.writeText(buildString {
+                        appendLine("==== PX5 POST-MORTEM: previous session death markers ====")
+                        appendLine("captured: $ts — source: logcat -d (own-UID entries only)")
+                        appendLine("A SIGKILL-class kill cannot run any in-process handler;")
+                        appendLine("these lines are the OS's own records of what happened.")
+                        appendLine("Pair with px5_heartbeat.log (1 Hz last live breadcrumb).")
+                        appendLine()
+                        hits.forEach { appendLine(it) }
+                    })
+                    com.px5.emulator.core.PX5EventLog.event("diag", "postmortem",
+                        "markers=${hits.size} file=${f.name}")
+                } else {
+                    com.px5.emulator.core.PX5EventLog.event("diag", "postmortem",
+                        "markers=0 (no death records in the logcat buffer)")
+                }
+            } catch (t: Throwable) {
+                Log.w("PX5", "post-mortem capture failed: ${t.message}")
+            }
+        }.start()
+
         Log.i(TAG, "PX5Application.onCreate — crash handler installed")
     }
 

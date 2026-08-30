@@ -19,6 +19,7 @@
 #define PX5_UTILS_BREADCRUMBS_H
 
 #include <cstdarg>
+#include <cstddef>
 
 namespace PX5::Breadcrumb {
 
@@ -29,6 +30,11 @@ void Set(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 // Async-signal-safe drain into `fd` (one line per slot, oldest first).
 // Returns the number of bytes written.
 long DumpToFd(int fd);
+
+// Copies the most recent crumb (or an empty string if none yet) into `out`.
+// Normal-context only (takes the ring mutex) — used by the heartbeat
+// thread so a silent process death still names its last live stage.
+void Last(char* out, size_t n);
 
 } // namespace PX5::Breadcrumb
 

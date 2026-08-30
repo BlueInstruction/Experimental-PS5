@@ -66,6 +66,7 @@ if(ANDROID_ABI STREQUAL "x86_64")
             loader/self_fixtures.cpp
             utils/breadcrumbs.cpp
             utils/crash_handler.cpp
+            utils/heartbeat.cpp
             utils/logger.cpp
             utils/diag_bridge.cpp)
     # The stub target ships no MemoryManager backend; gnm_submit's default
@@ -179,6 +180,7 @@ add_library(
         utils/logger.cpp
         utils/breadcrumbs.cpp
         utils/crash_handler.cpp
+        utils/heartbeat.cpp
         utils/diag_bridge.cpp
         utils/linker_ns_bypass.cpp
         media/media_codec_hle.cpp)
