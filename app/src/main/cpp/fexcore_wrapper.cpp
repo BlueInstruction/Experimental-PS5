@@ -218,6 +218,9 @@ struct ChildTrail {
 std::string RunIsolated(const char* name,
                         const std::function<std::string(ChildTrail&)>& work,
                         int timeoutMs = 0) {
+    // v1.21: arm THIS thread's alternate signal stack — the probe runs on
+    // a Kotlin/DefaultDispatch worker that has no altstack of its own.
+    PX5::CrashHandler::ArmThreadAltStack();
     std::fflush(nullptr);
     const time_t forkWall = time(nullptr);
 
@@ -235,6 +238,9 @@ std::string RunIsolated(const char* name,
     }
     if (pid == 0) {
         // Child: only this test runs here. No JNI, no shared state writes.
+        // sigaltstack is per-thread and NOT inherited across fork — arm the
+        // child's main thread before any engine work.
+        PX5::CrashHandler::ArmThreadAltStack();
         close(fds[0]);
         ChildTrail trail;
         trail.fd = fds[1];
@@ -517,6 +523,10 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunCpuConformanceTest(
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunCpuConformanceInProcess(
         JNIEnv* env, jobject) {
+    // v1.21: this thread may end up executing the dispatcher on the GUEST
+    // stack — the 256KB altstack reserve is what lets the crash report
+    // survive long enough to write the pc= line.
+    PX5::CrashHandler::ArmThreadAltStack();
     PX5::Breadcrumb::Set("jni: CpuConformance IN-PROCESS (no fork)");
     const bool ok = PX5::FexCoreIntegration::RunConformanceTest();
     return env->NewStringUTF(ok

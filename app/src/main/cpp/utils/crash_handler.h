@@ -47,6 +47,15 @@ public:
     // Runs in signal context: async-signal-safe work only.
     using FaultIntercept = bool (*)(int sig, void* siginfo, void* ucontext);
     static void SetFaultIntercept(FaultIntercept fn);
+
+    // v1.21 — give the CALLING thread its own 256KB alternate signal stack.
+    // sigaltstack is per-thread; Install() only covers the main thread, so
+    // engine probes running on Kotlin/DefaultDispatch workers fault with no
+    // reserve — and when the fault fires while the thread is on the GUEST
+    // stack, SA_ONSTACK has nothing healthy to switch to and the report
+    // dies mid-write. Arm at the entry of every engine/probe path; cheap
+    // (one pthread_getspecific check) after the first call per thread.
+    static void ArmThreadAltStack();
 };
 
 } // namespace PX5

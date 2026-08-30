@@ -12,6 +12,7 @@
 #include <atomic>
 #include <fcntl.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <unwind.h>
 #include <sys/uio.h>
 #include <sys/mman.h>
@@ -93,6 +94,18 @@ struct MapEntry { uintptr_t start; uintptr_t end; uintptr_t pgoff; bool anon; ch
 constexpr int kMaxMapEntries = 64;
 struct MapTable { MapEntry e[kMaxMapEntries]; int n = 0; };
 
+// v1.21 — the report's bulky buffers live in BSS, not on the handler's
+// stack. The 2026-08-31 v1.20 session showed ALL THREE crash reports
+// stopping after the signal line: the fault fires while the thread runs
+// on the GUEST stack (one 4KB page inside the PROT_NONE-reserved window),
+// the handler inherits that stack, and its ~28KB of locals blow through
+// the page -> a second SIGSEGV -> SIGSEGV is blocked inside its own
+// handler -> instant silent death before the pc= line ever reached disk.
+// The handler is serialized by g_inHandler, so single static instances
+// are safe; every section fsyncs before the next bulky step.
+static MapTable g_reportMaps;
+static char g_mapBuf[4096];
+
 bool ParseHex(const char*& p, uintptr_t& out) {
     while (*p == ' ') ++p;
     uintptr_t v = 0;
@@ -156,11 +169,12 @@ void ParseMapLine(char* line, MapTable& t) {
 void BuildMapTable(MapTable& t) {
     int fd = open("/proc/self/maps", O_RDONLY);
     if (fd < 0) return;
-    char buf[16384];
+    char* buf = g_mapBuf;   // v1.21: static — see the BSS rationale above
+    constexpr size_t kBufSize = sizeof(g_mapBuf);
     size_t len = 0;
     for (;;) {
-        if (len >= sizeof(buf) - 1) break;
-        const ssize_t r = read(fd, buf + len, sizeof(buf) - 1 - len);
+        if (len >= kBufSize - 1) break;
+        const ssize_t r = read(fd, buf + len, kBufSize - 1 - len);
         if (r <= 0) break;
         len += static_cast<size_t>(r);
         buf[len] = '\0';
@@ -271,10 +285,32 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {   // NOLINT(bugpro
              stamp);
     append(line);
 
-    // ---- section 1: the PC line. Nothing bulkier runs before this. -----
-    MapTable maps;
-    BuildMapTable(maps);
+    // ---- section 0: the RAW pc line. Zero allocations, zero tables, a
+    // few hundred bytes of stack — this line reaches disk even if every
+    // later section dies. Module resolution happens in section 1.
     void* pcAddr = FaultingPc(uctx);
+    if (uctx && pcAddr) {
+#if defined(__aarch64__)
+        auto* uc0 = static_cast<ucontext_t*>(uctx);
+        const auto& mc0 = uc0->uc_mcontext;
+        snprintf(line, sizeof(line),
+                 "raw_pc=0x%llx raw_lr=0x%llx raw_sp=0x%llx\n",
+                 (unsigned long long)mc0.pc,
+                 (unsigned long long)mc0.regs[30],
+                 (unsigned long long)mc0.sp);
+        append(line);
+#else
+        snprintf(line, sizeof(line), "raw_pc=0x%lx\n",
+                 static_cast<unsigned long>(reinterpret_cast<uintptr_t>(pcAddr)));
+        append(line);
+#endif
+        sync();
+    }
+
+    // ---- section 1: the PC line. Nothing bulkier runs before this. -----
+    MapTable& maps = g_reportMaps;   // v1.21: static storage, see BSS note
+    maps.n = 0;
+    BuildMapTable(maps);
     if (uctx && pcAddr) {
 #if defined(__aarch64__)
         auto* uc = static_cast<ucontext_t*>(uctx);
@@ -609,7 +645,13 @@ void CrashHandler::Install(const std::string& logsDir) {
 
     struct sigaction sa{};
     sa.sa_sigaction = Handler;
-    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    // v1.21: SA_NODEFER — a second fault inside the handler used to be an
+    // UNCATCHABLE instant death (SIGSEGV stays blocked during its own
+    // handler), which is exactly how the 2026-08-31 reports died silently
+    // after the signal line. With NODEFER the nested fault re-enters
+    // Handler, the g_inHandler guard writes the PARTIAL-REPORT marker,
+    // and the process dies with the true signal — evidence preserved.
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
     sigemptyset(&sa.sa_mask);
 
     const int signals[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP };
@@ -629,6 +671,44 @@ const std::string& CrashHandler::LogsDir() { return g_logsDir; }
 
 void CrashHandler::SetFaultIntercept(FaultIntercept fn) {
     g_faultIntercept = fn;
+}
+
+// v1.21 — per-thread alternate-stack arming for engine threads (see the
+// class-header contract). One 256KB reserve per thread, freed at thread
+// exit through the pthread key destructor.
+namespace {
+constexpr size_t kThreadAltStackSize = 256 * 1024;
+
+void FreeAltStack(void* p) {
+    if (p) munmap(p, kThreadAltStackSize);
+}
+
+pthread_key_t* ArmKey() {
+    static pthread_key_t kKey = [] {
+        pthread_key_t key;
+        pthread_key_create(&key, FreeAltStack);
+        return key;
+    }();
+    return &kKey;
+}
+} // namespace
+
+void CrashHandler::ArmThreadAltStack() {
+    pthread_key_t* key = ArmKey();
+    if (pthread_getspecific(*key) != nullptr) return;   // already armed
+    void* mem = mmap(nullptr, kThreadAltStackSize,
+                     PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem == MAP_FAILED) return;
+    stack_t ss{};
+    ss.ss_sp = mem;
+    ss.ss_size = kThreadAltStackSize;
+    ss.ss_flags = 0;
+    if (sigaltstack(&ss, nullptr) != 0) {
+        munmap(mem, kThreadAltStackSize);
+        return;
+    }
+    pthread_setspecific(*key, mem);
 }
 
 } // namespace PX5
