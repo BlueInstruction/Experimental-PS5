@@ -494,9 +494,16 @@ fun EmuScreen(
                                 val target = run {
                                     val f = java.io.File(path)
                                     if (f.isDirectory) {
-                                        f.listFiles()?.firstOrNull {
-                                            it.isFile && it.name.equals("eboot.bin", true)
-                                        }?.absolutePath ?: ""
+                                        // v1.19: dump tools land the executable below
+                                        // the game root (decrypted/eboot.bin). The
+                                        // direct-children-only scan is what produced
+                                        // the empty target= / LOAD FAILED in the
+                                        // 2026-08-30 v1.18 session.
+                                        com.px5.emulator.EbootLocator.find(f)?.also {
+                                            com.px5.emulator.core.PX5EventLog.event("gameBoot",
+                                                    "exec_target",
+                                                    "rel=${it.relPath} depth=${it.depth} dirs=${it.dirsVisited}")
+                                        }?.file?.absolutePath ?: ""
                                     } else path
                                 }
                                 com.px5.emulator.core.PX5EventLog.event("gameBoot",
@@ -505,8 +512,12 @@ fun EmuScreen(
                                         "exec_load_started target=$target")
                                 loadResult = if (target.isBlank()) {
                                     com.px5.emulator.core.PX5EventLog.event("gameBoot",
-                                            "exec_load_failed", "reason=no eboot.bin in folder")
-                                    "LOAD FAILED: no eboot.bin in folder"
+                                            "exec_load_failed",
+                                            "reason=no eboot.bin in folder (tree searched to depth " +
+                                            "${com.px5.emulator.EbootLocator.MAX_DEPTH})")
+                                    "LOAD FAILED: no eboot.bin in folder " +
+                                            "(folder tree searched to depth " +
+                                            "${com.px5.emulator.EbootLocator.MAX_DEPTH})"
                                 } else {
                                     try {
                                         val probe = fexCoreWrapper.nativeLoadExecutableIsolated(target)
@@ -671,8 +682,13 @@ private object EmuScreenBoot {
 // old probe then printed "eboot=ABSENT" for a folder that CONTAINS
 // eboot.bin. The probe is tiered:
 //   1. Direct java.io listing (definitive when storage is readable).
-//   2. SAF listing through persisted tree permissions.
-//   3. "unknown(no-list-permission)" — we never fabricate ABSENT.
+//   2. Bounded recursion through the folder tree — v1.19: dump tools land
+//      eboot.bin below the game root (decrypted/eboot.bin), and the
+//      2026-08-30 v1.18 session showed an honest direct-children ABSENT
+//      while a loadable dump sat one level down. ABSENT is claimed only
+//      after the tree search misses.
+//   3. SAF listing through persisted tree permissions.
+//   4. "unknown(no-list-permission)" — we never fabricate ABSENT.
 // ---------------------------------------------------------------------------
 private fun probeEbootStatus(path: String, context: Context): String = try {
     val bootDir = java.io.File(path)
@@ -685,7 +701,14 @@ private fun probeEbootStatus(path: String, context: Context): String = try {
         }
         when {
             direct != null -> "present(${direct.length()}B)"
-            listed != null -> "ABSENT"   // listing worked; genuinely absent
+            listed != null -> {
+                // Listing worked but no direct hit — search the bounded
+                // tree before any ABSENT is claimed, and NAME where the
+                // executable sits when it is found below the root.
+                val nested = com.px5.emulator.EbootLocator.find(bootDir)
+                if (nested != null) "present(${nested.file.length()}B,${nested.relPath})"
+                else "ABSENT (folder tree searched, no eboot.bin)"
+            }
             else -> probeEbootViaSaf(path, context)
                     ?: "unknown(no-list-permission)"
         }

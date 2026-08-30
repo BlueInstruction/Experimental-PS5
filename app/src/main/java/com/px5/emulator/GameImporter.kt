@@ -154,7 +154,12 @@ object GameImporter {
         return report
     }
 
-    private val GAME_DIR_ID = Regex("^(CUSA|PPSA)[0-9]{5}$", RegexOption.IGNORE_CASE)
+    // Title-dir names: CUSA/PPSA + 5 digits, optionally with the -app0
+    // suffix the standard dump tools append (device log 2026-08-30 shows
+    // PPSA02929-app0 on storage).
+    private val GAME_DIR_ID = Regex("^(CUSA|PPSA)[0-9]{5}(-app0)?$", RegexOption.IGNORE_CASE)
+
+    private data class NestedEboot(val child: SafChild, val rel: String)
 
     private suspend fun scanSafTree(
         context: Context,
@@ -172,26 +177,51 @@ object GameImporter {
             importDumpFolder(context, dirUri, children, report, add)
             return
         }
-        // Anchor 2: CUSA/PPSA-named subdirectories are game roots.
+        // Anchor 2: CUSA/PPSA-named subdirectories are game roots. The
+        // executable itself may sit below the title dir — decrypted/
+        // eboot.bin is the standard dump-tool layout (device log
+        // 2026-08-30) — so after the direct-children check a bounded
+        // SAF search runs before the title dir is skipped.
         val named = children.filter { it.isDir && GAME_DIR_ID.matches(it.name) }
         for (child in named) {
             val sub = DocumentsContract.buildDocumentUriUsingTree(
                 dirUri, DocumentsContract.getDocumentId(child.uri)
             )
             val subChildren = listChildren(context, sub)
-            if (subChildren.any { !it.isDir && it.name.equals("eboot.bin", true) }) {
-                importDumpFolder(context, sub, subChildren, report, add)
+            val direct = subChildren.firstOrNull {
+                !it.isDir && it.name.equals("eboot.bin", true)
+            }
+            val nested = direct?.let { NestedEboot(it, it.name) }
+                    ?: findNestedEbootSaf(context, sub, subChildren)
+            if (nested != null) {
+                importDumpFolder(context, sub, subChildren, report, add,
+                        ebootOverride = nested.child, ebootRel = nested.rel)
             }
         }
         if (named.isNotEmpty()) return
 
         // Otherwise recurse (bounded) looking for deeper dumps; pick up
-        // loose .pkg/.iso files along the way.
+        // loose .pkg/.iso files along the way. A folder holding sce_sys/
+        // is treated as a dump root even when its name is not
+        // CUSA/PPSA-named — the executable may still sit one level down.
         for (child in children) {
             if (child.isDir) {
                 val sub = DocumentsContract.buildDocumentUriUsingTree(
                     dirUri, DocumentsContract.getDocumentId(child.uri)
                 )
+                val subChildren = listChildren(context, sub)
+                if (subChildren.any { it.isDir && it.name.equals("sce_sys", true) }) {
+                    val direct = subChildren.firstOrNull {
+                        !it.isDir && it.name.equals("eboot.bin", true)
+                    }
+                    val nested = direct?.let { NestedEboot(it, it.name) }
+                            ?: findNestedEbootSaf(context, sub, subChildren)
+                    if (nested != null) {
+                        importDumpFolder(context, sub, subChildren, report, add,
+                                ebootOverride = nested.child, ebootRel = nested.rel)
+                        continue
+                    }
+                }
                 scanSafTree(context, sub, depth + 1, report, add)
             } else if (child.name.endsWith(".pkg", true) || child.name.endsWith(".iso", true)) {
                 importLooseDocument(context, child, report, add)
@@ -199,12 +229,47 @@ object GameImporter {
         }
     }
 
+    /**
+     * Bounded SAF search for eboot.bin below a title dir (2 levels, max
+     * 24 dirs). A dir named decrypted/ is tried first at each level — the
+     * standard dump-tool layout. Returns the executable document plus its
+     * path relative to the title dir, or null when the tree has none.
+     */
+    private fun findNestedEbootSaf(
+        context: Context,
+        titleDirUri: Uri,
+        children: List<SafChild>
+    ): NestedEboot? {
+        var level = children.filter { it.isDir }
+                .sortedBy { it.name.lowercase() }
+                .sortedByDescending { it.name.equals("decrypted", true) }
+        var visited = 0
+        repeat(2) { depth ->
+            val next = ArrayList<SafChild>()
+            for (d in level) {
+                if (visited++ >= 24) return null
+                val sub = DocumentsContract.buildDocumentUriUsingTree(
+                    titleDirUri, DocumentsContract.getDocumentId(d.uri)
+                )
+                val kids = listChildren(context, sub)
+                kids.firstOrNull { !it.isDir && it.name.equals("eboot.bin", true) }
+                        ?.let { return NestedEboot(it, "${d.name}/${it.name}") }
+                if (depth == 0) next += kids.filter { it.isDir }
+            }
+            level = next.sortedBy { it.name.lowercase() }
+                    .sortedByDescending { it.name.equals("decrypted", true) }
+        }
+        return null
+    }
+
     private suspend fun importDumpFolder(
         context: Context,
         dirUri: Uri,
         children: List<SafChild>,
         report: ImportReport,
-        add: suspend (GameEntity) -> Unit
+        add: suspend (GameEntity) -> Unit,
+        ebootOverride: SafChild? = null,
+        ebootRel: String = ""
     ) {
         val docId = DocumentsContract.getDocumentId(dirUri)
         val folderName = docId.substringAfterLast(':').substringAfterLast('/')
@@ -228,9 +293,10 @@ object GameImporter {
                 coverCandidate(context, sceSysChildren, "pic1.png")
             )
         }
-        val eboot = children.firstOrNull { !it.isDir && it.name.equals("eboot.bin", true) }
+        val eboot = ebootOverride
+                ?: children.firstOrNull { !it.isDir && it.name.equals("eboot.bin", true) }
         if (eboot == null) {
-            report.skipped += "$folderName — no eboot.bin"
+            report.skipped += "$folderName — no eboot.bin (folder tree searched)"
             return
         }
 
@@ -250,7 +316,9 @@ object GameImporter {
                 version = meta.version,
                 sizeBytes = size,
                 coverPath = cover,
-                status = if (direct != null) "Ready" else "Ready (SAF location)",
+                status = (if (direct != null) "Ready" else "Ready (SAF location)") +
+                        (if (ebootRel.isNotBlank() && ebootRel != "eboot.bin")
+                            " — eboot: $ebootRel" else ""),
                 installedAtMillis = System.currentTimeMillis()
             )
         )
@@ -655,7 +723,18 @@ object GameImporter {
         if (depth > 6) return
         val entries = root.listFiles() ?: return
         if (entries.any { it.isFile && it.name.equals("eboot.bin", true) }) {
-            importDumpFileFolder(context, root, report, add)
+            // v1.19: the dump root may sit above this dir — dump tools land
+            // decrypted/eboot.bin below the folder that holds sce_sys.
+            // Climb while the parent keeps the dump metadata so the stored
+            // library path and the param/icon lookups point at the real
+            // root; the boot screen re-locates the executable itself.
+            var gameRoot = root
+            var up = root.parentFile
+            while (up != null && depth > 0 && File(up, "sce_sys").isDirectory) {
+                gameRoot = up
+                up = up.parentFile
+            }
+            importDumpFileFolder(context, gameRoot, report, add)
             return
         }
         for (f in entries) {
