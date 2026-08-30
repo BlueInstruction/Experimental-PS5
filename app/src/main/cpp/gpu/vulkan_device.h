@@ -149,6 +149,11 @@ private:
     std::atomic<bool> m_rendering{false};
 
     mutable std::mutex m_gpuMutex;
+    // Vulkan requires EXTERNAL synchronization of each queue. The render
+    // thread AND the offscreen proof both submit to m_queue; without this
+    // lock they race driver-internal queue state (2026-08-30 device SIGSEGV
+    // si_addr=0x0 at EmuScreen entry — three identical deaths).
+    std::mutex       m_queueMutex;
     RenderStats        m_stats;
 };
 

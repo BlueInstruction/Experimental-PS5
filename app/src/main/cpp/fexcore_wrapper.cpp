@@ -548,8 +548,16 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGnmSelfTest(JNIEnv* env,
                                                                jobject) {
     PX5::Breadcrumb::Set("jni: GnmSelfTest enter");
-    std::string report;
-    PX5::Gnm::RunGnmSelfTest(&report);
+    // v1.15: fork-isolated like the engine self-tests. The GNM decoder is
+    // pure C++ (no Vulkan, no JNI in the child) — a fault now costs the
+    // test child plus a verified dump, never the app process.
+    const std::string report = RunIsolated(
+        "GNM self-test",
+        []() -> std::string {
+            std::string rep;
+            PX5::Gnm::RunGnmSelfTest(&rep);
+            return rep;
+        });
     return env->NewStringUTF(report.c_str());
 }
 
@@ -560,8 +568,15 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunLoaderSelfTest(JNIEnv* env,
                                                                   jobject) {
     PX5::Breadcrumb::Set("jni: LoaderSelfTest enter");
-    std::string report;
-    PX5::SelfExtract::RunSelfExtractSelfTest(&report);
+    // v1.15: fork-isolated (pure C++ extractor round-trips, no JNI in the
+    // child) — same containment contract as the other diagnostics.
+    const std::string report = RunIsolated(
+        "SELF loader self-test",
+        []() -> std::string {
+            std::string rep;
+            PX5::SelfExtract::RunSelfExtractSelfTest(&rep);
+            return rep;
+        });
     return env->NewStringUTF(report.c_str());
 }
 

@@ -354,7 +354,14 @@ bool VulkanGpuDevice::EnsureLogicalDeviceUnlocked() {
     }
     if (!BuildDeviceTable(m_device)) return false;
 
+    // vkGetDeviceQueue returns void — the only honest guard is the output
+    // handle. v1.15: was unchecked; a null queue would later reach
+    // QueueSubmit and fault inside the driver (si_addr=0x0).
     m_tbl.GetDeviceQueue(m_device, m_queueFamily, 0, &m_queue);
+    if (m_queue == VK_NULL_HANDLE) {
+        m_stats.SetError("GetDeviceQueue produced a null queue");
+        return false;
+    }
     m_stats.deviceReady.store(true);
     PX5_LOGI(LogCategory::GPU, "Logical device ready (qFamily=%u)",
              m_queueFamily);
@@ -450,11 +457,18 @@ bool VulkanGpuDevice::RunOffscreenProofLocked(std::string& err) {
         cai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         cai.commandBufferCount = 1;
         VkCommandBuffer cb = VK_NULL_HANDLE;
+        Breadcrumb::Set("gpu.proof: alloc_cmd_buffer");
         if (m_tbl.AllocateCommandBuffers(m_device, &cai, &cb)
                 != VK_SUCCESS) { err = "AllocateCommandBuffers failed"; break; }
 
         VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        m_tbl.CreateFence(m_device, &fci, nullptr, &fence);
+        Breadcrumb::Set("gpu.proof: create_fence");
+        // v1.15: was unchecked — a null fence passed to QueueSubmit faults
+        // inside the driver (si_addr=0x0). Named failure now.
+        if (m_tbl.CreateFence(m_device, &fci, nullptr, &fence)
+                != VK_SUCCESS || fence == VK_NULL_HANDLE) {
+            err = "CreateFence failed"; break;
+        }
 
         VkImageMemoryBarrier ib{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         ib.image            = img;
@@ -477,6 +491,7 @@ bool VulkanGpuDevice::RunOffscreenProofLocked(std::string& err) {
             VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 
         ok = true;
+        Breadcrumb::Set("gpu.proof: record");
         do {
             if (m_tbl.BeginCommandBuffer(cb, &bi) != VK_SUCCESS) {
                 err = "BeginCommandBuffer failed"; ok = false; break;
@@ -495,9 +510,17 @@ bool VulkanGpuDevice::RunOffscreenProofLocked(std::string& err) {
             VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
             si.commandBufferCount = 1;
             si.pCommandBuffers    = &cb;
-            if (m_tbl.QueueSubmit(m_queue, 1, &si, fence) != VK_SUCCESS) {
-                err = "QueueSubmit failed"; ok = false; break;
+            Breadcrumb::Set("gpu.proof: submit");
+            bool submitted = false;
+            {
+                // Queue external-sync contract: the render thread may be
+                // submitting on the same m_queue concurrently.
+                std::lock_guard<std::mutex> qlk(m_queueMutex);
+                submitted =
+                    m_tbl.QueueSubmit(m_queue, 1, &si, fence) == VK_SUCCESS;
             }
+            if (!submitted) { err = "QueueSubmit failed"; ok = false; break; }
+            Breadcrumb::Set("gpu.proof: fence_wait");
             if (m_tbl.WaitForFences(m_device, 1, &fence, VK_TRUE,
                                     3000000000ull) != VK_SUCCESS) {
                 err = "fence timeout (3 s)"; ok = false; break;
@@ -512,6 +535,7 @@ bool VulkanGpuDevice::RunOffscreenProofLocked(std::string& err) {
     if (mem != VK_NULL_HANDLE)
         m_tbl.FreeMemory(m_device, mem, nullptr);
     m_tbl.DestroyImage(m_device, img, nullptr);
+    Breadcrumb::Set("gpu.proof: done ok=%d", ok ? 1 : 0);
 
     if (ok) {
         err = "64x64 clear submitted + fenced OK";
@@ -781,7 +805,14 @@ bool VulkanGpuDevice::StartRenderLoop() {
             VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         pci.queueFamilyIndex = m_queueFamily;
         VkCommandPool pool = VK_NULL_HANDLE;
-        m_tbl.CreateCommandPool(m_device, &pci, nullptr, &pool);
+        // v1.15: render-loop resource creation results were ignored; a
+        // silent failure would later submit through garbage handles.
+        if (m_tbl.CreateCommandPool(m_device, &pci, nullptr, &pool)
+                    != VK_SUCCESS || pool == VK_NULL_HANDLE) {
+            m_stats.SetError("render: CreateCommandPool failed");
+            m_rendering.store(false);
+            return;
+        }
 
         VkCommandBufferAllocateInfo cai{
             VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -789,17 +820,34 @@ bool VulkanGpuDevice::StartRenderLoop() {
         cai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         cai.commandBufferCount = 1;
         VkCommandBuffer cb = VK_NULL_HANDLE;
-        m_tbl.AllocateCommandBuffers(m_device, &cai, &cb);
+        if (m_tbl.AllocateCommandBuffers(m_device, &cai, &cb)
+                    != VK_SUCCESS || cb == VK_NULL_HANDLE) {
+            m_stats.SetError("render: AllocateCommandBuffers failed");
+            m_rendering.store(false);
+            return;
+        }
 
         VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         VkSemaphore acquireSem = VK_NULL_HANDLE;
         VkSemaphore presentSem = VK_NULL_HANDLE;
-        m_tbl.CreateSemaphore(m_device, &sci, nullptr, &acquireSem);
-        m_tbl.CreateSemaphore(m_device, &sci, nullptr, &presentSem);
+        if (m_tbl.CreateSemaphore(m_device, &sci, nullptr, &acquireSem)
+                    != VK_SUCCESS ||
+            m_tbl.CreateSemaphore(m_device, &sci, nullptr, &presentSem)
+                    != VK_SUCCESS ||
+            acquireSem == VK_NULL_HANDLE || presentSem == VK_NULL_HANDLE) {
+            m_stats.SetError("render: CreateSemaphore failed");
+            m_rendering.store(false);
+            return;
+        }
 
         VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         VkFence inflight = VK_NULL_HANDLE;
-        m_tbl.CreateFence(m_device, &fci, nullptr, &inflight);
+        if (m_tbl.CreateFence(m_device, &fci, nullptr, &inflight)
+                    != VK_SUCCESS || inflight == VK_NULL_HANDLE) {
+            m_stats.SetError("render: CreateFence failed");
+            m_rendering.store(false);
+            return;
+        }
 
         uint64_t frameCounter = 0;
         int      failStreak   = 0;
@@ -932,19 +980,29 @@ bool VulkanGpuDevice::RecordAndSubmitFrame(uint32_t imageIndex,
     si.pCommandBuffers      = &cb;
     si.signalSemaphoreCount = 1;
     si.pSignalSemaphores    = &presentSem;
-    if (m_tbl.QueueSubmit(m_queue, 1, &si, inflight) != VK_SUCCESS)
-        return false;
+    VkResult submitResult = VK_RESULT_MAX_ENUM;
+    VkResult presentResult = VK_RESULT_MAX_ENUM;
+    {
+        // Queue external-sync contract (see m_queueMutex): the offscreen
+        // proof may submit on the same m_queue concurrently. The missing
+        // lock here is the 2026-08-30 three-times-identical SIGSEGV at
+        // EmuScreen entry.
+        std::lock_guard<std::mutex> qlk(m_queueMutex);
+        submitResult = m_tbl.QueueSubmit(m_queue, 1, &si, inflight);
+        if (submitResult != VK_SUCCESS) return false;
 
-    VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-    pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores    = &presentSem;
-    pi.swapchainCount     = 1;
-    pi.pSwapchains        = &m_swapchain;
-    pi.pImageIndices      = &imageIndex;
-    const VkResult pr = m_tbl.QueuePresent(m_queue, &pi);
-    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
+        VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+        pi.waitSemaphoreCount = 1;
+        pi.pWaitSemaphores    = &presentSem;
+        pi.swapchainCount     = 1;
+        pi.pSwapchains        = &m_swapchain;
+        pi.pImageIndices      = &imageIndex;
+        presentResult = m_tbl.QueuePresent(m_queue, &pi);
+    }
+    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR ||
+        presentResult == VK_SUBOPTIMAL_KHR) {
         m_stats.recreations.fetch_add(1);       // next acquire recreates
-    } else if (pr != VK_SUCCESS) {
+    } else if (presentResult != VK_SUCCESS) {
         return false;
     }
     return true;
