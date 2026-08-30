@@ -304,13 +304,42 @@ bool VulkanGpuDevice::BuildDeviceTable(VkDevice dev) {
     PX5_DEV_FN(QueueWaitIdle,          "vkQueueWaitIdle");
     PX5_DEV_FN(WaitForFences,          "vkWaitForFences");
     PX5_DEV_FN(ResetFences,            "vkResetFences");
-    PX5_DEV_FN(CreateSwapchain,        "vkCreateSwapchainKHR");
-    PX5_DEV_FN(DestroySwapchain,       "vkDestroySwapchainKHR");
-    PX5_DEV_FN(GetSwapchainImages,     "vkGetSwapchainImagesKHR");
-    PX5_DEV_FN(AcquireNextImage,       "vkAcquireNextImageKHR");
-    PX5_DEV_FN(QueuePresent,           "vkQueuePresentKHR");
 
 #undef PX5_DEV_FN
+
+    // ---- swapchain entry points: OPTIONAL by spec -----------------------
+    // vkGetDeviceProcAddr returns NULL for an extension function unless the
+    // extension was enabled AT DEVICE CREATION. Before v1.18 the device was
+    // created extension-less and these four lines HARD-FAILED here
+    // ("missing device fn vkCreateSwapchainKHR" — the exact line in the
+    // 2026-08-30 device video), killing rendering on every driver.
+    // EnsureLogicalDeviceUnlocked now enables VK_KHR_swapchain when the
+    // device reports it; this block records what actually resolved instead
+    // of failing the whole device, so an offscreen-only device stays usable
+    // with an honest flag, and CreateSwapchainLocked reports the truth.
+    {
+        auto resolve = [&](void** slot, const char* name) {
+            *slot = reinterpret_cast<void*>(vkGDPA(dev, name));
+        };
+        resolve(reinterpret_cast<void**>(&m_tbl.CreateSwapchain),    "vkCreateSwapchainKHR");
+        resolve(reinterpret_cast<void**>(&m_tbl.DestroySwapchain),   "vkDestroySwapchainKHR");
+        resolve(reinterpret_cast<void**>(&m_tbl.GetSwapchainImages), "vkGetSwapchainImagesKHR");
+        resolve(reinterpret_cast<void**>(&m_tbl.AcquireNextImage),   "vkAcquireNextImageKHR");
+        resolve(reinterpret_cast<void**>(&m_tbl.QueuePresent),       "vkQueuePresentKHR");
+
+        const bool all = m_tbl.CreateSwapchain && m_tbl.DestroySwapchain &&
+                         m_tbl.GetSwapchainImages && m_tbl.AcquireNextImage &&
+                         m_tbl.QueuePresent;
+        if (all) {
+            m_swapchainExtAvailable = true;
+        } else {
+            m_swapchainExtAvailable = false;
+            PX5_LOGW(LogCategory::GPU,
+                     "swapchain entry points unresolved on this device "
+                     "(VK_KHR_swapchain not enabled/reported) — the "
+                     "on-screen path will report it honestly");
+        }
+    }
     return true;
 }
 
@@ -340,9 +369,55 @@ bool VulkanGpuDevice::EnsureLogicalDeviceUnlocked() {
     qci.queueCount       = 1;
     qci.pQueuePriorities = &prio;
 
+    // ---- v1.18 ROOT CAUSE FIX (deterministic, driver-independent) -------
+    // The device was created with ZERO device extensions, so per the Vulkan
+    // spec vkGetDeviceProcAddr returned NULL for every swapchain entry
+    // point: BuildDeviceTable died on "missing device fn
+    // vkCreateSwapchainKHR" — the exact line in the 2026-08-30 device
+    // video — EnsureLogicalDevice failed, no surface attach, no swapchain,
+    // frames=0 forever, on ANY driver including the stock one. Extension
+    // trampolines are only wired for extensions enabled AT DEVICE CREATION.
+    // The on-screen path needs VK_KHR_swapchain; query the device and
+    // enable it when reported (every Android GPU exposes it), and say so
+    // loudly when it does not.
+    std::vector<const char*> devExts;
+    m_swapchainExtAvailable = false;
+    auto pfnDevExts = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+        dlsym(m_vulkanLib, "vkEnumerateDeviceExtensionProperties"));
+    if (pfnDevExts) {
+        uint32_t n = 0;
+        if (pfnDevExts(reinterpret_cast<VkPhysicalDevice>(m_physDev),
+                       nullptr, &n, nullptr) == VK_SUCCESS && n > 0) {
+            std::vector<VkExtensionProperties> exts(n);
+            if (pfnDevExts(reinterpret_cast<VkPhysicalDevice>(m_physDev),
+                           nullptr, &n, exts.data()) == VK_SUCCESS) {
+                bool haveSwap = false;
+                for (const auto& e : exts)
+                    if (std::strcmp(e.extensionName, "VK_KHR_swapchain") == 0)
+                        { haveSwap = true; break; }
+                if (haveSwap) {
+                    devExts.push_back("VK_KHR_swapchain");
+                    m_swapchainExtAvailable = true;   // confirmed by BuildDeviceTable below
+                }
+            }
+        }
+    }
+    if (m_swapchainExtAvailable) {
+        PX5_LOGI(LogCategory::GPU,
+                 "Logical device will enable VK_KHR_swapchain "
+                 "(v1.18 fix — the extension-less device could never render)");
+    } else {
+        PX5_LOGW(LogCategory::GPU,
+                 "VK_KHR_swapchain NOT reported by this physical device — "
+                 "on-screen rendering is impossible here; offscreen proofs "
+                 "still work");
+    }
+
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos    = &qci;
+    dci.enabledExtensionCount   = static_cast<uint32_t>(devExts.size());
+    dci.ppEnabledExtensionNames = devExts.empty() ? nullptr : devExts.data();
 
     auto vkCreateDev = reinterpret_cast<PFN_vkCreateDevice>(
         dlsym(m_vulkanLib, "vkCreateDevice"));
@@ -548,6 +623,271 @@ bool VulkanGpuDevice::RunOffscreenProofLocked(std::string& err) {
 }
 
 // ---------------------------------------------------------------------------
+// v1.18 — self-contained proof (fork-safe): fresh instance -> device ->
+// clear submit -> full teardown, ALL LOCAL. The fork-isolated GPU-proof
+// child must never submit on the singleton's queue: that queue and its
+// driver-internal state were created by the PARENT process, and a
+// forked child submitting on parent-created driver state is exactly the
+// hazard behind the 2026-08-30 device evidence ("CRASHED in isolated
+// child (signal 11)", si_addr=0x0 right after the gpu.proof:submit
+// breadcrumb). A fresh VkDevice in the child opens its OWN drm render
+// node fd — a clean kernel context that shares nothing with the parent.
+// Touches no VulkanGpuDevice member except the m_vulkanLib HANDLE READ
+// (a mapped-library pointer, safe across fork; dlopen would hand back
+// the identical address anyway).
+// ---------------------------------------------------------------------------
+bool VulkanGpuDevice::RunSelfContainedProof(std::string& detailOut) {
+    void* lib = m_vulkanLib ? m_vulkanLib
+                            : dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) {
+        detailOut = std::string("dlopen libvulkan.so failed: ") + dlerror();
+        return false;
+    }
+
+    auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+        dlsym(lib, "vkGetInstanceProcAddr"));
+    if (!gipa) { detailOut = "vkGetInstanceProcAddr missing"; return false; }
+
+    Breadcrumb::Set("gpu.proof: enter (self-contained)");
+
+    VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    appInfo.pApplicationName = "PX5-proof";
+    appInfo.apiVersion       = VK_API_VERSION_1_0;
+    VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    ici.pApplicationInfo = &appInfo;          // offscreen: no surface exts
+    VkInstance inst = VK_NULL_HANDLE;
+    auto pfnCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(
+        gipa(VK_NULL_HANDLE, "vkCreateInstance"));
+    if (!pfnCreateInstance ||
+        pfnCreateInstance(&ici, nullptr, &inst) != VK_SUCCESS || !inst) {
+        detailOut = "self-contained: vkCreateInstance failed";
+        return false;
+    }
+    Breadcrumb::Set("gpu.proof: instance ready");
+
+    auto pfnEnumDevs = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
+        gipa(inst, "vkEnumeratePhysicalDevices"));
+    auto pfnProps = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+        gipa(inst, "vkGetPhysicalDeviceProperties"));
+    auto pfnFams = reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
+        gipa(inst, "vkGetPhysicalDeviceQueueFamilyProperties"));
+    auto pfnMemProps = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+        gipa(inst, "vkGetPhysicalDeviceMemoryProperties"));
+    auto pfnCreateDevice = reinterpret_cast<PFN_vkCreateDevice>(
+        gipa(inst, "vkCreateDevice"));
+    if (!pfnEnumDevs || !pfnProps || !pfnFams || !pfnMemProps ||
+        !pfnCreateDevice) {
+        detailOut = "self-contained: instance-level fns missing";
+        return false;
+    }
+
+    uint32_t nd = 0;
+    if (pfnEnumDevs(inst, &nd, nullptr) != VK_SUCCESS || nd == 0) {
+        detailOut = "self-contained: no physical devices";
+        return false;
+    }
+    std::vector<VkPhysicalDevice> devs(nd);
+    pfnEnumDevs(inst, &nd, devs.data());
+    VkPhysicalDevice pd = devs[0];
+    VkPhysicalDeviceProperties props{};
+    pfnProps(pd, &props);
+    Breadcrumb::Set("gpu.proof: physical device ready");
+
+    uint32_t nf = 0;
+    pfnFams(pd, &nf, nullptr);
+    if (nf == 0) { detailOut = "self-contained: no queue families"; return false; }
+    std::vector<VkQueueFamilyProperties> fams(nf);
+    pfnFams(pd, &nf, fams.data());
+    uint32_t gfx = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < nf; ++i)
+        if (fams[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) { gfx = i; break; }
+    if (gfx == 0xFFFFFFFFu) {
+        detailOut = "self-contained: no graphics queue family";
+        return false;
+    }
+
+    // Fresh logical device — extension-less is CORRECT here: this proof is
+    // offscreen-only, and the v1.18 on-screen swapchain fix lives in
+    // EnsureLogicalDeviceUnlocked, not in the diagnostic stack.
+    const float prio = 1.0f;
+    VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+    qci.queueFamilyIndex = gfx;
+    qci.queueCount       = 1;
+    qci.pQueuePriorities = &prio;
+    VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    dci.queueCreateInfoCount = 1;
+    dci.pQueueCreateInfos    = &qci;
+    VkDevice dev = VK_NULL_HANDLE;
+    if (pfnCreateDevice(pd, &dci, nullptr, &dev) != VK_SUCCESS || !dev) {
+        detailOut = "self-contained: vkCreateDevice failed";
+        return false;
+    }
+    Breadcrumb::Set("gpu.proof: fresh device ready");
+
+    auto gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+        gipa(inst, "vkGetDeviceProcAddr"));
+#define PX5_P(fn, name) \
+    auto fn = reinterpret_cast<PFN_vk##fn>(gdpa ? gdpa(dev, name) : nullptr)
+    PX5_P(GetDeviceQueue,         "vkGetDeviceQueue");
+    PX5_P(CreateImage,            "vkCreateImage");
+    // (GetImageMemoryRequirements is resolved separately below — its
+    // shorthand name would break the PFN_vk##fn token paste.)
+    PX5_P(AllocateMemory,         "vkAllocateMemory");
+    PX5_P(BindImageMemory,        "vkBindImageMemory");
+    PX5_P(CreateCommandPool,      "vkCreateCommandPool");
+    PX5_P(AllocateCommandBuffers, "vkAllocateCommandBuffers");
+    PX5_P(BeginCommandBuffer,     "vkBeginCommandBuffer");
+    PX5_P(CmdPipelineBarrier,     "vkCmdPipelineBarrier");
+    PX5_P(CmdClearColorImage,     "vkCmdClearColorImage");
+    PX5_P(EndCommandBuffer,       "vkEndCommandBuffer");
+    PX5_P(QueueSubmit,            "vkQueueSubmit");
+    PX5_P(WaitForFences,          "vkWaitForFences");
+    PX5_P(CreateFence,            "vkCreateFence");
+    PX5_P(DestroyFence,           "vkDestroyFence");
+    PX5_P(DestroyCommandPool,     "vkDestroyCommandPool");
+    PX5_P(FreeMemory,             "vkFreeMemory");
+    PX5_P(DestroyImage,           "vkDestroyImage");
+    PX5_P(DestroyDevice,          "vkDestroyDevice");
+#undef PX5_P
+    auto GetImageMemReqs = reinterpret_cast<PFN_vkGetImageMemoryRequirements>(
+        gdpa ? gdpa(dev, "vkGetImageMemoryRequirements") : nullptr);
+
+    bool ok = false;
+    if (!GetDeviceQueue || !CreateImage || !GetImageMemReqs ||
+        !AllocateMemory || !BindImageMemory || !CreateCommandPool ||
+        !AllocateCommandBuffers || !BeginCommandBuffer ||
+        !CmdPipelineBarrier || !CmdClearColorImage || !EndCommandBuffer ||
+        !QueueSubmit || !WaitForFences || !CreateFence || !DestroyFence ||
+        !DestroyCommandPool || !FreeMemory || !DestroyImage ||
+        !DestroyDevice) {
+        detailOut = "self-contained: device-level fns missing";
+    } else {
+        VkQueue queue = VK_NULL_HANDLE;
+        GetDeviceQueue(dev, gfx, 0, &queue);
+        ok = queue != VK_NULL_HANDLE;
+        detailOut = ok ? "" : "self-contained: GetDeviceQueue null";
+
+        constexpr uint32_t W = 64, H = 64;
+        VkImageCreateInfo ici2{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        ici2.imageType     = VK_IMAGE_TYPE_2D;
+        ici2.format        = VK_FORMAT_R8G8B8A8_UNORM;
+        ici2.extent        = {W, H, 1};
+        ici2.mipLevels     = 1;
+        ici2.arrayLayers   = 1;
+        ici2.samples       = VK_SAMPLE_COUNT_1_BIT;
+        ici2.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        ici2.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        ici2.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkImage img = VK_NULL_HANDLE;
+        if (ok && CreateImage(dev, &ici2, nullptr, &img) != VK_SUCCESS) {
+            ok = false; detailOut = "self-contained: CreateImage failed";
+        }
+
+        VkDeviceMemory mem = VK_NULL_HANDLE;
+        VkCommandPool pool = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        if (ok) {
+            VkMemoryRequirements reqs{};
+            GetImageMemReqs(dev, img, &reqs);
+            VkPhysicalDeviceMemoryProperties mp{};
+            pfnMemProps(pd, &mp);
+            VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            mai.allocationSize  = reqs.size;
+            mai.memoryTypeIndex = SelectImageMemoryType(mp, reqs.memoryTypeBits);
+            if (AllocateMemory(dev, &mai, nullptr, &mem) != VK_SUCCESS ||
+                BindImageMemory(dev, img, mem, 0) != VK_SUCCESS) {
+                ok = false; detailOut = "self-contained: memory alloc/bind failed";
+            }
+        }
+        if (ok) {
+            VkCommandPoolCreateInfo pci{
+                VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+            pci.queueFamilyIndex = gfx;
+            if (CreateCommandPool(dev, &pci, nullptr, &pool) != VK_SUCCESS) {
+                ok = false; detailOut = "self-contained: CreateCommandPool failed";
+            }
+        }
+        if (ok) {
+            VkCommandBufferAllocateInfo cai{
+                VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            cai.commandPool        = pool;
+            cai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cai.commandBufferCount = 1;
+            VkCommandBuffer cb = VK_NULL_HANDLE;
+            VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            if (AllocateCommandBuffers(dev, &cai, &cb) != VK_SUCCESS ||
+                CreateFence(dev, &fci, nullptr, &fence) != VK_SUCCESS) {
+                ok = false; detailOut = "self-contained: cb/fence alloc failed";
+            }
+            if (ok) {
+                VkImageMemoryBarrier ib{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                ib.image            = img;
+                ib.dstAccessMask    = VK_ACCESS_TRANSFER_WRITE_BIT;
+                ib.oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED;
+                ib.newLayout        = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                ib.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                VkCommandBufferBeginInfo bi{
+                    VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                VkClearColorValue color{};
+                color.float32[0] = 0.08f; color.float32[1] = 0.72f;
+                color.float32[2] = 0.70f; color.float32[3] = 1.0f;
+                const VkImageSubresourceRange range{
+                    VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+                if (BeginCommandBuffer(cb, &bi) != VK_SUCCESS) {
+                    ok = false; detailOut = "self-contained: Begin failed";
+                } else {
+                    CmdPipelineBarrier(cb,
+                                       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                                       0, nullptr, 0, nullptr, 1, &ib);
+                    CmdClearColorImage(cb, img,
+                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                       &color, 1, &range);
+                    EndCommandBuffer(cb);
+                    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                    si.commandBufferCount = 1;
+                    si.pCommandBuffers    = &cb;
+                    // OUR OWN queue on OUR OWN drm context — the submit
+                    // this proof exists to validate. No shared state.
+                    if (QueueSubmit(queue, 1, &si, fence) != VK_SUCCESS) {
+                        ok = false; detailOut = "self-contained: QueueSubmit failed";
+                    } else if (WaitForFences(dev, 1, &fence, VK_TRUE,
+                                             3000000000ull) != VK_SUCCESS) {
+                        ok = false; detailOut = "self-contained: fence timeout (3 s)";
+                    } else {
+                        detailOut = "fresh instance/device clear submit + fenced OK";
+                    }
+                }
+            }
+        }
+        if (fence != VK_NULL_HANDLE) DestroyFence(dev, fence, nullptr);
+        if (pool != VK_NULL_HANDLE) DestroyCommandPool(dev, pool, nullptr);
+        if (mem  != VK_NULL_HANDLE) FreeMemory(dev, mem, nullptr);
+        if (img  != VK_NULL_HANDLE) DestroyImage(dev, img, nullptr);
+    }
+
+    // Full teardown of everything THIS call created — the child then
+    // exits; the parent's stack is untouched by construction.
+    DestroyDevice(dev, nullptr);
+    auto pfnDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(
+        gipa(inst, "vkDestroyInstance"));
+    if (pfnDestroyInstance) pfnDestroyInstance(inst, nullptr);
+    Breadcrumb::Set("gpu.proof: done ok=%d", ok ? 1 : 0);
+
+    char head[192];
+    snprintf(head, sizeof(head),
+             "self-contained proof on '%s' drv=%s vendor=0x%x dev=0x%x: ",
+             props.deviceName, VkVersion(props.driverVersion).c_str(),
+             props.vendorID, props.deviceID);
+    detailOut = std::string(head) + (ok ? "PASS — " : "FAIL — ") + detailOut;
+    PX5_LOGI(LogCategory::GPU, "Self-contained GPU proof: %s",
+             detailOut.c_str());
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
 // On-screen surface + swapchain
 // ---------------------------------------------------------------------------
 bool VulkanGpuDevice::AttachWindowSurface(ANativeWindow* window) {
@@ -645,6 +985,14 @@ bool VulkanGpuDevice::ChooseExtent(uint32_t& w, uint32_t& h) const {
 }
 
 bool VulkanGpuDevice::CreateSwapchainLocked() {
+    if (!m_swapchainExtAvailable) {
+        // Honest refusal instead of a null-trampoline call: the extension
+        // was not enabled at device creation (or the device lacks it), so
+        // the swapchain entry points are not wired. See
+        // EnsureLogicalDeviceUnlocked / BuildDeviceTable (v1.18).
+        m_stats.SetError("swapchain: VK_KHR_swapchain not enabled on device");
+        return false;
+    }
     if (!m_surface || !m_device) {
         m_stats.SetError("swapchain: no surface/device");
         return false;

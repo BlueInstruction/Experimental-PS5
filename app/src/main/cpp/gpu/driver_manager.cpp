@@ -226,6 +226,54 @@ void FinalStepProbe(const std::string& tmpLibDir, int dlopenMode) {
 
 #endif  // PX5_HAVE_ADRENOTOOLS
 
+// v1.18 — the load mechanism custom-driver packages actually need.
+// A plain dlopen() runs in the app's classloader-namespace, which Android
+// builds ISOLATED: only /system/etc/public_libraries.txt entries and app
+// libraries are reachable. Mesa Turnip packages carry DT_NEEDED entries
+// for NON-public system libs (libcutils.so) — the plain dlopen fails with
+// "library libcutils.so not found" and the old verification answered
+// "unknown" even when the driver was perfectly loadable (2026-08-30
+// device logs). SharpDroid loads the SAME zip on the SAME device because
+// its loader dlopens through a SHARED linker namespace: that namespace
+// type shares the system namespace's library list, where libcutils.so
+// lives. We do the same here — android_create_namespace(SHARED) with the
+// driver dir as ld_library_path so bundled deps (libc++_shared.so, ...)
+// resolve next to the driver, system deps via the shared link.
+// Guarded by PX5_HAVE_ADRENOTOOLS: the namespace APIs arrive through the
+// liblinkernsbypass target, which is linked only in that configuration.
+#ifdef PX5_HAVE_ADRENOTOOLS
+void* DlopenDriverSharedNamespace(const std::string& dir,
+                                  const std::string& soname,
+                                  std::string& errOut) {
+    if (!linkernsbypass_load_status()) {
+        errOut = "linkernsbypass failed to initialize";
+        return nullptr;
+    }
+    const std::string dirSlash = dir.back() == '/' ? dir : dir + "/";
+    struct android_namespace_t* ns = android_create_namespace(
+            "px5-driver-load",
+            dirSlash.c_str(),          // ld_library_path: bundled deps
+            nullptr,
+            ANDROID_NAMESPACE_TYPE_SHARED,   // system libs reachable
+            dirSlash.c_str(),          // permitted path for app-files dir
+            nullptr);                  // parent = caller namespace
+    if (!ns) {
+        const char* e = dlerror();
+        errOut = std::string("android_create_namespace failed: ") +
+                 (e ? e : "(no detail)");
+        return nullptr;
+    }
+    const std::string path = dirSlash + soname;
+    void* h = linkernsbypass_namespace_dlopen(path.c_str(),
+                                              RTLD_NOW | RTLD_LOCAL, ns);
+    if (!h) {
+        const char* e = dlerror();   // read once — dlerror clears it
+        errOut = e ? e : "(linker failed silently)";
+    }
+    return h;
+}
+#endif
+
 } // namespace
 
 GpuDriverManager& GpuDriverManager::GetInstance() {
@@ -525,7 +573,17 @@ bool GpuDriverManager::PreloadActiveDriverForVerification() {
         candidates.push_back(m_tmpLibDir + "/" + soname);
     }
 
-    std::string firstErr;
+    // v1.18 — two mechanisms per candidate, both honest:
+    //   1. plain dlopen — works for self-contained packages on API >= 29;
+    //   2. SHARED-namespace dlopen — the mechanism custom-driver loading
+    //      actually requires when the package links non-public system
+    //      libs (Turnip's DT_NEEDED libcutils.so). The classloader
+    //      namespace cannot resolve those; a shared namespace can (this
+    //      is why the same zip loads in SharpDroid on the same device).
+    // A success through EITHER mechanism maps the exact library the
+    // instance will bind, so the subsequent /proc/self/maps check means
+    // what it says.
+    std::string plainErr, nsErr;
     for (const auto& cand : candidates) {
         void* h = dlopen(cand.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (h) {
@@ -535,16 +593,43 @@ bool GpuDriverManager::PreloadActiveDriverForVerification() {
             return true;
         }
         const char* e = dlerror();
-        if (firstErr.empty()) firstErr = e ? e : "unknown dlopen error";
+        if (plainErr.empty()) plainErr = e ? e : "unknown dlopen error";
+
+#ifdef PX5_HAVE_ADRENOTOOLS
+        nsErr.clear();
+        h = DlopenDriverSharedNamespace(slot.dir, soname, nsErr);
+        if (h) {
+            m_verifyDetail = "preloaded via SHARED linker namespace: " + cand +
+                             " (plain dlopen failed: " + plainErr + " — the "
+                             "classloader namespace cannot resolve the "
+                             "package's non-public system deps; the shared "
+                             "namespace can, same mechanism as the loader "
+                             "hook)";
+            PX5_LOGI(LogCategory::GPU,
+                     "Driver preload OK via shared namespace: %s", cand.c_str());
+            return true;
+        }
+        if (nsErr.empty()) nsErr = "unknown namespace-dlopen error";
+#endif
     }
-    // Unknown, not absent: a direct dlopen can fail for namespace reasons
-    // while the hooked load at vkCreateInstance still succeeds. Say so.
+    // Unknown, not absent: these preloads never create a Vulkan instance;
+    // the hooked load at vkCreateInstance remains the final proof. Say so.
     m_verifyState = 3;
-    m_verifyDetail = "preload dlopen failed (" + firstErr +
-                     "); final proof at first vkCreateInstance";
+    m_verifyDetail = "preload dlopen failed (" + plainErr + ")" +
+#ifdef PX5_HAVE_ADRENOTOOLS
+                     std::string(" and shared-namespace load failed (") +
+                     nsErr + ")" +
+#endif
+                     "; final proof at first vkCreateInstance";
     PX5_LOGW(LogCategory::GPU,
-             "Driver preload failed for '%s': %s",
-             slot.label.c_str(), firstErr.c_str());
+             "Driver preload failed for '%s': plain: %s%s%s",
+             slot.label.c_str(), plainErr.c_str(),
+#ifdef PX5_HAVE_ADRENOTOOLS
+             " | shared-ns: ", nsErr.c_str()
+#else
+             "", ""
+#endif
+    );
     return false;
 #endif
 }

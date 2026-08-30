@@ -53,7 +53,20 @@ public:
     bool EnsureLogicalDevice();                      // idempotent
 
     // Headless proof: image alloc + clear-image submit + fence wait.
+    // Runs on THIS singleton's device/queue — in-process only. Never call
+    // it from a fork-isolated child (the child would submit on a queue
+    // whose driver state was created by the parent — see
+    // RunSelfContainedProof for the fork-safe variant).
     bool RunOffscreenClearProof(std::string& detailOut);
+
+    // v1.18 — fork-safe GPU proof: builds a COMPLETELY LOCAL Vulkan stack
+    // (fresh instance, fresh physical-device pick, fresh VkDevice + queue,
+    // local command objects), runs the same 64x64 clear submit, then
+    // destroys everything it created. Touches no inherited driver object —
+    // the child that runs it never submits on parent-created state, which
+    // is the 2026-08-30 SIGSEGV(0x0)-after-submit class from the device
+    // video. Returns PASS/FAIL detail like RunOffscreenClearProof.
+    bool RunSelfContainedProof(std::string& detailOut);
 
     // On-screen path driven by the emu screen SurfaceView lifecycle.
     bool AttachWindowSurface(ANativeWindow* window);
@@ -152,6 +165,10 @@ private:
     VkFormat     m_swapFormat    = VK_FORMAT_UNDEFINED;
     uint32_t     m_swapWidth     = 0;
     uint32_t     m_swapHeight    = 0;
+    // v1.18 — true only when VK_KHR_swapchain was enabled at device
+    // creation (BuildDeviceTable resolved all four swapchain entry
+    // points). The on-screen path refuses to run without it, honestly.
+    bool         m_swapchainExtAvailable = false;
 
     std::thread       m_renderThread;
     std::atomic<bool> m_rendering{false};

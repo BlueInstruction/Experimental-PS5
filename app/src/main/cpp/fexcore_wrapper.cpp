@@ -547,23 +547,22 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGpuProof(JNIEnv* env,
                                                             jobject) {
     PX5::Breadcrumb::Set("jni: GpuProof enter");
-    // v1.16 — THE last uncontained diagnostic is now fork-isolated.
+    // v1.16 — fork-isolated containment: a driver fault inside the proof
+    // costs the child (+ a verified dump), never the app.
     //
-    // The v1.15 session's fatal crash (08:15:31, the one that restarted the
-    // whole app on game-boot) was exactly this proof: an in-process Vulkan
-    // submit on the user's Turnip slot faulted with si_addr=0x0 after the
-    // "submit" breadcrumb and never reached "fence_wait". Everything else
-    // had been contained since v1.15; this one entry kept killing the app.
-    //
-    // Containment discipline for Vulkan: the child works on the COW copy of
-    // the driver state and submits through the SHARED drm file description.
-    // A concurrent parent submit on the same kernel context is the one real
-    // hazard, so the parent stops its render loop (join, not just a flag)
-    // for the proof window — the child becomes the only submitter, exactly
-    // the external-synchronization contract. No mutex is held across fork:
-    // an inherited locked mutex would deadlock the child's own submit.
-    // If the driver faults, the child dies with a full module-resolved dump
-    // and the app survives — the v1.15 fatal class is gone.
+    // v1.18 — the child no longer submits on the SINGLETON's queue at all.
+    // The old child ran RunOffscreenClearProof on the inherited device:
+    // driver-internal state created by the PARENT process, fork-COW'd —
+    // and a forked child submitting on parent-created driver state is the
+    // hazard the 2026-08-30 device video shows ("CRASHED in isolated child
+    // (signal 11)", si_addr=0x0 right after the gpu.proof:submit
+    // breadcrumb, before fence_wait). The child now builds a completely
+    // fresh instance/device (RunSelfContainedProof) that opens its OWN drm
+    // render-node fd — a clean kernel context sharing nothing with the
+    // parent — so the proof measures the actual driver stack (system or
+    // hooked Turnip: the loader + hook + ICD are inherited mappings,
+    // binding happens per fresh instance) without ever touching
+    // parent-created driver objects.
     auto& gpu = PX5::VulkanGpuDevice::GetInstance();
     const bool wasRendering = gpu.StopRenderLoopForProbe();
 
@@ -571,7 +570,7 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGpuProof(JNIEnv* env,
         "GPU proof",
         [&gpu]() -> std::string {
             std::string detail;
-            const bool ok = gpu.RunOffscreenClearProof(detail);
+            const bool ok = gpu.RunSelfContainedProof(detail);
             return std::string(ok ? "PASS | " : "FAIL | ") + detail;
         },
         15000);
@@ -815,8 +814,11 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeVerifyDriverSlot(
     auto& mgr = PX5::GpuDriverManager::GetInstance();
     if (slotIndex > 0) {
         const bool loaded = mgr.PreloadActiveDriverForVerification();
+        // v1.18 wording: this entry runs the PRELOAD (plain dlopen, then a
+        // shared-namespace dlopen) — not adrenotools' hooked load, which
+        // happens later at the loader's first vkCreateInstance.
         PX5_LOGI(PX5::LogCategory::GPU,
-                 "Driver slot %d eager verification: adrenotools load %s",
+                 "Driver slot %d eager verification: preload %s",
                  static_cast<int>(slotIndex), loaded ? "OK" : "FAILED");
     }
     mgr.VerifyActiveDriverMapped();
