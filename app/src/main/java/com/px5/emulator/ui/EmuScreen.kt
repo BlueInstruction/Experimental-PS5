@@ -108,7 +108,7 @@ fun EmuScreen(
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         controller?.hide(WindowInsetsCompat.Type.systemBars())
         onDispose {
-            Px5Settings.applyOrientation(activity)
+            activity?.let { Px5Settings.applyOrientation(it) }
             controller?.show(WindowInsetsCompat.Type.systemBars())
         }
     }
