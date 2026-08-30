@@ -3,26 +3,25 @@ package com.px5.emulator.ui
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.content.Context
+import android.content.pm.ActivityInfo
 import android.provider.DocumentsContract
 import com.px5.emulator.PhysicalControllerBridge
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -30,38 +29,41 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.px5.emulator.core.FexCoreWrapper
 import com.px5.emulator.core.Px5Settings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
-import kotlin.math.sqrt
 
 // ---------------------------------------------------------------------------
-// EmuScreen — REAL emulation-stage shell.
+// EmuScreen — REAL emulation-stage shell, V2.
 //
-//  * hosts an actual SurfaceView whose Surface is handed to the Vulkan
-//    swapchain renderer through JNI (attach -> start -> stop -> detach),
-//  * shows a LIVE HUD polled from the C++ render loop (frames submitted,
-//    present mode chosen from VSync setting, recreate counts),
-//  * runs the honest offscreen GPU submission proof once when entering,
-//  * provides an interactive touch DualSense-style pad whose presses land in
-//    native InputManager atomics (round-trip proven via the summary line).
+// Layout contract (matching the reference app the user approved):
+//   * the stage FORCES landscape and hides the system bars while open,
+//   * the game surface fills the whole screen — no letterbox frame,
+//   * boot diagnostics collapse behind one chip (no text walls over the
+//     game), the single status line stays honest and live,
+//   * the V2 DualSense overlay floats over the game (PS5VirtualPad.kt),
+//     with a drag-to-edit layer whose layout persists.
+//
+// Re-entry safety: the boot diagnostics (GPU proof / GNM / loader
+// self-tests) run ONCE per process. Re-running them on every entry is
+// the strongest suspect for the "second launch kills the app" report
+// (same-process engine re-entry after a renderer attach/detach cycle);
+// they already produced their evidence, so re-entry only re-attaches
+// the surface and resumes the HUD poll.
 // ---------------------------------------------------------------------------
 @Composable
 fun EmuScreen(
@@ -73,6 +75,7 @@ fun EmuScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val activity = context as? android.app.Activity
 
     var renderStats by remember { mutableStateOf("renderer idle") }
     var fpsText by remember { mutableStateOf("") }
@@ -82,9 +85,35 @@ fun EmuScreen(
     var loaderSelfTest by remember { mutableStateOf<String?>(null) }
     var inputSummary by remember { mutableStateOf("input: -") }
     var loadResult by remember { mutableStateOf<String?>(null) }
+    var diagOpen by remember { mutableStateOf(false) }
+    var padEditing by remember { mutableStateOf(false) }
+    // v1.16.1 behavior kept: a crash report surfaces ITSELF — the
+    // diagnostics panel auto-opens so evidence is never hidden.
+    LaunchedEffect(gpuProof, gnmSelfTest, loaderSelfTest) {
+        if (listOfNotNull(gpuProof, gnmSelfTest, loaderSelfTest)
+                .any { it.contains("CRASHED") }) diagOpen = true
+    }
+    var padLayout by remember {
+        mutableStateOf(PadLayout.decode(Px5Settings.padLayoutJson.value))
+    }
 
-    // Resolve the library entry behind this path (path is unique enough
-    // for records the importer created) and credit REAL session time.
+    // ---- stage shell: force landscape + immersive, restore on exit --------
+    DisposableEffect(Unit) {
+        activity?.requestedOrientation =
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        val controller = activity?.window?.let { win ->
+            WindowCompat.getInsetsController(win, win.decorView)
+        }
+        controller?.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller?.hide(WindowInsetsCompat.Type.systemBars())
+        onDispose {
+            Px5Settings.applyOrientation(activity)
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
+    // Resolve the library entry behind this path and credit session time.
     val games = gameViewModel?.allGames?.collectAsStateWithLifecycle()?.value ?: emptyList()
     val game = remember(games, path) { games.firstOrNull { it.path == path } }
 
@@ -96,26 +125,16 @@ fun EmuScreen(
         onDispose {
             val seconds = (System.currentTimeMillis() - startedAt) / 1000
             game?.let { gameViewModel?.addPlayTime(it.id, seconds) }
-            // Session END must be visible: a pasted log that stops mid-play
-            // previously gave no clue whether the user backed out or the
-            // process died. game_exit with the exact session length closes
-            // that ambiguity (a native crash additionally writes its FATAL
-            // line via CrashHandler before the process goes away).
             com.px5.emulator.core.PX5EventLog.event(
                 "gameBoot", "game_exit", "path=$path seconds=$seconds")
             try {
                 fexCoreWrapper?.nativeLogEvent(
                     "gameBoot", "game_exit seconds=$seconds path=$path")
-            } catch (_: Throwable) {
-                // Engine may already be gone during teardown — the Kotlin
-                // event above is the guaranteed record.
-            }
+            } catch (_: Throwable) {}
         }
     }
 
     // Physical gamepad pass-through lives only while this screen exists.
-    // Handheld consoles (built-in controls) and Bluetooth pads drive the
-    // same native atomics as the on-screen overlay.
     DisposableEffect(fexCoreWrapper) {
         PhysicalControllerBridge.wrapper = fexCoreWrapper
         PhysicalControllerBridge.enabled = true
@@ -128,20 +147,16 @@ fun EmuScreen(
     val isStubAbi = fexCoreWrapper?.nativeGetArchitectureSummary()
         ?.contains("UI-smoke ABI") == true
 
-    // Virtual DualSense pad visibility (persisted; toggle in Input settings).
     val showPad by Px5Settings.showTouchPad.collectAsState()
     val padOpacity by Px5Settings.touchOpacityPct.collectAsState()
+    val padScale by Px5Settings.padScalePct.collectAsState()
     val showFps by Px5Settings.showFps.collectAsState()
     val showFrametime by Px5Settings.showFrametime.collectAsState()
 
-    // One-shot honest GPU proof (skipped on the UI-smoke x86_64 ABI).
-    // Emits the boot story: on the 2026-08-29 paste the game screen produced
-    // ZERO events between entry and process death — nothing to diagnose from.
+    // ---- boot diagnostics: ONCE per process (re-entry hardening) ----------
     LaunchedEffect(Unit) {
         com.px5.emulator.core.PX5EventLog.event("gameBoot", "screen_entered",
-                "path=$path stub=${isStubAbi}")
-        // Same facts into the NATIVE log stream: a paste of the engine log
-        // must show the game-boot path even if the process dies right after.
+                "path=$path stub=${isStubAbi} diagRan=${EmuScreenBoot.bootDiagnosticsDone}")
         try {
             val ebootStatus = probeEbootStatus(path, context)
             fexCoreWrapper?.nativeLogEvent("gameBoot",
@@ -149,6 +164,15 @@ fun EmuScreen(
                     "format=${game?.format ?: "?"} size=${game?.sizeBytes ?: 0L} " +
                     "eboot=$ebootStatus")
         } catch (_: Throwable) {}
+        if (EmuScreenBoot.bootDiagnosticsDone) {
+            // Second entry in this process: skip the isolated probes. They
+            // already reported; the unified log keeps their evidence. This
+            // avoids re-driving the engine through proof child + renderer
+            // attach cycles, the prime suspect for the second-launch abort.
+            gpuProof = "SKIP | already ran this process (see Diagnostics > Logs)"
+            return@LaunchedEffect
+        }
+        EmuScreenBoot.bootDiagnosticsDone = true
         if (!isStubAbi) {
             launch(Dispatchers.Default) {
                 gpuProof = try {
@@ -159,7 +183,6 @@ fun EmuScreen(
             }
         }
         launch(Dispatchers.Default) {
-            // Real on BOTH ABIs: the GNM decoder is pure C++, no engine dep.
             gnmSelfTest = try {
                 fexCoreWrapper?.nativeRunGnmSelfTest() ?: "wrapper missing"
             } catch (t: Throwable) { "FAIL | ${t.message}" }
@@ -167,7 +190,6 @@ fun EmuScreen(
                     "result=${gnmSelfTest?.lineSequence()?.firstOrNull() ?: "?"}")
         }
         launch(Dispatchers.Default) {
-            // Real on BOTH ABIs: the SELF extractor is pure C++ too.
             loaderSelfTest = try {
                 fexCoreWrapper?.nativeRunLoaderSelfTest() ?: "wrapper missing"
             } catch (t: Throwable) { "FAIL | ${t.message}" }
@@ -176,9 +198,7 @@ fun EmuScreen(
         }
     }
 
-    // Live HUD polling. FPS / frametime are computed from the engine's own
-    // monotonic frame counter (frames= in the stats string) between polls —
-    // no invented numbers: a stalled loop simply stops updating.
+    // ---- live HUD polling (unchanged semantics) ----------------------------
     var lastFrames by remember { mutableLongStateOf(0L) }
     var lastPollMs by remember { mutableLongStateOf(0L) }
     LaunchedEffect(Unit) {
@@ -207,658 +227,440 @@ fun EmuScreen(
         }
     }
 
+    // ---- the stage ----------------------------------------------------------
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .windowInsetsPadding(WindowInsets.statusBars)
-                .padding(horizontal = 12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(
-                    onClick = {
-                        onBackClick()
-                    },
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.15f))
-                ) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Exit",
-                        tint = Color.White
-                    )
-                }
-                Spacer(Modifier.width(10.dp))
-                Column {
-                    Text("PX5 Engine Stage", color = Color.White,
-                         fontSize = 17.sp, fontWeight = FontWeight.Bold,
-                         fontFamily = TitilliumFontFamily)
-                    Text(text = path.substringAfterLast("/"),
-                         color = Color(0xFF2E8CFF), fontSize = 12.sp,
-                         fontFamily = TitilliumFontFamily, maxLines = 1)
-                }
-                Spacer(Modifier.weight(1f))
-                IconButton(
-                    onClick = { Px5Settings.setShowTouchPad(!showPad) },
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(
-                            if (showPad) Color(0xFF0070D1).copy(alpha = 0.55f)
-                            else Color.White.copy(alpha = 0.15f)
-                        )
-                ) {
-                    Icon(
-                        Icons.Default.SportsEsports,
-                        contentDescription = "Toggle touch pad",
-                        tint = Color.White
-                    )
-                }
-            }
-
-            // ---------------- live surface -----------------------------------
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(16f / 9f)
-                    .clip(RoundedCornerShape(14.dp))
-                    .border(2.dp, PS5AccentBlue, RoundedCornerShape(14.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                AndroidView(
-                    factory = { ctx ->
-                        SurfaceView(ctx).apply {
-                            holder.addCallback(object : SurfaceHolder.Callback2 {
-                                override fun surfaceCreated(holder: SurfaceHolder) {
-                                    try {
-                                        val attached =
-                                            fexCoreWrapper?.nativeAttachRenderSurface(holder.surface) == true
-                                        if (attached) {
-                                            fexCoreWrapper?.nativeStartRenderer()
-                                        }
-                                    } catch (_: Throwable) {}
+        // Fullscreen game surface — the engine owns the whole stage.
+        AndroidView(
+            factory = { ctx ->
+                SurfaceView(ctx).apply {
+                    holder.addCallback(object : SurfaceHolder.Callback2 {
+                        override fun surfaceCreated(holder: SurfaceHolder) {
+                            try {
+                                val attached =
+                                    fexCoreWrapper?.nativeAttachRenderSurface(holder.surface) == true
+                                if (attached) {
+                                    fexCoreWrapper?.nativeStartRenderer()
                                 }
-                                override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, hh: Int) {}
-                                override fun surfaceDestroyed(h: SurfaceHolder) {
-                                    try {
-                                        fexCoreWrapper?.nativeStopRenderer()
-                                        fexCoreWrapper?.nativeDetachRenderSurface()
-                                    } catch (_: Throwable) {}
-                                }
-                                override fun surfaceRedrawNeeded(h: SurfaceHolder) {}
-                                override fun surfaceRedrawNeededAsync(h: SurfaceHolder, r: Runnable) { r.run() }
-                            })
-                            setZOrderMediaOverlay(false)
+                            } catch (_: Throwable) {}
                         }
-                    },
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-
-            Spacer(Modifier.height(8.dp))
-
-            // ---------------- HUD chips --------------------------------------
-            Text(
-                text = renderStats,
-                fontSize = 11.sp,
-                color = Color(0xFF69F0AE),
-                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                textAlign = TextAlign.Start,
-                modifier = Modifier.fillMaxWidth()
+                        override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, hh: Int) {}
+                        override fun surfaceDestroyed(h: SurfaceHolder) {
+                            try {
+                                fexCoreWrapper?.nativeStopRenderer()
+                                fexCoreWrapper?.nativeDetachRenderSurface()
+                            } catch (_: Throwable) {}
+                        }
+                        override fun surfaceRedrawNeeded(h: SurfaceHolder) {}
+                        override fun surfaceRedrawNeededAsync(h: SurfaceHolder, r: Runnable) { r.run() }
+                    })
+                    setZOrderMediaOverlay(false)
+                }
+            },
+            modifier = Modifier.matchParentSize()
+        )
+        // ---- overlay layer 1: the V2 DualSense pad -------------------------
+        if (showPad) {
+            DualSensePadV2(
+                enabled = !isStubAbi,
+                opacity01 = padOpacity / 100f,
+                scale01 = padScale / 100f,
+                editing = padEditing,
+                layout = padLayout,
+                onLayoutChange = { updated ->
+                    padLayout = updated
+                    Px5Settings.setPadLayoutJson(PadLayout.encode(updated))
+                },
+                onButton = { bit, down ->
+                    fexCoreWrapper?.nativeSetButtonState(bit, down)
+                },
+                onLeftStick = { x, y -> fexCoreWrapper?.nativeSetLeftStick(x, y) },
+                onRightStick = { x, y -> fexCoreWrapper?.nativeSetRightStick(x, y) },
+                onTriggers = { l2, r2 -> fexCoreWrapper?.nativeSetTriggers(l2, r2) },
+                onTouchpad = { down -> fexCoreWrapper?.nativeSetTouchpad(down) }
             )
-            if (showFps && fpsText.isNotEmpty()) {
-                Text(
-                    text = fpsText,
-                    fontSize = 11.sp,
-                    color = Color(0xFF7DD3FC),
-                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                )
-            }
-            if (showFrametime && frametimeText.isNotEmpty()) {
-                Text(
-                    text = frametimeText,
-                    fontSize = 11.sp,
-                    color = Color(0xFF7DD3FC),
-                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                )
-            }
-            // v1.16.1 — the game screen is a game screen. The per-boot
-            // diagnostic wall (GPU proof / GNM / SELF / input / CPU bridge)
-            // collapses behind one toggle chip; it opens BY ITSELF only
-            // when a report carries a crash, so evidence always surfaces
-            // while the default view stays clean.
-            var showDiagnostics by remember { mutableStateOf(false) }
-            val diagReports = listOfNotNull(gpuProof, gnmSelfTest, loaderSelfTest)
-            val diagnosticsCrashed = diagReports.any { it.contains("CRASHED") }
-            LaunchedEffect(diagnosticsCrashed) {
-                if (diagnosticsCrashed) showDiagnostics = true
-            }
-            val diagWorst = when {
-                diagReports.any { it.contains("CRASHED") } -> Color(0xFFFF5252)
-                diagReports.isNotEmpty() &&
-                    diagReports.all { (it.lineSequence().firstOrNull() ?: "").contains("PASS") } -> Color(0xFF69F0AE)
-                diagReports.isNotEmpty() -> Color(0xFFE2C74B)
-                else -> Color(0xFF9BA7BC)
-            }
-            Row(
+        }
+
+        // ---- overlay layer 2: top bar (back / title / chips) ----------------
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color.Black.copy(alpha = 0.35f))
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = {
+                    padEditing = false
+                    onBackClick()
+                },
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(9.dp))
-                    .background(Color.White.copy(alpha = 0.07f))
-                    .clickable { showDiagnostics = !showDiagnostics }
-                    .padding(horizontal = 12.dp, vertical = 7.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.14f))
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(diagWorst)
-                )
-                Spacer(Modifier.width(9.dp))
-                Text(
-                    text = "Boot diagnostics",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color(0xFFCBD5E1),
-                    fontFamily = TitilliumFontFamily
-                )
-                Spacer(Modifier.weight(1f))
                 Icon(
-                    imageVector = if (showDiagnostics) Icons.Default.ExpandLess
-                                  else Icons.Default.ExpandMore,
-                    contentDescription = if (showDiagnostics) "Hide" else "Show",
-                    tint = Color(0xFFCBD5E1),
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Exit",
+                    tint = Color.White,
                     modifier = Modifier.size(18.dp)
                 )
             }
-            if (showDiagnostics) {
+            Spacer(Modifier.width(8.dp))
+            Column {
+                Text(
+                    text = game?.name ?: path.substringAfterLast('/'),
+                    color = Color.White, fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = TitilliumFontFamily, maxLines = 1
+                )
+                Text(
+                    text = game?.titleId?.let { "$it · " }.let { t ->
+                        (t ?: "") + "frames=" + (Regex("frames=(\\d+)").find(renderStats)?.groupValues?.get(1) ?: "0")
+                    },
+                    color = Color(0xFF2E8CFF), fontSize = 10.sp,
+                    fontFamily = TitilliumFontFamily, maxLines = 1
+                )
+            }
+            Spacer(Modifier.weight(1f))
+            if (showFps && fpsText.isNotEmpty()) {
+                StatusChip(fpsText, Color(0xFF69F0AE))
+                Spacer(Modifier.width(6.dp))
+            }
+            if (showFrametime && frametimeText.isNotEmpty()) {
+                StatusChip(frametimeText, Color(0xFF7DD3FC))
+                Spacer(Modifier.width(6.dp))
+            }
+            IconButton(
+                onClick = { Px5Settings.setShowTouchPad(!showPad) },
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (showPad) Color(0xFF0070D1).copy(alpha = 0.55f)
+                        else Color.White.copy(alpha = 0.14f)
+                    )
+            ) {
+                Icon(
+                    Icons.Default.SportsEsports, contentDescription = "Toggle pad",
+                    tint = Color.White, modifier = Modifier.size(17.dp)
+                )
+            }
+            Spacer(Modifier.width(6.dp))
+            IconButton(
+                onClick = { if (showPad) padEditing = !padEditing },
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (padEditing) Color(0xFFE2C74B).copy(alpha = 0.55f)
+                        else Color.White.copy(alpha = 0.14f)
+                    )
+            ) {
+                Icon(
+                    Icons.Default.Edit, contentDescription = "Edit pad layout",
+                    tint = Color.White, modifier = Modifier.size(15.dp)
+                )
+            }
+            Spacer(Modifier.width(6.dp))
+            IconButton(
+                onClick = { diagOpen = !diagOpen },
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (diagOpen) Color(0xFF2E8CFF).copy(alpha = 0.55f)
+                        else Color.White.copy(alpha = 0.14f)
+                    )
+            ) {
+                Icon(
+                    Icons.Default.Info, contentDescription = "Boot diagnostics",
+                    tint = Color.White, modifier = Modifier.size(17.dp)
+                )
+            }
+        }
+
+        // ---- overlay layer 3: live status line (always visible, honest) ----
+        val proofOk = gpuProof == null ||
+            (gpuProof?.lineSequence()?.firstOrNull() ?: "").contains("PASS |") ||
+            (gpuProof?.startsWith("SKIP") == true)
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 10.dp, bottom = 6.dp, end = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(
+                        when {
+                            gpuProof == null -> Color(0xFFE2C74B)
+                            gpuProof?.startsWith("SKIP") == true -> Color(0xFF9BA7BC)
+                            proofOk -> Color(0xFF69F0AE)
+                            else -> Color(0xFFFF6B6B)
+                        }
+                    )
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = renderStats.lineSequence().firstOrNull() ?: renderStats,
+                fontSize = 10.sp,
+                color = Color.White.copy(alpha = 0.75f),
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                maxLines = 1
+            )
+        }
+
+        // ---- overlay layer 4: boot diagnostics panel (collapsed by default)
+        if (diagOpen) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 52.dp, start = 10.dp, end = 10.dp)
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color.Black.copy(alpha = 0.72f))
+                    .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    "GPU device: " +
+                        (Regex("GPU device: ([^|]+)").find(renderStats)
+                            ?.groupValues?.get(1)?.trim() ?: "?") +
+                        "  |  " + inputSummary,
+                    fontSize = 10.sp,
+                    color = Color(0xFF69F0AE),
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                )
                 gpuProof?.let { p ->
                     val firstLine = p.lineSequence().firstOrNull() ?: p
-                    val pass = firstLine.contains("PASS |")
                     Text(
                         text = "GPU self-test: $firstLine" +
                                (if (firstLine.contains("CRASHED"))
-                                    "\n  driver faulted in the isolated proof child — app survived; dump in px5_main.log"
-                                else ""),
-                        fontSize = 11.sp,
-                        color = if (pass) Color(0xFF69F0AE)
+                                   "\n  → driver faulted in the isolated proof child — app survived; dump in px5_main.log"
+                               else ""),
+                        fontSize = 10.sp,
+                        color = if (firstLine.contains("PASS")) Color(0xFF69F0AE)
+                                else if (firstLine.startsWith("SKIP")) Color(0xFF9BA7BC)
                                 else Color(0xFFFF8A65),
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                     )
                 }
                 gnmSelfTest?.let { g ->
-                    val firstLine = g.lineSequence().firstOrNull() ?: g
                     Text(
-                        text = "GNM PM4: $firstLine",
-                        fontSize = 11.sp,
-                        color = if (firstLine.contains("PASS")) Color(0xFF7DD3FC)
-                                else Color(0xFFFF8A65),
+                        text = "GNM PM4: ${g.lineSequence().firstOrNull() ?: g}",
+                        fontSize = 10.sp,
+                        color = if ((g.lineSequence().firstOrNull() ?: "").contains("PASS"))
+                            Color(0xFF7DD3FC) else Color(0xFFFF8A65),
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                     )
                 }
                 loaderSelfTest?.let { s ->
-                    val firstLine = s.lineSequence().firstOrNull() ?: s
                     Text(
-                        text = "SELF loader: $firstLine",
-                        fontSize = 11.sp,
-                        color = if (firstLine.contains("PASS")) Color(0xFF7DD3FC)
-                                else Color(0xFFFF8A65),
+                        text = "SELF loader: ${s.lineSequence().firstOrNull() ?: s}",
+                        fontSize = 10.sp,
+                        color = if ((s.lineSequence().firstOrNull() ?: "").contains("PASS"))
+                            Color(0xFF7DD3FC) else Color(0xFFFF8A65),
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                     )
                 }
-                // Milestone gate (honest, no fabricated readiness): while
-                // the GPU proof does not pass, a load attempt is a
-                // diagnostic, not an expectation. CPU/GPU completion comes
-                // BEFORE game testing — the project contract.
                 val gpuProofOk = gpuProof == null ||
                     (gpuProof?.lineSequence()?.firstOrNull() ?: "").contains("PASS |")
-                if (!isStubAbi && !gpuProofOk) {
+                if (!isStubAbi && !gpuProofOk && gpuProof?.startsWith("SKIP") != true) {
                     Text(
                         text = "MILESTONE: GPU proof not passing — CPU/GPU work " +
                                "continues before game testing; a load attempt is " +
                                "a diagnostic only",
-                        fontSize = 11.sp,
+                        fontSize = 10.sp,
                         color = Color(0xFFE2C74B),
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                     )
                 }
                 Text(
-                    text = inputSummary,
-                    fontSize = 11.sp,
-                    color = Color(0xFFE2C74B),
-                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                )
-                Text(
                     text = "CPU bridge: $fexCoreStatus" +
                            (if (isStubAbi) "  •  UI-smoke ABI (engine=arm64-only)" else ""),
-                    fontSize = 11.sp,
+                    fontSize = 10.sp,
                     color = Color(0xFF9BA7BC)
                 )
-            }
-
-            // Honest boot attempt: hand the ELF to the real loader and
-            // report the genuine result. Dumps use their eboot.bin.
-            if (!isStubAbi && fexCoreWrapper != null) {
-                Button(
-                    onClick = {
-                        scope.launch(Dispatchers.IO) {
-                            val target = run {
-                                val f = java.io.File(path)
-                                if (f.isDirectory) {
-                                    f.listFiles()?.firstOrNull {
-                                        it.isFile && it.name.equals("eboot.bin", true)
-                                    }?.absolutePath ?: ""
-                                } else path
-                            }
-                            com.px5.emulator.core.PX5EventLog.event("gameBoot",
-                                    "exec_load_started", "target=$target")
-                            fexCoreWrapper?.nativeLogEvent("gameBoot",
-                                    "exec_load_started target=$target")
-                            loadResult = if (target.isBlank()) {
+                if (!isStubAbi && fexCoreWrapper != null) {
+                    Button(
+                        onClick = {
+                            scope.launch(Dispatchers.IO) {
+                                val target = run {
+                                    val f = java.io.File(path)
+                                    if (f.isDirectory) {
+                                        f.listFiles()?.firstOrNull {
+                                            it.isFile && it.name.equals("eboot.bin", true)
+                                        }?.absolutePath ?: ""
+                                    } else path
+                                }
                                 com.px5.emulator.core.PX5EventLog.event("gameBoot",
-                                        "exec_load_failed", "reason=no eboot.bin in folder")
-                                "LOAD FAILED: no eboot.bin in folder"
-                            } else {
-                                try {
-                                    // v1.12 crash containment: the load
-                                    // pipeline first runs inside a fork-
-                                    // isolated probe child. A load-stage
-                                    // native fault (the 2026-08-30 "game
-                                    // kills the whole app" pattern) then
-                                    // costs the probe child — the app
-                                    // survives and the report names the
-                                    // verified dump file. Only a probe that
-                                    // actually succeeded promotes to the
-                                    // real in-process mapping below.
-                                    val probe = fexCoreWrapper.nativeLoadExecutableIsolated(target)
+                                        "exec_load_started", "target=$target")
+                                fexCoreWrapper?.nativeLogEvent("gameBoot",
+                                        "exec_load_started target=$target")
+                                loadResult = if (target.isBlank()) {
                                     com.px5.emulator.core.PX5EventLog.event("gameBoot",
-                                            "exec_probe",
-                                            "target=${target.substringAfterLast('/')}",
-                                            result = probe.lineSequence().firstOrNull()?.take(120) ?: "?")
-                                    fexCoreWrapper.nativeLogEvent("gameBoot",
-                                            "exec_probe ${probe.lineSequence().firstOrNull()?.take(160) ?: probe.take(160)} " +
-                                            "target=${target.substringAfterLast('/')}")
-                                    if (probe.startsWith("LOAD OK")) {
-                                        // Magic-based dispatch on the native side:
-                                        // SELF (eboot.bin dumps) -> extractor path,
-                                        // ELF (homebrew payloads) -> direct loader.
-                                        val ok = fexCoreWrapper.nativeLoadExecutable(target)
+                                            "exec_load_failed", "reason=no eboot.bin in folder")
+                                    "LOAD FAILED: no eboot.bin in folder"
+                                } else {
+                                    try {
+                                        val probe = fexCoreWrapper.nativeLoadExecutableIsolated(target)
                                         com.px5.emulator.core.PX5EventLog.event("gameBoot",
-                                                "exec_load", "target=${target.substringAfterLast('/')}",
-                                                result = ok.toString())
+                                                "exec_probe",
+                                                "target=${target.substringAfterLast('/')}",
+                                                result = probe.lineSequence().firstOrNull()?.take(120) ?: "?")
                                         fexCoreWrapper.nativeLogEvent("gameBoot",
-                                                "exec_load result=$ok target=${target.substringAfterLast('/')}")
-                                        if (ok) {
-                                            // v1.13 execution containment: the real
-                                            // guest execution runs in a fork-isolated
-                                            // probe child (headless, hard 8s timeout).
-                                            // A fault costs the child + a verified
-                                            // dump — the app survives and shows it.
-                                            val exec = fexCoreWrapper.nativeRunExecutionProbe(target, 8000)
+                                                "exec_probe ${probe.lineSequence().firstOrNull()?.take(160) ?: probe.take(160)} " +
+                                                "target=${target.substringAfterLast('/')}")
+                                        if (probe.startsWith("LOAD OK")) {
+                                            val ok = fexCoreWrapper.nativeLoadExecutable(target)
                                             com.px5.emulator.core.PX5EventLog.event("gameBoot",
-                                                    "exec_probe_run",
-                                                    "target=${target.substringAfterLast('/')}",
-                                                    result = exec.lineSequence().firstOrNull()?.take(120) ?: "?")
+                                                    "exec_load", "target=${target.substringAfterLast('/')}",
+                                                    result = ok.toString())
                                             fexCoreWrapper.nativeLogEvent("gameBoot",
-                                                    "exec_probe_run ${exec.lineSequence().firstOrNull()?.take(160) ?: exec.take(160)}")
-                                            val prefix = if (exec.contains("CRASHED"))
-                                                "EXECUTION CONTAINED — app survived (dump on disk):\n"
-                                            else ""
-                                            "LOADED: $target mapped into guest window\n$prefix$exec"
+                                                    "exec_load result=$ok target=${target.substringAfterLast('/')}")
+                                            if (ok) {
+                                                val exec = fexCoreWrapper.nativeRunExecutionProbe(target, 8000)
+                                                com.px5.emulator.core.PX5EventLog.event("gameBoot",
+                                                        "exec_probe_run",
+                                                        "target=${target.substringAfterLast('/')}",
+                                                        result = exec.lineSequence().firstOrNull()?.take(120) ?: "?")
+                                                fexCoreWrapper.nativeLogEvent("gameBoot",
+                                                        "exec_probe_run ${exec.lineSequence().firstOrNull()?.take(160) ?: exec.take(160)}")
+                                                val prefix = if (exec.contains("CRASHED"))
+                                                    "EXECUTION CONTAINED — app survived (dump on disk):\n"
+                                                else ""
+                                                "LOADED: $target mapped into guest window\n$prefix$exec"
+                                            } else {
+                                                "LOAD FAILED: loader rejected $target (see logcat)"
+                                            }
                                         } else {
-                                            "LOAD FAILED: loader rejected $target (see logcat)"
+                                            com.px5.emulator.core.PX5EventLog.event("gameBoot",
+                                                    "exec_probe_blocked",
+                                                    "report=${probe.take(200)}")
+                                            "ISOLATED LOAD STOPPED THE CRASH — app survived:\n$probe"
                                         }
-                                    } else {
-                                        // Probe crashed or rejected the file:
-                                        // surface the FULL report (it names the
-                                        // verified dump path on a crash) and do
-                                        // NOT attempt the in-process load.
-                                        com.px5.emulator.core.PX5EventLog.event("gameBoot",
-                                                "exec_probe_blocked",
-                                                "report=${probe.take(200)}")
-                                        "ISOLATED LOAD STOPPED THE CRASH — app survived:\n$probe"
+                                    } catch (t: Throwable) {
+                                        com.px5.emulator.core.PX5EventLog.exception("gameBoot.execLoad", t)
+                                        fexCoreWrapper.nativeLogEvent("gameBoot",
+                                                "exec_load EXCEPTION ${t.javaClass.simpleName}: ${t.message}")
+                                        "LOAD FAILED: ${t.message}"
                                     }
-                                } catch (t: Throwable) {
-                                    com.px5.emulator.core.PX5EventLog.exception("gameBoot.execLoad", t)
-                                    fexCoreWrapper.nativeLogEvent("gameBoot",
-                                            "exec_load EXCEPTION ${t.javaClass.simpleName}: ${t.message}")
-                                    "LOAD FAILED: ${t.message}"
                                 }
                             }
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color.White.copy(alpha = 0.10f),
-                        contentColor = Color.White
-                    ),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Text("Attempt executable load (ELF/SELF, experimental)", fontSize = 12.sp)
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color.White.copy(alpha = 0.10f),
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                        modifier = Modifier.padding(top = 6.dp)
+                    ) {
+                        Text("Attempt executable load (ELF/SELF)", fontSize = 11.sp)
+                    }
                 }
                 loadResult?.let { res ->
                     Text(
                         text = res,
-                        fontSize = 11.sp,
+                        fontSize = 10.sp,
                         color = if (res.startsWith("LOADED")) Color(0xFF69F0AE) else Color(0xFFFF8A65),
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                     )
                 }
             }
-
-            Spacer(Modifier.weight(1f))
-
-            // ------------- virtual DualSense pad ---------------------------
-            // Every control below lands in PX5::InputManager atomics over
-            // JNI: buttons via nativeSetButtonState, sticks via
-            // nativeSetLeftStick/nativeSetRightStick, triggers via
-            // nativeSetTriggers, touchpad via nativeSetTouchpad. The
-            // "input:" HUD line above proves events reach C++.
-            if (showPad) {
-                Box(modifier = Modifier.alpha(padOpacity / 100f)) {
-                    DualSenseOverlay(
-                        enabled = !isStubAbi,
-                        onButton = { bit, down ->
-                            fexCoreWrapper?.nativeSetButtonState(bit, down)
-                        },
-                        onLeftStick = { x, y -> fexCoreWrapper?.nativeSetLeftStick(x, y) },
-                        onRightStick = { x, y -> fexCoreWrapper?.nativeSetRightStick(x, y) },
-                        onTriggers = { l2, r2 -> fexCoreWrapper?.nativeSetTriggers(l2, r2) },
-                        onTouchpad = { down -> fexCoreWrapper?.nativeSetTouchpad(down) }
-                    )
-                }
-            }
-            Spacer(Modifier.height(10.dp))
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// DualSenseOverlay — the full on-screen controller.
-//
-// Layout mirrors the real pad: L2/L1 shoulders left, R1/R2 right,
-// D-pad cross left cluster, face-button diamond right cluster, analog
-// sticks inboard, Options/Share/PS + clickable touchpad in the middle.
-// ---------------------------------------------------------------------------
-@Composable
-private fun DualSenseOverlay(
-    enabled: Boolean,
-    onButton: (Int, Boolean) -> Unit,
-    onLeftStick: (Float, Float) -> Unit,
-    onRightStick: (Float, Float) -> Unit,
-    onTriggers: (Float, Float) -> Unit,
-    onTouchpad: (Boolean) -> Unit
-) {
-    val l2 = remember { mutableStateOf(0f) }
-    val r2 = remember { mutableStateOf(0f) }
-
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        // ---- shoulder row -------------------------------------------------
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            ShoulderKey("L2", enabled, onPress = {
-                l2.value = if (it) 1f else 0f
-                onTriggers(l2.value, r2.value)
-            })
-            Spacer(Modifier.width(6.dp))
-            ShoulderKey("L1", enabled, onPress = {
-                onButton(FexCoreWrapper.PAD_L1, it)
-            })
-            Spacer(Modifier.weight(1f))
-            // Clickable touchpad (center) — real native state.
-            PadKey("TP", Color(0xFF9BA7BC), enabled, 40.dp, onPress = onTouchpad)
-            Spacer(Modifier.weight(1f))
-            ShoulderKey("R1", enabled, onPress = {
-                onButton(FexCoreWrapper.PAD_R1, it)
-            })
-            Spacer(Modifier.width(6.dp))
-            ShoulderKey("R2", enabled, onPress = {
-                r2.value = if (it) 1f else 0f
-                onTriggers(l2.value, r2.value)
-            })
         }
 
-        // ---- main row ------------------------------------------------------
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            DPadCross(enabled, onButton)
-
-            Spacer(Modifier.width(14.dp))
-            AnalogStick("L", enabled, onLeftStick)
-
-            Spacer(Modifier.weight(1f))
-
-            Column(horizontalAlignment = Alignment.CenterHorizontally,
-                   verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                PadKey("\u22EE", Color(0xFF9BA7BC), enabled, 38.dp, onPress = {
-                    onButton(FexCoreWrapper.PAD_OPTIONS, it)
-                })
-                PadKey("PS", Color(0xFF9BA7BC), enabled, 38.dp, onPress = {
-                    onButton(FexCoreWrapper.PAD_PS_HOME, it)
-                })
-                PadKey("\u2913", Color(0xFF9BA7BC), enabled, 38.dp, onPress = {
-                    onButton(FexCoreWrapper.PAD_SHARE, it)
-                })
-            }
-
-            Spacer(Modifier.weight(1f))
-
-            AnalogStick("R", enabled, onRightStick)
-            Spacer(Modifier.width(14.dp))
-            FaceDiamond(enabled, onButton)
-        }
-    }
-}
-
-/** Slim shoulder/trigger bar. Triggers report analog 1.0 while held. */
-@Composable
-private fun ShoulderKey(
-    label: String,
-    enabled: Boolean,
-    onPress: (Boolean) -> Unit
-) {
-    var pressed by remember { mutableStateOf(false) }
-    Box(
-        contentAlignment = Alignment.Center,
-        modifier = Modifier
-            .size(width = 62.dp, height = 28.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(
-                if (pressed) Color(0xFF2E8CFF).copy(alpha = 0.45f)
-                else Color.White.copy(alpha = 0.06f)
-            )
-            .border(
-                1.5.dp,
-                if (pressed) Color(0xFF2E8CFF) else Color.White.copy(alpha = 0.3f),
-                RoundedCornerShape(8.dp)
-            )
-            .then(
-                if (enabled) {
-                    Modifier.pointerInput(label) {
-                        detectTapGestures(onPress = {
-                            pressed = true
-                            onPress(true)
-                            try { awaitRelease() } catch (_: Throwable) {}
-                            pressed = false
-                            onPress(false)
-                        })
-                    }
-                } else Modifier
-            )
-    ) {
-        Text(label, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-    }
-}
-
-/** Draggable analog stick; reports normalized [-1..1], up = -1 (standard). */
-@Composable
-private fun AnalogStick(
-    label: String,
-    enabled: Boolean,
-    onMove: (Float, Float) -> Unit,
-    size: Dp = 96.dp
-) {
-    var thumb by remember { mutableStateOf(Offset.Zero) }
-    val density = LocalDensity.current
-    val thumbSize = 36.dp
-    val maxPx = with(density) { (size - thumbSize).toPx() / 2f }
-
-    Box(
-        contentAlignment = Alignment.Center,
-        modifier = Modifier
-            .size(size)
-            .clip(CircleShape)
-            .background(Color.White.copy(alpha = 0.05f))
-            .border(1.5.dp, Color.White.copy(alpha = 0.25f), CircleShape)
-            .then(
-                if (enabled) {
-                    Modifier.pointerInput(Unit) {
-                        detectDragGestures(
-                            onDrag = { change, dragAmount ->
-                                change.consume()
-                                val v = thumb + dragAmount
-                                val d = sqrt(v.x * v.x + v.y * v.y)
-                                thumb = if (d > maxPx && d > 0f) v * (maxPx / d) else v
-                                onMove(thumb.x / maxPx, thumb.y / maxPx)
-                            },
-                            onDragEnd = {
-                                thumb = Offset.Zero
-                                onMove(0f, 0f)
-                            },
-                            onDragCancel = {
-                                thumb = Offset.Zero
-                                onMove(0f, 0f)
-                            }
-                        )
-                    }
-                } else Modifier
-            )
-    ) {
-        Text(
-            label,
-            color = Color.White.copy(alpha = 0.3f),
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold
-        )
-        Box(
-            modifier = Modifier
-                .offset { IntOffset(thumb.x.roundToInt(), thumb.y.roundToInt()) }
-                .size(thumbSize)
-                .clip(CircleShape)
-                .background(
-                    if (enabled) Color(0xFF2E8CFF).copy(alpha = 0.85f)
-                    else Color.White.copy(alpha = 0.15f)
+        // ---- overlay layer 5: pad edit toolbar -------------------------------
+        if (padEditing && showPad) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 8.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color.Black.copy(alpha = 0.78f))
+                    .border(1.dp, Color(0xFFE2C74B).copy(alpha = 0.5f), RoundedCornerShape(14.dp))
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    "EDIT LAYOUT — drag any control; positions persist",
+                    fontSize = 10.sp, color = Color(0xFFE2C74B),
+                    fontFamily = TitilliumFontFamily
                 )
-                .border(1.dp, Color.White.copy(alpha = 0.5f), CircleShape)
-        )
-    }
-}
-
-/** D-pad cross (up/left/right/down). */
-@Composable
-private fun DPadCross(
-    enabled: Boolean,
-    onButton: (Int, Boolean) -> Unit
-) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        PadKey("\u25B2", Color.White, enabled, 44.dp, onPress = {
-            onButton(FexCoreWrapper.PAD_DPAD_UP, it)
-        })
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            PadKey("\u25C0", Color.White, enabled, 44.dp, onPress = {
-                onButton(FexCoreWrapper.PAD_DPAD_LEFT, it)
-            })
-            Spacer(Modifier.width(4.dp))
-            PadKey("\u25B6", Color.White, enabled, 44.dp, onPress = {
-                onButton(FexCoreWrapper.PAD_DPAD_RIGHT, it)
-            })
-        }
-        PadKey("\u25BC", Color.White, enabled, 44.dp, onPress = {
-            onButton(FexCoreWrapper.PAD_DPAD_DOWN, it)
-        })
-    }
-}
-
-/** Face-button diamond: △ top, ○ right, ✕ bottom, □ left. */
-@Composable
-private fun FaceDiamond(
-    enabled: Boolean,
-    onButton: (Int, Boolean) -> Unit
-) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        PadKey("\u25B3", Color(0xFF4CD9A6), enabled, 46.dp, onPress = {
-            onButton(FexCoreWrapper.PAD_TRIANGLE, it)
-        })
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            PadKey("\u25A1", Color(0xFFEF7DBD), enabled, 46.dp, onPress = {
-                onButton(FexCoreWrapper.PAD_SQUARE, it)
-            })
-            Spacer(Modifier.width(6.dp))
-            PadKey("\u25CB", Color(0xFFFF6B6B), enabled, 46.dp, onPress = {
-                onButton(FexCoreWrapper.PAD_CIRCLE, it)
-            })
-        }
-        PadKey("\u00D7", Color(0xFF7FB8FF), enabled, 46.dp, onPress = {
-            onButton(FexCoreWrapper.PAD_CROSS, it)
-        })
-    }
-}
-
-/**
- * Round pad key. Every press/release goes through the caller into
- * FexCoreWrapper JNI; per-key pointerInput keeps multi-touch working
- * (hold D-pad while dragging a stick, etc.).
- */
-@Composable
-private fun PadKey(
-    label: String,
-    tint: Color,
-    enabled: Boolean,
-    size: Dp,
-    onPress: (Boolean) -> Unit
-) {
-    var pressed by remember { mutableStateOf(false) }
-    val shape = CircleShape
-
-    Box(
-        contentAlignment = Alignment.Center,
-        modifier = Modifier
-            .size(size)
-            .clip(shape)
-            .background(if (pressed) tint.copy(alpha = 0.35f)
-                        else Color.White.copy(alpha = 0.06f))
-            .border(1.5.dp, if (pressed) tint else tint.copy(alpha = 0.5f), shape)
-            .then(if (enabled) {
-                Modifier.pointerInput(label) {
-                    detectTapGestures(onPress = {
-                        pressed = true
-                        onPress(true)
-                        try { awaitRelease() } catch (_: Throwable) {}
-                        pressed = false
-                        onPress(false)
-                    })
+                Row(verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Size ${padScale}%", fontSize = 10.sp,
+                         color = Color.White, fontFamily = TitilliumFontFamily)
+                    Slider(
+                        value = padScale.toFloat(),
+                        onValueChange = { Px5Settings.setPadScalePct(it.roundToInt()) },
+                        valueRange = 60f..160f,
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color(0xFF2E8CFF),
+                            activeTrackColor = Color(0xFF2E8CFF)
+                        ),
+                        modifier = Modifier.width(140.dp)
+                    )
+                    Text("Opacity ${padOpacity}%", fontSize = 10.sp,
+                         color = Color.White, fontFamily = TitilliumFontFamily)
+                    Slider(
+                        value = padOpacity.toFloat(),
+                        onValueChange = { Px5Settings.setTouchOpacityPct(it.roundToInt()) },
+                        valueRange = 40f..100f,
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color(0xFF2E8CFF),
+                            activeTrackColor = Color(0xFF2E8CFF)
+                        ),
+                        modifier = Modifier.width(140.dp)
+                    )
+                    Button(
+                        onClick = {
+                            padLayout = PadLayout.defaults()
+                            Px5Settings.setPadLayoutJson("")
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color.White.copy(alpha = 0.12f),
+                            contentColor = Color.White
+                        ),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                    ) { Text("Reset", fontSize = 11.sp) }
+                    Button(
+                        onClick = { padEditing = false },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF2E8CFF),
+                            contentColor = Color.White
+                        ),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp)
+                    ) { Text("Done", fontSize = 11.sp) }
                 }
-            } else Modifier)
-    ) {
-        Text(label, color = tint, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+        }
     }
+}
+
+/** Small rounded status chip for FPS / frametime. */
+@Composable
+private fun StatusChip(text: String, tint: Color) {
+    Text(
+        text = text,
+        fontSize = 10.sp,
+        color = tint,
+        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+        modifier = Modifier
+            .clip(RoundedCornerShape(7.dp))
+            .background(Color.Black.copy(alpha = 0.45f))
+            .padding(horizontal = 7.dp, vertical = 3.dp)
+    )
+}
+
+/** Process-wide marker: the boot diagnostics are one-shot per process. */
+private object EmuScreenBoot {
+    @Volatile var bootDiagnosticsDone: Boolean = false
 }
 
 // ---------------------------------------------------------------------------
@@ -867,11 +669,9 @@ private fun PadKey(
 // Root cause (device log 2026-08-29): a plain java.io.File listing on API
 // 30+ scoped storage returns null for SAF-imported game folders, and the
 // old probe then printed "eboot=ABSENT" for a folder that CONTAINS
-// eboot.bin (the competitor log ran that exact file from that exact path).
-// A report line that lies is worse than no line — the probe is now tiered:
+// eboot.bin. The probe is tiered:
 //   1. Direct java.io listing (definitive when storage is readable).
-//   2. SAF listing through persisted tree permissions (covers SAF-imported
-//      games: docId "primary:<rest>" maps to /storage/emulated/0/<rest>).
+//   2. SAF listing through persisted tree permissions.
 //   3. "unknown(no-list-permission)" — we never fabricate ABSENT.
 // ---------------------------------------------------------------------------
 private fun probeEbootStatus(path: String, context: Context): String = try {
@@ -890,7 +690,6 @@ private fun probeEbootStatus(path: String, context: Context): String = try {
                     ?: "unknown(no-list-permission)"
         }
     } else {
-        // File API cannot even see the node — SAF is the only witness left.
         probeEbootViaSaf(path, context) ?: "path-missing"
     }
 } catch (_: Throwable) {
@@ -898,8 +697,7 @@ private fun probeEbootStatus(path: String, context: Context): String = try {
 }
 
 /** SAF fallback: look for eboot.bin among the children of `path`'s
- *  document inside any persisted read-permission tree that contains it.
- *  Returns null when no persisted tree covers the path. */
+ *  document inside any persisted read-permission tree that contains it. */
 private fun probeEbootViaSaf(path: String, context: Context): String? = runCatching {
     val cr = context.contentResolver
     for (perm in cr.persistedUriPermissions) {
@@ -920,7 +718,6 @@ private fun probeEbootViaSaf(path: String, context: Context): String? = runCatch
             normPath.substring(normRoot.length + 1) else ""
         val targetDocId = if (rel.isBlank()) treeDocId
                           else "$treeDocId/$rel"
-        // Children of the game-folder document: (treeUri, parentDocId).
         val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
                 treeUri, targetDocId)
         cr.query(

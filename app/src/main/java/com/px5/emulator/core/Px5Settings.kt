@@ -45,6 +45,15 @@ object Px5Settings {
     private val _touchOpacityPct = MutableStateFlow(100)
     val touchOpacityPct: StateFlow<Int> = _touchOpacityPct
 
+    /** Global size of the on-screen pad (60..160 %). UI-only. */
+    private val _padScalePct = MutableStateFlow(100)
+    val padScalePct: StateFlow<Int> = _padScalePct
+
+    /** Persisted V2 pad layout: JSON map element-name -> [fx, fy]
+     *  (fractional center coordinates on the stage). Empty = defaults. */
+    private val _padLayoutJson = MutableStateFlow("")
+    val padLayoutJson: StateFlow<String> = _padLayoutJson
+
     /** Overlay: show live FPS (computed from the real frame counter). */
     private val _showFps = MutableStateFlow(false)
     val showFps: StateFlow<Boolean> = _showFps
@@ -88,6 +97,8 @@ object Px5Settings {
         _orientationMode.value = prefs?.getInt("orientationMode", 0) ?: 0
         _showTouchPad.value  = prefs?.getBoolean("showTouchPad", true) ?: true
         _touchOpacityPct.value = prefs?.getInt("touchOpacityPct", 100) ?: 100
+        _padScalePct.value = prefs?.getInt("padScalePct", 100) ?: 100
+        _padLayoutJson.value = prefs?.getString("padLayoutV2", "") ?: ""
         _showFps.value       = prefs?.getBoolean("showFps", false) ?: false
         _showFrametime.value = prefs?.getBoolean("showFrametime", false) ?: false
         _vramUsageMode.value = prefs?.getInt("vramUsageMode", 1) ?: 1
@@ -99,13 +110,17 @@ object Px5Settings {
             FexCorePresets.decode(prefs?.getString("engineOverrides", "") ?: "")
     }
 
-    /** Applies the persisted orientation mode to the host activity. */
+    /** Applies the persisted orientation mode to the host activity.
+     *  Mode 0 now explicitly releases any previous override (the emulation
+     *  stage forces landscape while open and hands the shell back here). */
     fun applyOrientation(activity: android.app.Activity) {
         when (_orientationMode.value) {
             1 -> activity.requestedOrientation =
                 android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
             2 -> activity.requestedOrientation =
                 android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
+            else -> activity.requestedOrientation =
+                android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
     }
 
@@ -152,6 +167,16 @@ object Px5Settings {
     fun setTouchOpacityPct(v: Int) {
         _touchOpacityPct.value = v.coerceIn(40, 100)
         prefs?.edit()?.putInt("touchOpacityPct", _touchOpacityPct.value)?.apply()
+    }
+
+    fun setPadScalePct(v: Int) {
+        _padScalePct.value = v.coerceIn(60, 160)
+        prefs?.edit()?.putInt("padScalePct", _padScalePct.value)?.apply()
+    }
+
+    fun setPadLayoutJson(json: String) {
+        _padLayoutJson.value = json
+        prefs?.edit()?.putString("padLayoutV2", json)?.apply()
     }
 
     fun setShowFps(on: Boolean) {

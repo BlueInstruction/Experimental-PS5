@@ -240,4 +240,8 @@ public class FexCoreWrapper {
     public static final int PAD_OPTIONS    = 1 << 10;
     public static final int PAD_SHARE      = 1 << 11;
     public static final int PAD_PS_HOME    = 1 << 12;
+    /** V2 pad: stick-click buttons. The native InputManager stores the full
+     *  32-bit mask; guest-side routing for these two lands with kernel HLE. */
+    public static final int PAD_L3         = 1 << 13;
+    public static final int PAD_R3         = 1 << 14;
 }
