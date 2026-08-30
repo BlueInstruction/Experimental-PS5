@@ -8,6 +8,7 @@ import com.px5.emulator.PhysicalControllerBridge
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -15,6 +16,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -329,72 +332,120 @@ fun EmuScreen(
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                 )
             }
-            gpuProof?.let { p ->
-                // v1.16: the report is now fork-contained — its first line is
-                // "GPU proof: PASS|FAIL|CRASHED ...". A CRASHED result means
-                // the driver faulted inside the isolated child; the app
-                // survived and the dump path is in the report + unified log.
-                val firstLine = p.lineSequence().firstOrNull() ?: p
-                val pass = firstLine.contains("PASS |")
+            // v1.16.1 — the game screen is a game screen. The per-boot
+            // diagnostic wall (GPU proof / GNM / SELF / input / CPU bridge)
+            // collapses behind one toggle chip; it opens BY ITSELF only
+            // when a report carries a crash, so evidence always surfaces
+            // while the default view stays clean.
+            var showDiagnostics by remember { mutableStateOf(false) }
+            val diagReports = listOfNotNull(gpuProof, gnmSelfTest, loaderSelfTest)
+            val diagnosticsCrashed = diagReports.any { it.contains("CRASHED") }
+            LaunchedEffect(diagnosticsCrashed) {
+                if (diagnosticsCrashed) showDiagnostics = true
+            }
+            val diagWorst = when {
+                diagReports.any { it.contains("CRASHED") } -> Color(0xFFFF5252)
+                diagReports.isNotEmpty() &&
+                    diagReports.all { (it.lineSequence().firstOrNull() ?: "").contains("PASS") } -> Color(0xFF69F0AE)
+                diagReports.isNotEmpty() -> Color(0xFFE2C74B)
+                else -> Color(0xFF9BA7BC)
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(Color.White.copy(alpha = 0.07f))
+                    .clickable { showDiagnostics = !showDiagnostics }
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(diagWorst)
+                )
+                Spacer(Modifier.width(9.dp))
                 Text(
-                    text = "GPU self-test: $firstLine" +
-                           (if (firstLine.contains("CRASHED"))
-                                "\n  → driver faulted in the isolated proof child — app survived; dump in px5_main.log"
-                            else ""),
-                    fontSize = 11.sp,
-                    color = if (pass) Color(0xFF69F0AE)
-                            else Color(0xFFFF8A65),
-                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    text = "Boot diagnostics",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color(0xFFCBD5E1),
+                    fontFamily = TitilliumFontFamily
+                )
+                Spacer(Modifier.weight(1f))
+                Icon(
+                    imageVector = if (showDiagnostics) Icons.Default.ExpandLess
+                                  else Icons.Default.ExpandMore,
+                    contentDescription = if (showDiagnostics) "Hide" else "Show",
+                    tint = Color(0xFFCBD5E1),
+                    modifier = Modifier.size(18.dp)
                 )
             }
-            gnmSelfTest?.let { g ->
-                val firstLine = g.lineSequence().firstOrNull() ?: g
+            if (showDiagnostics) {
+                gpuProof?.let { p ->
+                    val firstLine = p.lineSequence().firstOrNull() ?: p
+                    val pass = firstLine.contains("PASS |")
+                    Text(
+                        text = "GPU self-test: $firstLine" +
+                               (if (firstLine.contains("CRASHED"))
+                                    "\n  driver faulted in the isolated proof child — app survived; dump in px5_main.log"
+                                else ""),
+                        fontSize = 11.sp,
+                        color = if (pass) Color(0xFF69F0AE)
+                                else Color(0xFFFF8A65),
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    )
+                }
+                gnmSelfTest?.let { g ->
+                    val firstLine = g.lineSequence().firstOrNull() ?: g
+                    Text(
+                        text = "GNM PM4: $firstLine",
+                        fontSize = 11.sp,
+                        color = if (firstLine.contains("PASS")) Color(0xFF7DD3FC)
+                                else Color(0xFFFF8A65),
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    )
+                }
+                loaderSelfTest?.let { s ->
+                    val firstLine = s.lineSequence().firstOrNull() ?: s
+                    Text(
+                        text = "SELF loader: $firstLine",
+                        fontSize = 11.sp,
+                        color = if (firstLine.contains("PASS")) Color(0xFF7DD3FC)
+                                else Color(0xFFFF8A65),
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    )
+                }
+                // Milestone gate (honest, no fabricated readiness): while
+                // the GPU proof does not pass, a load attempt is a
+                // diagnostic, not an expectation. CPU/GPU completion comes
+                // BEFORE game testing — the project contract.
+                val gpuProofOk = gpuProof == null ||
+                    (gpuProof?.lineSequence()?.firstOrNull() ?: "").contains("PASS |")
+                if (!isStubAbi && !gpuProofOk) {
+                    Text(
+                        text = "MILESTONE: GPU proof not passing — CPU/GPU work " +
+                               "continues before game testing; a load attempt is " +
+                               "a diagnostic only",
+                        fontSize = 11.sp,
+                        color = Color(0xFFE2C74B),
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    )
+                }
                 Text(
-                    text = "GNM PM4: $firstLine",
-                    fontSize = 11.sp,
-                    color = if (firstLine.contains("PASS")) Color(0xFF7DD3FC)
-                            else Color(0xFFFF8A65),
-                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                )
-            }
-            loaderSelfTest?.let { s ->
-                val firstLine = s.lineSequence().firstOrNull() ?: s
-                Text(
-                    text = "SELF loader: $firstLine",
-                    fontSize = 11.sp,
-                    color = if (firstLine.contains("PASS")) Color(0xFF7DD3FC)
-                            else Color(0xFFFF8A65),
-                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                )
-            }
-            // v1.16 — milestone gate banner (honest, no fabricated readiness):
-            // while the GPU/CPU proofs do not pass, a load attempt is a
-            // diagnostic, not an expectation. This is the project contract:
-            // CPU/GPU completion BEFORE game testing.
-            val gpuProofOk = gpuProof == null ||
-                (gpuProof?.lineSequence()?.firstOrNull() ?: "").contains("PASS |")
-            if (!isStubAbi && !gpuProofOk) {
-                Text(
-                    text = "MILESTONE: GPU proof not passing — CPU/GPU work " +
-                           "continues before game testing; a load attempt is " +
-                           "a diagnostic only",
+                    text = inputSummary,
                     fontSize = 11.sp,
                     color = Color(0xFFE2C74B),
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                 )
+                Text(
+                    text = "CPU bridge: $fexCoreStatus" +
+                           (if (isStubAbi) "  •  UI-smoke ABI (engine=arm64-only)" else ""),
+                    fontSize = 11.sp,
+                    color = Color(0xFF9BA7BC)
+                )
             }
-            Text(
-                text = inputSummary,
-                fontSize = 11.sp,
-                color = Color(0xFFE2C74B),
-                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-            )
-            Text(
-                text = "CPU bridge: $fexCoreStatus" +
-                       (if (isStubAbi) "  •  UI-smoke ABI (engine=arm64-only)" else ""),
-                fontSize = 11.sp,
-                color = Color(0xFF9BA7BC)
-            )
 
             // Honest boot attempt: hand the ELF to the real loader and
             // report the genuine result. Dumps use their eboot.bin.
