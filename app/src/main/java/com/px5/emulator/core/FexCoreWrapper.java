@@ -79,6 +79,24 @@ public class FexCoreWrapper {
     public native String nativeRunCpuConformanceTest();
 
     /**
+     * v1.20 — the in-process JIT conformance. SAME synthetic blob, NO fork.
+     *
+     * The 2026-08-31 device session proved the fork child dies inside
+     * ExecuteThread (SIGSEGV si_addr=0x4) even after a full engine rebuild,
+     * with the identical signature since v1.15. This call answers the one
+     * remaining question: does the FEXCore JIT work on this device at all?
+     *
+     * HONEST CONTRACT — READ BEFORE CALLING: without the fork there is no
+     * containment. If the JIT faults, the APP PROCESS dies. The armed
+     * crash handler writes the full evidence-first report (module-resolved
+     * PC, faulting instruction bytes, backtrace) into px5_main.log before
+     * the process dies, and the user relaunches. The UI must label this
+     * button as unsafe. Returns "PASSED — ..." or "FAILED — ..." only when
+     * the process survived.
+     */
+    public native String nativeRunCpuConformanceInProcess();
+
+    /**
      * One-time runtime wiring (call in Application/MainActivity onCreate):
      *  - installs the native crash handler writing px5_crash.log
      *  - hands driver-loader directories to GpuDriverManager (adrenotools)

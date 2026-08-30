@@ -101,6 +101,13 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunCpuConformanceTest(
         "SKIPPED — x86_64 UI-smoke ABI has no FEXCore bridge");
 }
 
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeRunCpuConformanceInProcess(
+        JNIEnv* env, jobject) {
+    return env->NewStringUTF(
+        "SKIPPED — x86_64 UI-smoke ABI has no FEXCore bridge");
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeMapMemory(
         JNIEnv*, jobject, jlong, jlong, jint) {

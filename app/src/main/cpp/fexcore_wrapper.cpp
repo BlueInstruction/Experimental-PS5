@@ -2,6 +2,7 @@
 #include <android/log.h>
 
 #include <cerrno>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -186,8 +187,36 @@ std::string VerifyChildDump(time_t forkWall) {
 //   * the parent survives and reports the real wait status (exit code or
 //     signal) back to the UI;
 //   * the child's own report line comes back through a pipe.
+//
+// v1.20 — streamed child trail. The work function emits "· step" lines
+// straight into the pipe as it progresses (raw write(), no buffering).
+// When the child dies mid-run, the kernel has ALREADY copied every line
+// into the pipe buffer, so the parent still receives the exact step that
+// never completed. The 2026-08-31 session needed precisely this: both
+// probe children died inside ExecuteThread with an EMPTY pipe (the report
+// is written only at the end), and the death point could only be narrowed
+// by reading the engine log around the crash.
+struct ChildTrail {
+    int fd = -1;
+    __attribute__((format(printf, 2, 3)))
+    void step(const char* fmt, ...) {
+        if (fd < 0) return;
+        char text[256];
+        va_list ap;
+        va_start(ap, fmt);
+        int n = vsnprintf(text, sizeof(text), fmt, ap);
+        va_end(ap);
+        if (n < 0) return;
+        if (n > static_cast<int>(sizeof(text)) - 1) n = sizeof(text) - 1;
+        ssize_t r = write(fd, "· ", 2);
+        r = write(fd, text, static_cast<size_t>(n));
+        r = write(fd, "\n", 1);
+        (void)r;
+    }
+};
+
 std::string RunIsolated(const char* name,
-                        const std::function<std::string()>& work,
+                        const std::function<std::string(ChildTrail&)>& work,
                         int timeoutMs = 0) {
     std::fflush(nullptr);
     const time_t forkWall = time(nullptr);
@@ -207,9 +236,11 @@ std::string RunIsolated(const char* name,
     if (pid == 0) {
         // Child: only this test runs here. No JNI, no shared state writes.
         close(fds[0]);
+        ChildTrail trail;
+        trail.fd = fds[1];
         std::string rep;
         try {
-            rep = work();
+            rep = work(trail);
         } catch (const std::exception& e) {
             rep = std::string("FAILED — native exception: ") + e.what();
         } catch (...) {
@@ -229,7 +260,7 @@ std::string RunIsolated(const char* name,
     // terminate quickly; an EXECUTION probe cannot promise that.)
     close(fds[1]);
     fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
-    std::string rep;
+    std::string raw;   // v1.20: everything the pipe carried (trail + report)
     char buf[512];
     ssize_t n;
     int status = 0;
@@ -237,7 +268,7 @@ std::string RunIsolated(const char* name,
     int waitedMs = 0;
     for (;;) {
         while ((n = read(fds[0], buf, sizeof buf)) > 0)
-            rep.append(buf, static_cast<size_t>(n));
+            raw.append(buf, static_cast<size_t>(n));
         if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             close(fds[0]);
             return std::string(name) + ": pipe read failed (errno=" +
@@ -246,7 +277,7 @@ std::string RunIsolated(const char* name,
         const pid_t w = waitpid(pid, &status, WNOHANG);
         if (w == pid) {
             while ((n = read(fds[0], buf, sizeof buf)) > 0)
-                rep.append(buf, static_cast<size_t>(n));
+                raw.append(buf, static_cast<size_t>(n));
             break;
         }
         if (w < 0 && errno != EINTR) {
@@ -259,7 +290,7 @@ std::string RunIsolated(const char* name,
             kill(pid, SIGKILL);
             waitpid(pid, &status, 0);  // reap the killed child
             while ((n = read(fds[0], buf, sizeof buf)) > 0)
-                rep.append(buf, static_cast<size_t>(n));
+                raw.append(buf, static_cast<size_t>(n));
             break;
         }
         usleep(20 * 1000);
@@ -267,12 +298,31 @@ std::string RunIsolated(const char* name,
     }
     close(fds[0]);
 
+    // v1.20: split the pipe stream — "· " lines are the child's progress
+    // trail, everything else is the report body. The body keeps the exact
+    // string contract callers already match on (LOAD OK / EXEC EXIT / ...);
+    // the trail is appended only in the free-form branches below.
+    std::string trail;
+    std::string rep;
+    {
+        size_t pos = 0;
+        while (pos < raw.size()) {
+            size_t nl = raw.find('\n', pos);
+            if (nl == std::string::npos) nl = raw.size();
+            const std::string ln = raw.substr(pos, nl - pos);
+            if (ln.rfind("· ", 0) == 0) trail += "  " + ln.substr(2) + "\n";
+            else if (!ln.empty()) rep += ln + "\n";
+            pos = nl + 1;
+        }
+    }
+
     if (timedOut) {
         std::string out = std::string(name) + ": TIMEOUT after " +
                           std::to_string(waitedMs) + " ms — the probe child "
                           "was still running and was killed. NO CRASH: the "
                           "guest simply did not exit within the budget.";
         out += "\n" + VerifyChildDump(forkWall);
+        if (!trail.empty()) out += "\nchild trail (in order):\n" + trail;
         if (!rep.empty()) out += "\npartial report before kill: " + rep;
         return out;
     }
@@ -281,6 +331,8 @@ std::string RunIsolated(const char* name,
         std::string out = std::string(name) + ": CRASHED in isolated child (signal " +
                           std::to_string(sig) + ")\n";
         out += VerifyChildDump(forkWall);
+        if (!trail.empty()) out += "\nchild trail (last completed step is the one "
+                                  "whose successor never appeared):\n" + trail;
         if (!rep.empty()) out += "\npartial report before death: " + rep;
         return out;
     }
@@ -316,10 +368,13 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadExecutableIsolated(
 
     const std::string report = RunIsolated(
         "isolated load",
-        [path]() -> std::string {
+        [path](ChildTrail& t) -> std::string {
+            t.step("magic dispatch begin");
             const bool isSelf = PathLooksLikeSelf(path);
+            t.step("magic dispatch: %s", isSelf ? "SELF" : "ELF");
             auto& emu = PX5::Emulator::GetInstance();
             const bool ok = emu.LoadExecutable(path, isSelf);
+            t.step("LoadExecutable returned ok=%d", ok ? 1 : 0);
             const auto& img = emu.LoadedImage();
             if (ok) {
                 char line[256];
@@ -385,12 +440,14 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunExecutionProbe(
 
     const std::string report = RunIsolated(
         "execution probe",
-        [path]() -> std::string {
+        [path](ChildTrail& t) -> std::string {
+            t.step("engine rebuild (ResetForChild) begin");
             // v1.16: rebuild the engine in the child — the inherited context
             // was built pre-fork in a multithreaded parent; both v1.15
             // execution children died deterministically inside
             // ExecuteThread. Also applies deferred (preset) overrides.
             PX5::FexCoreIntegration::ResetForChild();
+            t.step("engine rebuild ok");
             const bool isSelf = PathLooksLikeSelf(path);
             auto& emu = PX5::Emulator::GetInstance();
             if (!emu.LoadExecutable(path, isSelf)) {
@@ -403,7 +460,10 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunExecutionProbe(
             const auto& img = emu.LoadedImage();
             PX5::Breadcrumb::Set("exec probe: load ok entry=0x%llx",
                                  (unsigned long long)img.entryPoint);
+            t.step("load ok entry=0x%llx — execute enter",
+                   (unsigned long long)img.entryPoint);
             const auto res = emu.ExecuteLoadedGuest();
+            t.step("execute returned started=%d", res.started ? 1 : 0);
             PX5::Breadcrumb::Set("exec probe: exec done started=%d",
                                  res.started ? 1 : 0);
             return FormatExecResult(res);
@@ -419,10 +479,14 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunCpuConformanceTest(
     // Fork-isolated: a JIT fault reports evidence instead of killing the app.
     const std::string report = RunIsolated(
         "CPU conformance",
-        []() -> std::string {
+        [](ChildTrail& t) -> std::string {
+            t.step("engine rebuild (ResetForChild) begin");
             // v1.16: fresh engine in the child (see execution probe note).
             PX5::FexCoreIntegration::ResetForChild();
+            t.step("engine rebuild ok");
+            t.step("conformance enter (blob: mov eax,40; add eax,2; hlt)");
             const bool ok = PX5::FexCoreIntegration::RunConformanceTest();
+            t.step("conformance returned ok=%d", ok ? 1 : 0);
             return ok
                 ? "PASSED — guest blob (mov eax,40; add eax,2; hlt) executed "
                   "on the ARM64 JIT and reached its HLT exit"
@@ -430,6 +494,37 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunCpuConformanceTest(
         },
         15000);
     return env->NewStringUTF(report.c_str());
+}
+
+// v1.20 — THE decisive discriminator for the CPU gate.
+//
+// Same synthetic blob, same RunConformanceTest — but NO fork. The
+// 2026-08-31 device session proved the fork child dies inside
+// ExecuteThread (si_addr=0x4, right after "Guest thread created") even
+// after a full ResetForChild rebuild — and that signature has been
+// identical since v1.15. The open question is whether the JIT itself
+// works on this device:
+//   * IN-PROCESS PASSES  → the JIT is healthy; the fork+rebuild path is
+//     the poison (process-level state that Shutdown/Initialize does not
+//     rebuild). The fix moves to the probe architecture.
+//   * IN-PROCESS CRASHES → the FEXCore JIT is broken on this device at a
+//     deeper level. The armed crash handler (v1.20, evidence-first) then
+//     writes the module-resolved PC + faulting instruction bytes into
+//     px5_main.log before the process dies — symbolizable against the CI
+//     unstripped libpx5.so artifact.
+// Honest contract: this call CAN kill the app. That is the price of the
+// evidence, and the UI labels the button as such.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeRunCpuConformanceInProcess(
+        JNIEnv* env, jobject) {
+    PX5::Breadcrumb::Set("jni: CpuConformance IN-PROCESS (no fork)");
+    const bool ok = PX5::FexCoreIntegration::RunConformanceTest();
+    return env->NewStringUTF(ok
+        ? "PASSED — guest blob (mov eax,40; add eax,2; hlt) executed on the "
+          "device JIT, in-process, no fork. The isolated-child crash is a "
+          "fork/rebuild artifact, NOT a JIT fault."
+        : "FAILED — in-process blob did not run cleanly (no fork involved; "
+          "the crash handler captured the evidence if this died)");
 }
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -465,12 +560,16 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunFoundationSelfTest(
     // Fork-isolated like the conformance test: evidence over fatal crashes.
     const std::string report = RunIsolated(
         "engine self-test",
-        []() -> std::string {
+        [](ChildTrail& t) -> std::string {
+            t.step("engine rebuild (ResetForChild) begin");
             // v1.16: fresh engine in the child — SelfTestFoundation executes
             // guests (conformance + raw pipeline) and must not inherit a
             // pre-fork FEXCore context built by the multithreaded parent.
             PX5::FexCoreIntegration::ResetForChild();
-            return PX5::Emulator::GetInstance().SelfTestFoundation();
+            t.step("engine rebuild ok — SelfTestFoundation enter");
+            const std::string r = PX5::Emulator::GetInstance().SelfTestFoundation();
+            t.step("SelfTestFoundation returned (%zu chars)", r.size());
+            return r;
         },
         30000);
     return env->NewStringUTF(report.c_str());
@@ -568,9 +667,11 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGpuProof(JNIEnv* env,
 
     const std::string report = RunIsolated(
         "GPU proof",
-        [&gpu]() -> std::string {
+        [&gpu](ChildTrail& t) -> std::string {
+            t.step("self-contained proof enter");
             std::string detail;
             const bool ok = gpu.RunSelfContainedProof(detail);
+            t.step("proof returned ok=%d", ok ? 1 : 0);
             return std::string(ok ? "PASS | " : "FAIL | ") + detail;
         },
         15000);
@@ -595,9 +696,11 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGnmSelfTest(JNIEnv* env,
     // test child plus a verified dump, never the app process.
     const std::string report = RunIsolated(
         "GNM self-test",
-        []() -> std::string {
+        [](ChildTrail& t) -> std::string {
+            t.step("GNM decoder self-test enter");
             std::string rep;
             PX5::Gnm::RunGnmSelfTest(&rep);
+            t.step("GNM self-test returned (%zu chars)", rep.size());
             return rep;
         },
         10000);
@@ -615,9 +718,11 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunLoaderSelfTest(JNIEnv* env,
     // child) — same containment contract as the other diagnostics.
     const std::string report = RunIsolated(
         "SELF loader self-test",
-        []() -> std::string {
+        [](ChildTrail& t) -> std::string {
+            t.step("SELF extractor self-test enter");
             std::string rep;
             PX5::SelfExtract::RunSelfExtractSelfTest(&rep);
+            t.step("extractor self-test returned (%zu chars)", rep.size());
             return rep;
         },
         10000);

@@ -609,6 +609,62 @@ private fun LazyListScope.debugSection(
             }
             Spacer(Modifier.height(10.dp))
 
+            // v1.20 — the CPU-gate discriminator. Same blob, NO fork: if the
+            // JIT faults, the app dies and the evidence-first crash handler
+            // writes the module-resolved PC into px5_main.log. The button
+            // says exactly that — no softened wording.
+            var inProcResult by remember { mutableStateOf<String?>(null) }
+            Button(
+                onClick = {
+                    soundManager.playActivationSound()
+                    inProcResult = "running in-process (no containment)…"
+                    scope.launch(Dispatchers.Default) {
+                        val rep = try {
+                            wrapper.nativeRunCpuConformanceInProcess()
+                        } catch (e: Exception) {
+                            "FAILED — ${e.message}"
+                        }
+                        inProcResult = rep
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFB3591F), contentColor = Color.White
+                ),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Icon(Icons.Default.Warning, contentDescription = null,
+                     modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Run conformance IN-PROCESS (unsafe — may kill the app)",
+                     fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+            Text(
+                text = "No fork containment. If the device JIT faults, the " +
+                       "app closes — the crash report (module-resolved PC + " +
+                       "instruction bytes) is still written to the unified " +
+                       "log before death. A PASS here proves the JIT works " +
+                       "and the isolated-child crash is a fork artifact.",
+                fontSize = 11.sp,
+                color = px5Colors().textSecondary,
+                fontFamily = TitilliumFontFamily,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+            inProcResult?.let { res ->
+                Text(
+                    text = res,
+                    fontSize = 12.sp,
+                    color = when {
+                        res.startsWith("PASSED") -> px5Colors().success
+                        res.startsWith("SKIPPED") -> px5Colors().textSecondary
+                        else -> px5Colors().danger
+                    },
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+
             var running by remember { mutableStateOf(false) }
             var report by remember { mutableStateOf<String?>(null) }
             Button(

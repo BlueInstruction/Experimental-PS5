@@ -89,7 +89,7 @@ const char* SignalName(int sig) {
 // safe on bionic), and every reported address gains "lib.so+0xOFFSET" using
 // the tombstone convention rel = addr - map_start + mapping_pgoff.
 // ---------------------------------------------------------------------------
-struct MapEntry { uintptr_t start; uintptr_t end; uintptr_t pgoff; char name[160]; };
+struct MapEntry { uintptr_t start; uintptr_t end; uintptr_t pgoff; bool anon; char name[160]; };
 constexpr int kMaxMapEntries = 64;
 struct MapTable { MapEntry e[kMaxMapEntries]; int n = 0; };
 
@@ -121,8 +121,11 @@ void ParseMapLine(char* line, MapTable& t) {
     ++p;
     if (!ParseHex(p, end)) return;
     while (*p == ' ') ++p;
-    // perms "rwxp": only executable, file-backed entries are useful for
-    // symbolization; skipping the rest keeps the table small.
+    // perms "rwxp": only executable entries are useful for symbolization.
+    // v1.20: ANONYMOUS exec mappings are kept too — the FEXCore JIT emits
+    // generated code into exactly such mappings, and "PC inside an anon
+    // exec region" is by itself a decisive diagnostic (crash inside
+    // generated code, not inside any library).
     if (p[0] == '\0' || p[1] == '\0' || p[2] == '\0') return;
     if (p[2] != 'x') return;
     p += 4;
@@ -134,13 +137,19 @@ void ParseMapLine(char* line, MapTable& t) {
     while (*p == ' ') ++p;                    // inode
     while (*p != ' ' && *p != '\0') ++p;
     while (*p == ' ') ++p;
-    if (*p == '\0' || *p != '/') return;      // anonymous mapping
     const size_t len = strlen(p);
-    if (len == 0 || len >= sizeof(MapEntry::name)) return;
+    const bool anon = (len == 0) || (*p != '/');
+    if (!anon && (len == 0 || len >= sizeof(MapEntry::name))) return;
 
     MapEntry& e = t.e[t.n];
-    e.start = start; e.end = end; e.pgoff = pgoff;
-    memcpy(e.name, p, len + 1);
+    e.start = start; e.end = end; e.pgoff = pgoff; e.anon = anon;
+    if (anon) {
+        snprintf(e.name, sizeof(e.name), "[anon exec %08lx-%08lx]",
+                 static_cast<unsigned long>(start),
+                 static_cast<unsigned long>(end));
+    } else {
+        memcpy(e.name, p, len + 1);
+    }
     ++t.n;
 }
 
@@ -234,6 +243,15 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {   // NOLINT(bugpro
 
     char line[512];
     auto append = [&](const char* s) { WAppend(w, s); };
+    // v1.20: flush what exists to disk after every critical section. The
+    // 2026-08-31 v1.19 session lost the report mid-write — the file kept
+    // only the header+signal line (128 bytes), so the ONE thing every
+    // downstream decision needs, the module-resolved faulting PC, was
+    // never written. Report order is now evidence-first and durable.
+    auto sync = [&]() {
+        if (w.latestFd >= 0 && w.latestFd != STDERR_FILENO) fsync(w.latestFd);
+        if (w.mainFd >= 0) fsync(w.mainFd);
+    };
 
     snprintf(line, sizeof(line), "\n==== PX5 CRASH %04d-%02d-%02d %02d:%02d:%02d ====\n",
              tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
@@ -253,40 +271,44 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {   // NOLINT(bugpro
              stamp);
     append(line);
 
-    // Module table FIRST: every address below gains meaning from it.
+    // ---- section 1: the PC line. Nothing bulkier runs before this. -----
     MapTable maps;
     BuildMapTable(maps);
-    if (maps.n > 0) {
-        append("modules (exec, file-backed — rel=addr-start+pgoff):\n");
-        for (int i = 0; i < maps.n; ++i) {
-            const char* slash = strrchr(maps.e[i].name, '/');
-            snprintf(line, sizeof(line), "  %08lx-%08lx %s+0..  %s\n",
-                     static_cast<unsigned long>(maps.e[i].start),
-                     static_cast<unsigned long>(maps.e[i].end),
-                     slash ? slash + 1 : maps.e[i].name,
-                     maps.e[i].name);
-            append(line);
-        }
-    } else {
-        append("modules: /proc/self/maps unavailable or no exec mappings\n");
-    }
-
-    // The last known native steps. v1.16: each crumb carries its tid, so
-    // parallel diagnostic threads can no longer blur which step belonged
-    // to which thread (the v1.15 08:15:31 dump mixed three threads).
-    append("last breadcrumbs (tid-prefixed):\n");
-    {
-        long n1 = Breadcrumb::DumpToFd(w.latestFd);
-        (void)n1;
-        if (w.mainFd >= 0) {
-            long n2 = Breadcrumb::DumpToFd(w.mainFd);
-            (void)n2;
-        }
-    }
-
-    if (uctx) {
-        auto* uc = static_cast<ucontext_t*>(uctx);
+    void* pcAddr = FaultingPc(uctx);
+    if (uctx && pcAddr) {
 #if defined(__aarch64__)
+        auto* uc = static_cast<ucontext_t*>(uctx);
+        const auto& mc = uc->uc_mcontext;
+        char pcBuf[256], lrBuf[256];
+        FormatAddr(maps, static_cast<uintptr_t>(mc.pc), pcBuf, sizeof(pcBuf));
+        FormatAddr(maps, static_cast<uintptr_t>(mc.regs[30]), lrBuf, sizeof(lrBuf));
+        snprintf(line, sizeof(line),
+                 "pc=%s\nlr=%s\nsp=0x%016llx pstate=0x%08llx\n",
+                 pcBuf, lrBuf,
+                 (unsigned long long)mc.sp,
+                 (unsigned long long)mc.pstate);
+        append(line);
+#else
+        char pcBuf[256];
+        FormatAddr(maps, reinterpret_cast<uintptr_t>(pcAddr), pcBuf, sizeof(pcBuf));
+        snprintf(line, sizeof(line), "pc=%s\n", pcBuf);
+        append(line);
+#endif
+        // Anonymous-exec hit: the faulting PC is inside a JIT/generated
+        // code region rather than any library. That single fact routes
+        // the whole investigation.
+        const int pcMap = FindMap(maps, reinterpret_cast<uintptr_t>(pcAddr));
+        if (pcMap >= 0 && maps.e[pcMap].anon) {
+            append("NOTE: pc is inside an ANONYMOUS exec mapping "
+                   "(JIT/generated code region), not in any library\n");
+        }
+        sync();
+    }
+
+    // ---- section 2: full register dump ----------------------------------
+    if (uctx) {
+#if defined(__aarch64__)
+        auto* uc = static_cast<ucontext_t*>(uctx);
         const auto& mc = uc->uc_mcontext;
         append("registers:\n");
         for (int i = 0; i < 31; i += 3) {
@@ -297,42 +319,119 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {   // NOLINT(bugpro
                      i+2, (unsigned long long)(i+2 < 31 ? mc.regs[i+2] : 0));
             append(line);
         }
-        char pcBuf[256], lrBuf[256];
-        FormatAddr(maps, static_cast<uintptr_t>(mc.pc), pcBuf, sizeof(pcBuf));
-        FormatAddr(maps, static_cast<uintptr_t>(mc.regs[30]), lrBuf, sizeof(lrBuf));
-        snprintf(line, sizeof(line),
-                 "  sp=0x%016llx pc=%s lr(x30)=%s pstate=0x%08llx\n",
-                 (unsigned long long)mc.sp, pcBuf, lrBuf,
-                 (unsigned long long)mc.pstate);
-        append(line);
+        sync();
+#endif
 
-        // v1.16: every frame resolved against the module table — the raw
-        // absolute address is kept alongside so ndk-stack still works.
+        // ---- section 3: faulting instruction bytes ----------------------
+        // Reads [pc-16, pc+32) without any allocator: process_vm_readv
+        // (pure syscall) first, /proc/self/mem pread as fallback. JIT
+        // regions can vanish between fault and handler; every failure
+        // degrades to an honest "(unreadable)".
+        if (pcAddr) {
+            const uintptr_t pcVal = reinterpret_cast<uintptr_t>(pcAddr);
+            if (pcVal >= 16) {
+                const uintptr_t start = pcVal - 16;
+                unsigned char bytes[48];
+                memset(bytes, 0xCC, sizeof bytes);
+                bool got = false;
+                struct iovec lIo { bytes, sizeof bytes };
+                struct iovec rIo { reinterpret_cast<void*>(start), sizeof bytes };
+                const long pr = process_vm_readv(getpid(), &lIo, 1, &rIo, 1, 0);
+                if (pr == static_cast<long>(sizeof bytes)) {
+                    got = true;
+                } else {
+                    const int memFd = open("/proc/self/mem", O_RDONLY);
+                    if (memFd >= 0) {
+                        const off_t off = static_cast<off_t>(start);
+                        const ssize_t rd = pread(memFd, bytes, sizeof bytes, off);
+                        if (rd == static_cast<ssize_t>(sizeof bytes)) got = true;
+                        close(memFd);
+                    }
+                }
+                if (got) {
+                    append("code bytes at pc-16 (caret line marks the pc byte):\n");
+                    for (int row = 0; row < 3; ++row) {
+                        char* p = line;
+                        *p++ = ' ';
+                        *p++ = ' ';
+                        const uintptr_t rowStart = start + static_cast<uintptr_t>(row) * 16;
+                        p += snprintf(p, 24, "%016lx: ",
+                                      static_cast<unsigned long>(rowStart));
+                        for (int b = 0; b < 16; ++b) {
+                            p += snprintf(p, 4, "%02x ", bytes[row * 16 + b]);
+                        }
+                        *p++ = '\n';
+                        *p = '\0';
+                        append(line);
+                        if (pcVal >= rowStart && pcVal < rowStart + 16) {
+                            // Separate caret row under the hex row: spaces
+                            // up to the pc byte's column, then '^'.
+                            const int col = static_cast<int>(pcVal - rowStart);
+                            const int caretCol = 2 + 18 + col * 3;
+                            char* q = line;
+                            for (int k = 0; k < caretCol && k < 480; ++k) *q++ = ' ';
+                            *q++ = '^';
+                            *q++ = '\n';
+                            *q = '\0';
+                            append(line);
+                        }
+                    }
+                    sync();
+                } else {
+                    append("code bytes: (unreadable — region gone or protected)\n");
+                }
+            }
+        }
+
+        // ---- section 4: module-resolved backtrace ------------------------
         BtCtx bt{};
         _Unwind_Backtrace(BtFn, &bt);
         append("backtrace (raw + module-resolved):\n");
-        for (int i = 0; i < bt.n; ++i) {
+        for (int i = 0; i < bt.n && i < 12; ++i) {
             char addrBuf[256];
             FormatAddr(maps, reinterpret_cast<uintptr_t>(bt.frames[i]),
                        addrBuf, sizeof(addrBuf));
             snprintf(line, sizeof(line), "  #%02d pc %s\n", i, addrBuf);
             append(line);
         }
-#else
-        (void)uc;
-        BtCtx bt{};
-        _Unwind_Backtrace(BtFn, &bt);
-        append("backtrace (register dump is arm64-only):\n");
-        for (int i = 0; i < bt.n; ++i) {
-            char addrBuf[256];
-            FormatAddr(maps, reinterpret_cast<uintptr_t>(bt.frames[i]),
-                       addrBuf, sizeof(addrBuf));
-            snprintf(line, sizeof(line), "  #%02d pc %s\n", i, addrBuf);
-            append(line);
-        }
-#endif
+        sync();
     } else {
         append("ucontext unavailable (synthetic raise)\n");
+    }
+
+    // ---- section 5: breadcrumbs ------------------------------------------
+    append("last breadcrumbs (tid-prefixed):\n");
+    {
+        long n1 = Breadcrumb::DumpToFd(w.latestFd);
+        (void)n1;
+        if (w.mainFd >= 0) {
+            long n2 = Breadcrumb::DumpToFd(w.mainFd);
+            (void)n2;
+        }
+    }
+
+    // ---- section 6: bounded module table ---------------------------------
+    // Only entries that carry meaning for THIS report: every module a
+    // reported address falls into, plus the px5/fex/linker set. The full
+    // 64-row table was pure noise and delayed the sections above.
+    if (maps.n > 0) {
+        append("modules (relevant, exec):\n");
+        int written = 0;
+        for (int i = 0; i < maps.n && written < 14; ++i) {
+            const char* nm = maps.e[i].name;
+            const bool relevant = maps.e[i].anon ||
+                strstr(nm, "px5") || strstr(nm, "fex") ||
+                strstr(nm, "libc.so") || strstr(nm, "linker");
+            if (!relevant) continue;
+            snprintf(line, sizeof(line), "  %08lx-%08lx %s\n",
+                     static_cast<unsigned long>(maps.e[i].start),
+                     static_cast<unsigned long>(maps.e[i].end), nm);
+            append(line);
+            ++written;
+        }
+        sync();
+    } else {
+        append("modules: /proc/self/maps unavailable or no exec mappings\n");
     }
 
     append("full session log: ");
@@ -350,14 +449,30 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {   // NOLINT(bugpro
 }
 
 void Handler(int sig, siginfo_t* info, void* uctx) {
-    // Nested fault while reporting: the report path itself faulted. Get a
-    // minimal marker on stderr and die with the true signal — a corrupted
-    // half-report is worse than a short honest marker.
+    // Nested fault while reporting: the report path itself faulted. The
+    // marker goes to stderr AND is appended to the partial report file, so
+    // the unified log always explains why a dump is short.
     bool expected = false;
     if (!g_inHandler.compare_exchange_strong(expected, true)) {
+        // v1.20: the marker lands in the report FILE too, not just stderr —
+        // the 2026-08-31 dump stopped mid-report with no explanation of why
+        // (the stderr line is invisible in the unified log).
         const char msg[] = "PX5: nested fault inside crash handler\n";
         ssize_t n = write(STDERR_FILENO, msg, sizeof(msg) - 1);
         (void)n;
+        char p2[512];
+        snprintf(p2, sizeof(p2), "%s/px5_crash_latest.log",
+                 g_logsDir.empty() ? "/data/local/tmp" : g_logsDir.c_str());
+        const int nf = open(p2, O_WRONLY | O_APPEND, 0644);
+        if (nf >= 0) {
+            const char why[] =
+                "\n[nested fault inside the crash handler — the report "
+                "above is PARTIAL; the sections that follow never ran]\n";
+            ssize_t n2 = write(nf, why, sizeof(why) - 1);
+            (void)n2;
+            fsync(nf);
+            close(nf);
+        }
         signal(sig, SIG_DFL);
         raise(sig);
         return;

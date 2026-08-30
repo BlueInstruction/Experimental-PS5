@@ -54,3 +54,17 @@ jobs:
         name: px5-alpha-debug-apk
         path: app/build/outputs/apk/debug/*.apk
         retention-days: 30
+
+    # v1.20 — symbolization pair for the crash reports. The crash handler
+    # now emits "libpx5.so+0xOFFSET" lines; those offsets resolve to
+    # functions ONLY against the UNSTRIPPED native libraries (the APK copy
+    # is stripped by AGP). The pre-strip copies live in the cxx obj dirs.
+    - name: Upload unstripped native libraries (for crash symbolization)
+      uses: actions/upload-artifact@v4
+      with:
+        name: px5-native-symbols-arm64
+        path: |
+          app/.cxx/**/obj/arm64-v8a/*.so
+          app/build/intermediates/cxx/**/obj/arm64-v8a/*.so
+        if-no-files-found: warn
+        retention-days: 30
