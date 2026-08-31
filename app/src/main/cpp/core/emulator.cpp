@@ -246,8 +246,11 @@ std::string Emulator::SelfTestFoundation() {
             lines.push_back("[FAIL] 5. loader: " + img.error);
             goto done;
         }
-        if (img.entryPoint != TEST_GUEST_LOAD_VADDR + 0x80 ||
+        if (img.entryPoint != TEST_GUEST_LOAD_VADDR ||
             img.segments.size() != 1) {
+            // v1.29: the fixture's e_entry is now the true code VA (the
+            // old generator double-counted p_offset and the vc29 session
+            // executed zeros past the image — the app-killing SIGSEGV).
             lines.push_back("[FAIL] 5. loader metadata mismatch");
             goto done;
         }
@@ -291,10 +294,18 @@ std::string Emulator::SelfTestFoundation() {
                 ? CrashHandler::LogsDir() + "/px5_guest.self"
                 : std::string("/data/local/tmp/px5_guest.self"));
 
-        const std::vector<uint8_t> innerElf(
+        const std::vector<uint8_t> elfFile(
             TEST_GUEST_ELF_V2, TEST_GUEST_ELF_V2 + TEST_GUEST_ELF_V2_SIZE);
-        const auto built = SelfFixtures::BuildSelfContainer(
-            {innerElf}, {SelfExtract::kSegFlagSigned}, {innerElf.size()});
+        // v1.29: the container is built in the orbis layout shadPS4's
+        // production parser uses (self header + segment table + inner
+        // ELF header/phdrs + payloads) — the same shape a real dump
+        // carries, from one shared builder with the extractor self-test.
+        const auto built = SelfFixtures::BuildSelfFromWholeElf(
+            elfFile, {SelfExtract::kSegFlagSigned});
+        if (built.bytes.empty()) {
+            lines.push_back("[FAIL] 5b. SELF fixture build returned empty");
+            goto done;
+        }
 
         std::ofstream f(selfPath, std::ios::binary | std::ios::trunc);
         f.write(reinterpret_cast<const char*>(built.bytes.data()),

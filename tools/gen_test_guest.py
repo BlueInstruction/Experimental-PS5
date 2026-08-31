@@ -196,11 +196,19 @@ TEST_GUEST_UD2_TRAPNO = 6                       # X86_TRAPNO_UD
 TEST_GUEST_UD2_SICODE = 2                       # ILL_ILLOPN
 
 def wrap_elf(code):
+    # v1.29 FIX (the vc29 app-killer): e_entry is a VIRTUAL ADDRESS. The
+    # code sits at file offset PAYLOAD_FILE_OFF inside a segment whose
+    # p_vaddr is TEST_GUEST_LOAD_VADDR, so the code lands at guest VA
+    # TEST_GUEST_LOAD_VADDR — NOT at +PAYLOAD_FILE_OFF. The old formula
+    # (vaddr + file offset) double-counted p_offset: the vc29 device
+    # session dispatched at 0x140000080, 82 bytes past the 46-byte image,
+    # executed zero-filled memory (x86 00 00 = add byte [rax],al with
+    # rax=0) and the guest null-store SIGSEGV killed the whole app.
     ehdr = struct.pack(
         "<16sHHIQQQIHHHHHH",
         b"\x7fELF\x02\x01\x01\x00" + b"\x00"*8,
         2, 62, 1,
-        TEST_GUEST_LOAD_VADDR + PAYLOAD_FILE_OFF,
+        TEST_GUEST_LOAD_VADDR,
         64, 0, 0, 64, 56, 1, 0, 0, 0)
     phdr = struct.pack(
         "<IIQQQQQQ", 1, 7, PAYLOAD_FILE_OFF,
@@ -283,7 +291,7 @@ with open("app/src/main/cpp/tests/test_guest.h", "w") as f:
 
 print(f"v1 code : {len(CODE1)} B | elf1: {len(ELF1)} B")
 print(f"v2 code : {len(CODE2)} B | elf2: {len(ELF2)} B "
-      f"@ entry {TEST_GUEST_LOAD_VADDR+PAYLOAD_FILE_OFF:#x}")
+      f"@ entry {TEST_GUEST_LOAD_VADDR:#x}")
 print(f"ud2 trap fixture: {TEST_GUEST_UD2.hex(' ')} "
       f"-> signal={TEST_GUEST_UD2_SIGNAL} trapno={TEST_GUEST_UD2_TRAPNO} "
       f"si_code={TEST_GUEST_UD2_SICODE}")

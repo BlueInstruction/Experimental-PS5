@@ -34,9 +34,11 @@ public class FexCoreWrapper {
 
     /**
      * Format-agnostic load for the game-boot flow: the native side peeks
-     * the file's own magic (SELF 0x1D22154F vs ELF 0x7F 'E' 'L' 'F') and
-     * dispatches to the matching loader. Returns the real result; the
-     * reason for any rejection is in logcat + the breadcrumb ring.
+     * the file's own magic (SELF 0x1D3D154F — orbis/shadPS4-verified in
+     * v1.29 — vs ELF 0x7F 'E' 'L' 'F') and dispatches to the matching
+     * loader. Returns the real result; the reason for any rejection is
+     * in logcat + the breadcrumb ring, and unknown formats name their
+     * first 16 bytes so the next fix is evidence-driven.
      */
     public native boolean nativeLoadExecutable(String path);
 

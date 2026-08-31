@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 
@@ -13,7 +14,6 @@ namespace PX5 {
 
 namespace {
 
-constexpr uint32_t SELF_MAGIC  = 0x1D22154FU;   // PS5 Signed ELF
 constexpr uint32_t PT_LOAD     = 1;
 
 #pragma pack(push, 1)
@@ -53,6 +53,20 @@ uint32_t ProtFromFlags(uint32_t pFlags) {
     return out;
 }
 
+// v1.29: first-16-bytes evidence. The vc29 session ended on "bad ELF
+// magic" for a 7.7 MB eboot.bin with zero bytes named — the single most
+// expensive missing clue we have produced. Any format verdict now names
+// the bytes it rejected.
+std::string HexDumpHead(const uint8_t* p, size_t avail) {
+    const size_t n = std::min<size_t>(avail, 16);
+    char b[3 * 16 + 1];
+    size_t o = 0;
+    for (size_t i = 0; i < n; ++i)
+        o += static_cast<size_t>(snprintf(b + o, sizeof(b) - o,
+                                          "%s%02X", i ? " " : "", p[i]));
+    return std::string(b);
+}
+
 std::string ReadWholeFile(const std::string& path, std::vector<uint8_t>& data) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f.is_open()) return "cannot open file: " + path + " (" +
@@ -85,9 +99,12 @@ bool ElfLoader::LoadSelf(const std::string& filePath, LoadedElfImage& out) {
     }
     Breadcrumb::Set("self: read %zu bytes", data.size());
     if (!(data.size() >= 4 &&
-          *reinterpret_cast<const uint32_t*>(data.data()) == SELF_MAGIC)) {
-        // Not actually a SELF: fall through to normal ELF handling so
-        // callers with plain ELFs misnamed as .self still work.
+          *reinterpret_cast<const uint32_t*>(data.data()) ==
+          SelfExtract::kSelfMagic)) {
+        // Not a SELF container (magic 0x1D3D154F, orbis/shadPS4-verified):
+        // fall through to normal ELF handling so plain ELFs misnamed as
+        // .self still work. The ELF path carries the byte evidence when
+        // this file is neither format.
         Breadcrumb::Set("self: no SELF magic -> ELF path");
         return LoadElfFile(filePath, out);
     }
@@ -102,9 +119,12 @@ bool ElfLoader::LoadSelf(const std::string& filePath, LoadedElfImage& out) {
     // Log the container facts either way — a dump that disagrees with the
     // parser must leave named evidence in the log, not a bare false.
     PX5_LOGI(LogCategory::LOADER,
-             "SELF %s: segments=%u extracted=%u inflated=%u encryptedRefused=%u",
+             "SELF %s: segments=%u extracted=%u inflated=%u encryptedRefused=%u "
+             "innerPhdrs=%u innerEntry=0x%llx [%s]",
              filePath.c_str(), ex.segmentCount, ex.extractedSegments,
-             ex.inflatedSegments, ex.refusedEncrypted);
+             ex.inflatedSegments, ex.refusedEncrypted,
+             ex.innerPhdrs, (unsigned long long)ex.innerEntry,
+             ex.headerFacts.c_str());
 
     if (!ex.ok) {
         out.isSelf = true;
@@ -166,8 +186,13 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
     memcpy(&ehdr, data, sizeof(ehdr));
 
     if (memcmp(ehdr.ident, "\x7f""ELF", 4) != 0) {
-        out.error = "bad ELF magic";
-        PX5_LOGE(LogCategory::LOADER, "%s: bad magic", origin.c_str());
+        // Named evidence instead of a bare verdict: these bytes decide
+        // the next fix (v1.28's constant was wrong and we could not see
+        // it from the log).
+        out.error = "bad ELF magic — first bytes: " +
+                    HexDumpHead(data, size);
+        PX5_LOGE(LogCategory::LOADER, "%s: bad magic [%s]",
+                 origin.c_str(), out.error.c_str());
         return false;
     }
     if (ehdr.ident[4] != 2 /*ELFCLASS64*/) { out.error = "not ELF64";   return false; }
@@ -218,10 +243,16 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
 
         if (!mem.MapMemory(seg.vaddr, seg.memsz, seg.flags,
                            "PT_LOAD#" + std::to_string(i))) {
-            out.error = "segment mapping rejected by memory manager (outside window?)";
+            out.error = "segment mapping rejected: VA=0x" +
+                        [&]{ char b[24]; snprintf(b, sizeof(b), "%llx",
+                             (unsigned long long)ph.vaddr); return std::string(b); }() +
+                        " size=0x" +
+                        [&]{ char b[24]; snprintf(b, sizeof(b), "%zx",
+                             seg.memsz); return std::string(b); }() +
+                        " (" + mem.GetWindowInfoString() + ")";
             PX5_LOGE(LogCategory::LOADER,
-                     "MapMemory FAILED for segment #%u VA=0x%llx",
-                     i, (unsigned long long)ph.vaddr);
+                     "MapMemory FAILED for segment #%u VA=0x%llx — %s",
+                     i, (unsigned long long)ph.vaddr, out.error.c_str());
             return false;
         }
 
@@ -258,6 +289,33 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
     }
 
     out.entryPoint = ehdr.entry ? ehdr.entry : out.imageLowVa;
+
+    // v1.29 hard gate — the vc29 lesson. The foundation fixture carried
+    // entry = image base + 0x80 while the segment held only 46 bytes, so
+    // the JIT executed zero-filled memory (x86 00 00 = add byte [rax],al)
+    // and the guest null-store became a host SIGSEGV that killed the
+    // whole in-process suite. An entry outside every mapped segment is
+    // now a named loader error, never a dispatch.
+    bool entryMapped = false;
+    for (const auto& s : out.segments) {
+        if (out.entryPoint >= s.vaddr &&
+            out.entryPoint <  s.vaddr + s.memsz) { entryMapped = true; break; }
+    }
+    if (!entryMapped) {
+        out.error =
+            "entry 0x" + [&]{ char b[24]; snprintf(b, sizeof(b), "%llx",
+                (unsigned long long)out.entryPoint); return std::string(b); }() +
+            " outside every PT_LOAD segment [0x" +
+            [&]{ char b[24]; snprintf(b, sizeof(b), "%llx",
+                (unsigned long long)out.imageLowVa); return std::string(b); }() +
+            "..0x" +
+            [&]{ char b[24]; snprintf(b, sizeof(b), "%llx",
+                (unsigned long long)out.imageHighVa); return std::string(b); }() +
+            "] — refusing to execute";
+        PX5_LOGE(LogCategory::LOADER, "%s: %s",
+                 origin.c_str(), out.error.c_str());
+        return false;
+    }
     mem.SetProgramBreak(out.imageHighVa);
 
     PX5_LOGI(LogCategory::LOADER,

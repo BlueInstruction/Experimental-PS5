@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 // PX5 Phase C milestone 2a — SELF extractor self-test (implementation).
+// v1.29: subtests rebuilt around the orbis/shadPS4-verified container
+// layout and the standalone-ELF rebuild contract.
 
 #include "loader/self_extract_selftest.h"
 
@@ -24,29 +26,54 @@ struct SubResult {
     std::string detail;
 };
 
-// ---- Synthetic ELF64 image (a real parseable header, x86-64, 2 phdrs) ----
-std::vector<uint8_t> MakeInnerElf() {
-    std::vector<uint8_t> e(0x200, 0);
-    e[0] = 0x7f; e[1] = 'E'; e[2] = 'L'; e[3] = 'F';
-    e[4] = 2;    // ELFCLASS64
-    e[5] = 1;    // ELFDATA2LSB
-    // machine = EM_X86_64 (62) @ ehdr+0x12
-    const uint16_t machine = 62;
-    memcpy(e.data() + 0x12, &machine, 2);
-    // phoff @ 0x20, entry @ 0x18
-    const uint64_t entry = 0x1000ull, phoff = 0x40ull;
-    memcpy(e.data() + 0x18, &entry, 8);
-    memcpy(e.data() + 0x20, &phoff, 8);
-    // phentsize=0x38 phnum=2 @ 0x36/0x38
-    const uint16_t phentsize = 0x38, phnum = 2;
-    memcpy(e.data() + 0x36, &phentsize, 2);
-    memcpy(e.data() + 0x38, &phnum, 2);
-    // Mark each phdr as PT_LOAD-ish content for realism (type=1).
-    for (int p = 0; p < 2; ++p) {
-        const uint32_t ptype = 1;
-        memcpy(e.data() + phoff + p * phentsize, &ptype, 4);
-    }
-    return e;
+// ---- A real, loadable-shape whole ELF64 image (ehdr+phdr+payload) ------
+// Deliberately shaped like the engine's test guests: PT_LOAD whose file
+// payload sits at p_offset=0x80 (NOT at 0x40) so the rebuild contract
+// (p_offset rewritten into the standalone image) is exercised for real.
+struct GuestElf {
+    std::vector<uint8_t> image;   // whole file
+    std::vector<uint8_t> payload; // the PT_LOAD file bytes
+};
+
+GuestElf MakeGuestElf() {
+    GuestElf g;
+    // payload: a tiny x86-64-ish blob, must survive byte-exact.
+    const uint8_t code[] = {0xB8, 0x01, 0x00, 0x00, 0x00, 0x0F, 0x05, 0xF4};
+    g.payload.assign(std::begin(code), std::end(code));
+
+    constexpr uint64_t kPayloadOff = 0x80;
+    const uint64_t entry = 0x1000ull;
+
+    std::vector<uint8_t> img(static_cast<size_t>(kPayloadOff) +
+                             g.payload.size(), 0);
+    uint8_t* p = img.data();
+    memcpy(p, "\x7f""ELF\x02\x01\x01\x00", 8);          // ELF64 LSB
+    const uint16_t machine = 62;                          // EM_X86_64
+    memcpy(p + 0x12, &machine, 2);
+    memcpy(p + 0x18, &entry, 8);                          // e_entry
+    const uint64_t phoff = 0x40;
+    memcpy(p + 0x20, &phoff, 8);                          // e_phoff
+    const uint16_t phentsize = 0x38, phnum = 1;
+    memcpy(p + 0x36, &phentsize, 2);                      // e_phentsize
+    memcpy(p + 0x38, &phnum, 2);                          // e_phnum
+    // phdr[0]: PT_LOAD RWX, payload at 0x80, vaddr 0x1000.
+    uint8_t* ph = p + 0x40;
+    const uint32_t ptype = 1, pflags = 7;
+    memcpy(ph + 0x00, &ptype, 4);
+    memcpy(ph + 0x04, &pflags, 4);
+    const uint64_t poffset = kPayloadOff, vaddr = 0x1000;
+    memcpy(ph + 0x08, &poffset, 8);
+    memcpy(ph + 0x10, &vaddr, 8);
+    memcpy(ph + 0x18, &vaddr, 8);                         // paddr
+    const uint64_t filesz = g.payload.size();
+    memcpy(ph + 0x20, &filesz, 8);                        // p_filesz
+    memcpy(ph + 0x28, &filesz, 8);                        // p_memsz
+    const uint64_t align = 0x1000;
+    memcpy(ph + 0x30, &align, 8);                         // p_align
+
+    memcpy(img.data() + kPayloadOff, g.payload.data(), g.payload.size());
+    g.image = std::move(img);
+    return g;
 }
 
 std::vector<uint8_t> Deflate(const std::vector<uint8_t>& in) {
@@ -57,33 +84,30 @@ std::vector<uint8_t> Deflate(const std::vector<uint8_t>& in) {
     return out;
 }
 
-// ---- Builder per the documented layout ------------------------------------
-// Moved to loader/self_fixtures.cpp in milestone 3: the foundation
-// self-test (emulator.cpp step 5b) must wrap the SAME fixture format,
-// so one shared builder feeds both proofs.
-using SelfFixtures::BuiltSelf;
-using SelfFixtures::BuildSelfContainer;
-
-BuiltSelf BuildSelf(const std::vector<std::vector<uint8_t>>& payloads,
-                    const std::vector<uint64_t>& flags,
-                    const std::vector<uint64_t>& memSizes) {
-    return BuildSelfContainer(payloads, flags, memSizes);
-}
-
 // ---- Subtests --------------------------------------------------------------
 
 SubResult TestPlainSegmentRoundTrip() {
     SubResult r{"self_plain_segment", false, ""};
-    const std::vector<uint8_t> elf = MakeInnerElf();
-    const BuiltSelf s = BuildSelf({elf}, {kSegFlagSigned}, {elf.size()});
+    const GuestElf g = MakeGuestElf();
+    const SelfFixtures::BuiltSelf s =
+        SelfFixtures::BuildSelfFromWholeElf(g.image, {kSegFlagSigned});
     const ExtractResult res = ExtractInnerElf(s.bytes.data(), s.bytes.size());
     if (!res.ok) { r.detail = "extract failed: " + res.error; return r; }
-    if (res.elfOffset != 0) { r.detail = "ELF not at stream start"; return r; }
-    if (res.elfBytes.size() - res.elfOffset < elf.size()) {
-        r.detail = "extracted bytes short"; return r;
+    if (res.elfOffset != 0) { r.detail = "rebuild must start at 0"; return r; }
+
+    // Rebuilt ehdr must carry the inner header verbatim (fixture has no
+    // section headers, so the shoff/shnum patching is a no-op here).
+    if (memcmp(res.elfBytes.data(), g.image.data(), 0x40) != 0) {
+        r.detail = "rebuilt ELF header mismatch"; return r;
     }
-    if (memcmp(res.elfBytes.data(), elf.data(), 0x40) != 0) {
-        r.detail = "ELF bytes mismatch"; return r;
+    // phdr[0].offset must point at the appended payload (0x40 + 0x38).
+    const uint64_t rebuiltOff = 0x40 + 0x38;
+    if (res.elfBytes.size() < rebuiltOff + g.payload.size()) {
+        r.detail = "rebuilt image short"; return r;
+    }
+    if (memcmp(res.elfBytes.data() + rebuiltOff, g.payload.data(),
+               g.payload.size()) != 0) {
+        r.detail = "payload bytes mismatch"; return r;
     }
     if (res.extractedSegments != 1 || res.refusedEncrypted != 0 ||
         res.inflatedSegments != 0) {
@@ -95,16 +119,23 @@ SubResult TestPlainSegmentRoundTrip() {
 
 SubResult TestCompressedSegmentRoundTrip() {
     SubResult r{"self_compressed_segment", false, ""};
-    const std::vector<uint8_t> elf = MakeInnerElf();
-    const std::vector<uint8_t> zlibSeg = Deflate(elf);
-    const BuiltSelf s = BuildSelf({zlibSeg},
-                                  {kSegFlagSigned | kSegFlagCompressed},
-                                  {elf.size()});
+    const GuestElf g = MakeGuestElf();
+    const std::vector<uint8_t> z = Deflate(g.payload);
+    // Split the whole ELF into inner header + phdr table by hand and
+    // feed the deflated payload through the generic builder.
+    const std::vector<uint8_t> ehdr(g.image.begin(), g.image.begin() + 0x40);
+    const std::vector<uint8_t> phdrs(g.image.begin() + 0x40,
+                                     g.image.begin() + 0x78);
+    const SelfFixtures::BuiltSelf s = SelfFixtures::BuildSelfContainer(
+        ehdr, phdrs, {z}, {kSegFlagSigned | kSegFlagCompressed},
+        {g.payload.size()});
     const ExtractResult res = ExtractInnerElf(s.bytes.data(), s.bytes.size());
     if (!res.ok) { r.detail = "extract failed: " + res.error; return r; }
     if (res.inflatedSegments != 1) { r.detail = "inflate not counted"; return r; }
-    if (memcmp(res.elfBytes.data(), elf.data(), 0x40) != 0) {
-        r.detail = "inflated bytes mismatch"; return r;
+    const uint64_t rebuiltOff = 0x40 + 0x38;
+    if (memcmp(res.elfBytes.data() + rebuiltOff, g.payload.data(),
+               g.payload.size()) != 0) {
+        r.detail = "inflated payload mismatch"; return r;
     }
     r.pass = true;
     return r;
@@ -112,12 +143,14 @@ SubResult TestCompressedSegmentRoundTrip() {
 
 SubResult TestEncryptedSegmentRefused() {
     SubResult r{"self_encrypted_refused", false, ""};
-    const std::vector<uint8_t> elf = MakeInnerElf();
-    const BuiltSelf s = BuildSelf({elf},
-                                  {kSegFlagSigned | kSegFlagEncrypted},
-                                  {elf.size()});
+    const GuestElf g = MakeGuestElf();
+    const SelfFixtures::BuiltSelf s =
+        SelfFixtures::BuildSelfFromWholeElf(g.image,
+                                            {kSegFlagSigned |
+                                             kSegFlagEncrypted});
     const ExtractResult res = ExtractInnerElf(s.bytes.data(), s.bytes.size());
-    // Honest refusal: the encrypted-only container yields nothing.
+    // Honest refusal: an encrypted segment fails the WHOLE extraction —
+    // a partially mapped image would be a lie.
     if (res.ok) { r.detail = "encrypted segment was NOT refused"; return r; }
     if (res.refusedEncrypted != 1) { r.detail = "refusal not counted"; return r; }
     if (res.error.find("encrypted") == std::string::npos) {

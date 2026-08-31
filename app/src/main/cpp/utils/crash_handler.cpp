@@ -18,6 +18,11 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 
+// v1.29: bionic's abort message accessor, weak-declared so the build
+// never depends on NDK header vintage. On this device (API 36) it always
+// resolves. Reading it is what debuggerd itself does in crash context.
+extern "C" const char* android_get_abort_message(void) __attribute__((weak));
+
 namespace PX5 {
 
 using FaultIntercept = bool (*)(int sig, void* siginfo, void* ucontext);
@@ -284,6 +289,20 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {   // NOLINT(bugpro
              static_cast<unsigned long>(gettid()),
              stamp);
     append(line);
+
+    // ---- section 0b: bionic's abort message ------------------------------
+    // The vc29 session saw the SAME isolated-child SIGABRT twice with no
+    // reason named anywhere — assertions, std::terminate ("uncaught
+    // exception of type ..."), and FORTIFY checks all stage their reason
+    // here. This line is the difference between guessing and knowing.
+    if (android_get_abort_message) {
+        const char* abortMsg = android_get_abort_message();
+        if (abortMsg && abortMsg[0]) {
+            snprintf(line, sizeof(line), "abort_message: %s\n", abortMsg);
+            append(line);
+            sync();
+        }
+    }
 
     // ---- section 0: the RAW pc line. Zero allocations, zero tables, a
     // few hundred bytes of stack — this line reaches disk even if every

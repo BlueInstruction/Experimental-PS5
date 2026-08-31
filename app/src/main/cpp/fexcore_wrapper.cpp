@@ -25,6 +25,7 @@
 #include "utils/breadcrumbs.h"
 #include "utils/crash_handler.h"
 #include "utils/heartbeat.h"
+#include "loader/self_extract.h"
 
 namespace fs = std::filesystem;
 
@@ -103,21 +104,36 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadSelf(JNIEnv* env, jobject,
 
 // Milestone 3: one honest entry point for the game-boot button. The file
 // format is detected from ITS OWN magic bytes (SELF containers start with
-// 0x1D22154F; eboot.bin dumps are SELF, homebrew payloads are ELF) instead
-// of the caller guessing — the previous UI flow always called nativeLoadElf,
-// so a real eboot.bin died on "bad ELF magic" before the loader ever saw
-// the container.
+// 0x1D3D154F — orbis/shadPS4-verified; the 0x1D22154F guess retired in
+// v1.29 — and eboot.bin dumps are SELF, homebrew payloads are ELF)
+// instead of the caller guessing. Unknown magics leave their first 16
+// bytes in the log: the vc29 session's "bad ELF magic" with no bytes
+// named cost us the whole round-trip.
 namespace {
 // Magic-based format dispatch shared by the direct and isolated loaders:
-// SELF containers (0x1D22154F) go to the extractor path, anything else to
-// the plain ELF loader (same rule as nativeLoadExecutable).
+// SELF containers go to the extractor path, anything else to the plain
+// ELF loader (same rule as nativeLoadExecutable).
 bool PathLooksLikeSelf(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
-    uint8_t magic[4] = {0, 0, 0, 0};
-    if (f.read(reinterpret_cast<char*>(magic), 4)) {
-        uint32_t m = 0;
-        memcpy(&m, magic, 4);
-        return m == 0x1D22154FU;
+    uint8_t head[16] = {};
+    f.read(reinterpret_cast<char*>(head), sizeof(head));
+    const size_t got = static_cast<size_t>(f.gcount());
+
+    uint32_t m = 0;
+    if (got >= 4) memcpy(&m, head, 4);
+    if (m == PX5::SelfExtract::kSelfMagic) return true;
+
+    if (m != 0) {
+        char b[3 * 16 + 1] = {};
+        size_t o = 0;
+        for (size_t i = 0; i < got; ++i)
+            o += static_cast<size_t>(snprintf(b + o, sizeof(b) - o,
+                                              "%s%02X", i ? " " : "",
+                                              head[i]));
+        PX5_LOGI(PX5::LogCategory::LOADER,
+                 "format sniff %s: magic 0x%X is neither SELF(0x1D3D154F) "
+                 "nor routed onward — first bytes: %s",
+                 path.c_str(), (unsigned)m, b);
     }
     return false;
 }
