@@ -11,6 +11,7 @@
 #include "loader/self_fixtures.h"
 #include "utils/logger.h"
 #include "utils/breadcrumbs.h"
+#include "utils/crash_handler.h"
 
 #include <unistd.h>
 #include <cstdio>
@@ -67,7 +68,12 @@ bool Emulator::LoadExecutable(const std::string& path, bool isSelf) {
     }
     Breadcrumb::Set("load: memmgr ready");
     if (m_baseDir.empty()) {
-        m_baseDir = "/data/local/tmp/px5_fallback";
+        // v1.28: /data/local/tmp is unwritable for app processes — anchor
+        // the VFS under the crash-handler logs dir (wired at startup,
+        // app-writable by construction) whenever it is available.
+        const std::string& logs = CrashHandler::LogsDir();
+        m_baseDir = logs.empty() ? std::string("/data/local/tmp/px5_fallback")
+                                 : logs + "/vfs";
         VirtualFileSystem::GetInstance().Initialize(m_baseDir);
     }
 
@@ -216,8 +222,14 @@ std::string Emulator::SelfTestFoundation() {
     // --- Step 5: ELF file round-trip through real loader -----------------
     {
         auto& mm = MemoryManager::GetInstance();
-        const std::string elfPath = m_baseDir.empty()
-            ? "/data/local/tmp/px5_guest.elf" : m_baseDir + "/px5_guest.elf";
+        // v1.28: /data/local/tmp is unwritable for app processes (the vc28
+        // session failed step 5 exactly there — "ELF fixture write failed")
+        // — the crash-handler logs dir is wired at startup and app-writable
+        // by construction, so it is the fixture anchor of record.
+        const std::string elfPath = !m_baseDir.empty() ? m_baseDir + "/px5_guest.elf"
+            : (!CrashHandler::LogsDir().empty()
+                ? CrashHandler::LogsDir() + "/px5_guest.elf"
+                : std::string("/data/local/tmp/px5_guest.elf"));
 
         std::ofstream f(elfPath, std::ios::binary | std::ios::trunc);
         f.write(reinterpret_cast<const char*>(TEST_GUEST_ELF),
@@ -273,8 +285,11 @@ std::string Emulator::SelfTestFoundation() {
     // end-to-end proof that a SELF-carried image runs, not merely parses.
     {
         auto& mm = MemoryManager::GetInstance();
-        const std::string selfPath = m_baseDir.empty()
-            ? "/data/local/tmp/px5_guest.self" : m_baseDir + "/px5_guest.self";
+        // v1.28: fixture anchor of record — see the step-5 comment above.
+        const std::string selfPath = !m_baseDir.empty() ? m_baseDir + "/px5_guest.self"
+            : (!CrashHandler::LogsDir().empty()
+                ? CrashHandler::LogsDir() + "/px5_guest.self"
+                : std::string("/data/local/tmp/px5_guest.self"));
 
         const std::vector<uint8_t> innerElf(
             TEST_GUEST_ELF_V2, TEST_GUEST_ELF_V2 + TEST_GUEST_ELF_V2_SIZE);
@@ -335,8 +350,11 @@ std::string Emulator::SelfTestFoundation() {
     // --- Step 6: ADVANCED ELF v2 — real mmap + memory round-trip --------
     {
         auto& mm = MemoryManager::GetInstance();
-        const std::string elfPath = m_baseDir.empty()
-            ? "/data/local/tmp/px5_guest_v2.elf" : m_baseDir + "/px5_guest_v2.elf";
+        // v1.28: fixture anchor of record — see the step-5 comment above.
+        const std::string elfPath = !m_baseDir.empty() ? m_baseDir + "/px5_guest_v2.elf"
+            : (!CrashHandler::LogsDir().empty()
+                ? CrashHandler::LogsDir() + "/px5_guest_v2.elf"
+                : std::string("/data/local/tmp/px5_guest_v2.elf"));
 
         std::ofstream f(elfPath, std::ios::binary | std::ios::trunc);
         f.write(reinterpret_cast<const char*>(TEST_GUEST_ELF_V2),

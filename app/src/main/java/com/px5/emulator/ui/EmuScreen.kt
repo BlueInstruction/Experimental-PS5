@@ -826,6 +826,16 @@ private object EmuScreenBoot {
 //      nested dumps it never enumerated), including content: game paths.
 //   4. "unknown(...)" — when nothing actually enumerated, we never
 //      fabricate ABSENT, and the load button stays enabled.
+//
+//   v1.28 — the decisive lesson from the vc28 session: a java.io listing
+//   that SUCCEEDS under scoped storage can still be a FILTERED view (FUSE
+//   readdir hides other apps' non-media files — the session walked 9 dirs
+//   and saw 8 entries while the user's file manager showed 23 at the root
+//   alone). So a negative java.io verdict is TENTATIVE and is cross-checked
+//   through SAF (which sees the real directory contents) before ABSENT is
+//   claimed; ABSENT requires BOTH available views to have enumerated and
+//   missed. A java.io-only miss reports "unverified-empty" and never gates
+//   the load button.
 // ---------------------------------------------------------------------------
 private fun probeEbootStatus(path: String, context: Context): String = try {
     if (path.startsWith("content:")) {
@@ -840,20 +850,38 @@ private fun probeEbootStatus(path: String, context: Context): String = try {
                 val direct = listed?.firstOrNull {
                     it.isFile && it.name.equals("eboot.bin", true)
                 }
-                when {
-                    direct != null -> "present(${direct.length()}B)"
-                    listed != null -> {
-                        // Listing worked but no direct hit — search the bounded
-                        // tree before any ABSENT is claimed, and NAME where the
-                        // executable sits when it is found below the root.
-                        val out = com.px5.emulator.EbootLocator.search(bootDir)
-                        out.found?.let { "present(${it.file.length()}B,${it.relPath})" }
-                                ?: ("ABSENT (java.io walked ${out.stats.dirsWalked} dirs, " +
-                                    "${out.stats.entriesSeen} entries, " +
-                                    "${out.stats.unreadableDirs} unreadable)")
+                if (direct != null) {
+                    "present(${direct.length()}B)"
+                } else {
+                    // v1.28: a java.io listing that "succeeds" under scoped
+                    // storage can still be a FILTERED view (FUSE readdir
+                    // hides other apps' non-media files — the vc28 session
+                    // walked 9 dirs and saw 8 entries while the user's file
+                    // manager showed 23 at the root alone). A negative
+                    // java.io verdict is therefore TENTATIVE: cross-check
+                    // through SAF, which sees the real directory contents,
+                    // before any ABSENT is claimed.
+                    val out = listed?.let { com.px5.emulator.EbootLocator.search(bootDir) }
+                    val saf = safWalkVerdict(safSearchFromPath(path, context))
+                    val outFound = out?.found
+                    when {
+                        outFound != null ->
+                            "present(${outFound.file.length()}B,${outFound.relPath})"
+                        saf != null && saf.startsWith("present") -> saf
+                        out != null && saf != null -> {
+                            // both views enumerated, both missed — the honest ABSENT
+                            val inner = saf.removePrefix("ABSENT(").removeSuffix(")")
+                            "ABSENT($inner; ${ioWalkEvidence(out)})"
+                        }
+                        out != null ->
+                            // java.io missed AND SAF cannot cross-check: a
+                            // filtered view cannot prove absence — the load
+                            // button stays enabled and the report names the
+                            // gap (never a bare ABSENT).
+                            "unverified-empty (java.io ${ioWalkEvidence(out)}; " +
+                                    "SAF cross-check unavailable: no covering persisted tree)"
+                        else -> saf ?: "unknown(no-list-permission)"
                     }
-                    else -> safWalkVerdict(safSearchFromPath(path, context))
-                            ?: "unknown(no-list-permission)"
                 }
             }
             else -> safWalkVerdict(safSearchFromPath(path, context))
@@ -863,6 +891,10 @@ private fun probeEbootStatus(path: String, context: Context): String = try {
 } catch (_: Throwable) {
     "unknown(probe-error)"
 }
+
+private fun ioWalkEvidence(out: com.px5.emulator.EbootLocator.Outcome): String =
+    "java.io walked ${out.stats.dirsWalked} dirs, ${out.stats.entriesSeen} entries, " +
+    "${out.stats.unreadableDirs} unreadable"
 
 private class SafFound(val uri: android.net.Uri, val relPath: String, val size: Long)
 
