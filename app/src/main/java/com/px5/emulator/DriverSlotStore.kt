@@ -66,6 +66,13 @@ object DriverSlotStore {
         val live = load(context).filter { File(it.soPath).isFile }
         // Drop entries pointing at files that vanished (cleared cache etc.)
         if (live.size != load(context).size) save(context, live)
+        // v1.23: the native manager OUTLIVES the activity. The 2026-08-31
+        // 02:57-03:15 device session showed pid 22745 constant across five
+        // activity re-creations — every restore() used to APPEND a duplicate
+        // slot to the surviving vector (slot ids marched 1->2->3->4->5->6 in
+        // the log). Clear the native list first so re-registration starts
+        // from a clean state and ids match the saved order again.
+        runCatching { wrapper.nativeClearDriverSlots() }
         live.forEachIndexed { index, slot ->
             runCatching {
                 wrapper.nativeRegisterDriverSlot(slot.label, slot.soPath, slot.soname)

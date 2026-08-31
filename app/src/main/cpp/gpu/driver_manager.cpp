@@ -622,7 +622,11 @@ bool GpuDriverManager::PreloadActiveDriverForVerification() {
 #endif
                      "; final proof at first vkCreateInstance";
     PX5_LOGW(LogCategory::GPU,
-             "Driver preload failed for '%s': plain: %s%s%s",
+             "Driver preload via plain dlopen unavailable for '%s' "
+             "(INCONCLUSIVE, not a failure verdict — platform libs such as "
+             "libhardware.so are not visible to app namespaces; the designed "
+             "load is the adrenotools hook at first vkCreateInstance, "
+             "proven by the maps check): plain: %s%s%s",
              slot.label.c_str(), plainErr.c_str(),
 #ifdef PX5_HAVE_ADRENOTOOLS
              " | shared-ns: ", nsErr.c_str()

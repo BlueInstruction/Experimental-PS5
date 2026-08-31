@@ -164,6 +164,57 @@ fun EmuScreen(
                     "format=${game?.format ?: "?"} size=${game?.sizeBytes ?: 0L} " +
                     "eboot=$ebootStatus")
         } catch (_: Throwable) {}
+
+        // ---- v1.23: the CPU-gate experiment runs itself -------------------
+        // Three device sessions in a row (v1.20 -> v1.22), the decisive
+        // in-process conformance button (Settings > Debug) went unpressed
+        // while the Run-game path was retried dozens of times. Move the
+        // experiment into the flow the user actually drives: run it HERE,
+        // once per build. The persisted flag is written BEFORE the run —
+        // if the experiment kills the app (the v1.20 session proved it
+        // does), the next start does NOT re-run it (no crash loop). The
+        // evidence-first crash handler (v1.21) writes the report — raw PC,
+        // module-resolved pc=libpx5.so+0x…, faulting instruction bytes —
+        // directly INTO px5_main.log, so the usual single paste carries
+        // the whole answer.
+        val currentVc = try {
+            context.packageManager.getPackageInfo(context.packageName, 0)
+                .longVersionCode.toInt()
+        } catch (_: Throwable) { 0 }
+        if (!isStubAbi && EmuScreenBoot.conformanceDecidedVc != currentVc) {
+            EmuScreenBoot.conformanceDecidedVc = currentVc
+            val prefs = context.getSharedPreferences(
+                    "px5_engine_settings", android.content.Context.MODE_PRIVATE)
+            if (prefs.getInt("cpuGateInprocVc", -1) == currentVc) {
+                com.px5.emulator.core.PX5EventLog.event("conformance", "auto_run",
+                        "skipped — already ran for vc=$currentVc " +
+                        "(verdict: see the log / crash report of the session " +
+                        "that first ran this build)")
+            } else {
+                prefs.edit().putInt("cpuGateInprocVc", currentVc).apply()
+                com.px5.emulator.core.PX5EventLog.event("conformance", "auto_run",
+                        "STARTING once for vc=$currentVc — unsafe experiment: " +
+                        "if the app dies now, that IS the result; the crash " +
+                        "report (raw PC + instruction bytes) is written into " +
+                        "px5_main.log. Reopen the app to continue normally.")
+                launch(Dispatchers.Default) {
+                    // Let the boot probes (GPU proof, self-tests) finish and
+                    // the screen settle before pulling the trigger.
+                    delay(4000)
+                    val rep = try {
+                        fexCoreWrapper?.nativeRunCpuConformanceInProcess()
+                                ?: "FAILED — wrapper missing"
+                    } catch (t: Throwable) { "FAILED — ${t.message}" }
+                    val firstLine = rep.lineSequence().firstOrNull() ?: "?"
+                    com.px5.emulator.core.PX5EventLog.event("conformance",
+                            "inprocess_result", "result=$firstLine")
+                    try {
+                        fexCoreWrapper?.nativeLogEvent("conformance",
+                                "in-process conformance: ${rep.take(500)}")
+                    } catch (_: Throwable) {}
+                }
+            }
+        }
         if (EmuScreenBoot.bootDiagnosticsDone) {
             // Second entry in this process: skip the isolated probes. They
             // already reported; the unified log keeps their evidence. This
@@ -672,6 +723,15 @@ private fun StatusChip(text: String, tint: Color) {
 /** Process-wide marker: the boot diagnostics are one-shot per process. */
 private object EmuScreenBoot {
     @Volatile var bootDiagnosticsDone: Boolean = false
+
+    /**
+     * v1.23: per-process guard for the auto conformance decision. Holds the
+     * versionCode already decided this process (Int.MIN_VALUE = undecided).
+     * The PERSISTED flag (prefs cpuGateInprocVc) is the once-per-build
+     * guard; this one only keeps re-entries in the same process from
+     * re-emitting the decision line.
+     */
+    @Volatile var conformanceDecidedVc: Int = Int.MIN_VALUE
 }
 
 // ---------------------------------------------------------------------------
