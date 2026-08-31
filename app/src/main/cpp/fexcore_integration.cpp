@@ -830,11 +830,29 @@ bool RunConformanceTest() {
     mm.UnmapMemory(kTestVA, codeSize);
     mm.UnmapMemory(stackVA, pageSize);
 
-    // Success = thread actually ran with no error. The blob performs no
-    // syscalls, so output capture does not apply to this legacy check.
-    const bool ok = r.started && r.error.empty();
-    PX5_LOGI(LogCategory::FEX, "Conformance result: %s",
-             ok ? "PASSED" : r.error.empty() ? "FAILED" : r.error.c_str());
+    // v1.26 — STRICT verdict (external review, adopted): started+no-error
+    // alone could pass a wrong arithmetic result. The blob performs NO
+    // syscalls and ends in HLT, so ExecuteAtHostRip reports the final guest
+    // RAX as exitCode with exitedCleanly=false (a captured exit_group would
+    // flip clean=1 — impossible for this blob, and grounds for failure).
+    // The pass contract is exactly that signature: thread ran, HLT exit,
+    // RAX==42, no guest trap. HLT-exit and syscall-exit stay separated.
+    const bool ok = r.started && r.error.empty() &&
+                    !r.exitedCleanly && r.exitCode == 42 &&
+                    !r.guestTrap.fired;
+    if (ok) {
+        PX5_LOGI(LogCategory::FEX,
+                 "Conformance result: PASSED (strict contract met: HLT exit, "
+                 "RAX readback=%llu, no trap)",
+                 (unsigned long long)r.exitCode);
+    } else {
+        PX5_LOGI(LogCategory::FEX,
+                 "Conformance result: FAILED (started=%d clean=%d "
+                 "exitCode=%llu trapFired=%d error=\"%s\")",
+                 r.started ? 1 : 0, r.exitedCleanly ? 1 : 0,
+                 (unsigned long long)r.exitCode,
+                 r.guestTrap.fired ? 1 : 0, r.error.c_str());
+    }
     return ok;
 }
 

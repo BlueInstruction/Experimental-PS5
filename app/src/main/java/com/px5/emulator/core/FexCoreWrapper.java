@@ -152,8 +152,25 @@ public class FexCoreWrapper {
      *   2. Vulkan runtime enumeration     5. real ELF loader round-trip
      *   3. FEXCore context creation
      * Returns a multi-line report ending with "VERDICT: PASS|FAIL".
+     *
+     * v1.26: FORK-ISOLATED variant, kept for forensic comparison only.
+     * The once-per-build auto-run gate uses
+     * {@link #nativeRunFoundationSelfTestInProcess()} instead: the vc26
+     * device session proved in-process guest execution end-to-end, and the
+     * fork-of-multithreaded-parent path is the crash-prone architecture
+     * (see the GPU-proof child SIGABRT pattern, two sessions running).
      */
     public native String nativeRunFoundationSelfTest();
+
+    /**
+     * v1.26: the same 9-step foundation suite, executed IN-PROCESS (no
+     * fork, no engine rebuild) on the live engine, crash handler armed.
+     * Same report contract: multi-line, ends with "VERDICT: PASS|FAIL".
+     * If a step kills the process, the evidence-first crash report lands
+     * inline in px5_main.log (same contract the conformance auto-run has
+     * already honored twice on this device).
+     */
+    public native String nativeRunFoundationSelfTestInProcess();
 
     /** Real dlopen'd Vulkan summary ("Vulkan: ACTIVE | Adreno ... " or error). */
     public native String nativeGetVulkanSummary();

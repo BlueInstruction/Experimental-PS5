@@ -673,8 +673,11 @@ private fun LazyListScope.debugSection(
                     soundManager.playActivationSound()
                     running = true
                     scope.launch(Dispatchers.Default) {
+                        // v1.26: the Settings button follows the auto-run
+                        // gate to the in-process path (no fork, no engine
+                        // rebuild) — the vc26-proven execution environment.
                         val rep = try {
-                            wrapper.nativeRunFoundationSelfTest()
+                            wrapper.nativeRunFoundationSelfTestInProcess()
                         } catch (e: Exception) {
                             "[FAIL] native: ${e.message}"
                         }
@@ -693,7 +696,7 @@ private fun LazyListScope.debugSection(
                     Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(16.dp))
                 }
                 Spacer(Modifier.width(6.dp))
-                Text("Run engine self-test", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text("Run engine self-test (in-process, no fork)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
             report?.let { rep -> MonoReportBox(rep, passAware = true) }
         }

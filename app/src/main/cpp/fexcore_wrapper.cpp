@@ -535,11 +535,17 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunCpuConformanceInProcess(
     PX5::CrashHandler::ArmThreadAltStack();
     PX5::Breadcrumb::Set("jni: CpuConformance IN-PROCESS (no fork)");
     const bool ok = PX5::FexCoreIntegration::RunConformanceTest();
+    // v1.26: the success text no longer asserts WHY the isolated-child runs
+    // crashed. In-process passing proves THIS path executes the guest; the
+    // causality of the fork-child crashes (fork inheritance vs engine-rebuild
+    // vs probe architecture) is an open item that only a same-version
+    // comparison experiment could settle. Report exactly what is known.
     return env->NewStringUTF(ok
         ? "PASSED — guest blob (mov eax,40; add eax,2; hlt) executed on the "
-          "device JIT, in-process, no fork. The isolated-child crash is a "
-          "fork/rebuild artifact, NOT a JIT fault."
-        : "FAILED — in-process blob did not run cleanly (no fork involved; "
+          "device JIT, in-process, no fork. (isolated-child crashes remain an "
+          "open item; this test alone does not establish their cause)"
+        : "FAILED — in-process blob did not meet the strict contract "
+          "(started && HLT exit && RAX==42 && no trap; no fork involved; "
           "the crash handler captured the evidence if this died)");
 }
 
@@ -589,6 +595,25 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunFoundationSelfTest(
         },
         30000);
     return env->NewStringUTF(report.c_str());
+}
+
+// v1.26 — IN-PROCESS foundation self-test (no fork, no ResetForChild).
+// The vc26 device session (2026-08-31 11:03) proved in-process guest
+// execution end-to-end: conformance blob entered the JIT, executed, and
+// unwound through the HLT exit with RAX=42. The fork-isolated variant
+// above remains for forensic comparison, but the once-per-build auto-run
+// gate uses THIS path: same process, live engine, crash handler armed.
+// If a foundation step kills the process, the evidence-first crash report
+// lands inline in px5_main.log — the same contract the conformance
+// auto-run has already honored twice on this device (v1.23 SIGSEGV,
+// v1.24 SIGILL, both symbolized to a named fix).
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeRunFoundationSelfTestInProcess(
+        JNIEnv* env, jobject) {
+    PX5::CrashHandler::ArmThreadAltStack();
+    PX5::Breadcrumb::Set("jni: FoundationSelfTest IN-PROCESS (no fork)");
+    const std::string r = PX5::Emulator::GetInstance().SelfTestFoundation();
+    return env->NewStringUTF(r.c_str());
 }
 
 extern "C" JNIEXPORT jstring JNICALL

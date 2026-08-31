@@ -85,6 +85,10 @@ fun EmuScreen(
     var loaderSelfTest by remember { mutableStateOf<String?>(null) }
     var inputSummary by remember { mutableStateOf("input: -") }
     var loadResult by remember { mutableStateOf<String?>(null) }
+    // v1.26: set once by the screen-entry eboot probe. A folder without
+    // eboot.bin gets a disabled load button and ONE clear message instead
+    // of N repeated empty-target exec_load_failed rows.
+    var ebootMissing by remember { mutableStateOf(false) }
     var diagOpen by remember { mutableStateOf(false) }
     var padEditing by remember { mutableStateOf(false) }
     // v1.16.1 behavior kept: a crash report surfaces ITSELF — the
@@ -159,6 +163,7 @@ fun EmuScreen(
                 "path=$path stub=${isStubAbi} diagRan=${EmuScreenBoot.bootDiagnosticsDone}")
         try {
             val ebootStatus = probeEbootStatus(path, context)
+            ebootMissing = ebootStatus.startsWith("ABSENT")
             fexCoreWrapper?.nativeLogEvent("gameBoot",
                     "screen_entered game=${game?.name ?: "?"} titleId=${game?.titleId ?: "?"} " +
                     "format=${game?.format ?: "?"} size=${game?.sizeBytes ?: 0L} " +
@@ -212,6 +217,45 @@ fun EmuScreen(
                         fexCoreWrapper?.nativeLogEvent("conformance",
                                 "in-process conformance: ${rep.take(500)}")
                     } catch (_: Throwable) {}
+
+                    // ---- v1.26: THE NEXT MEASURABLE GATE RUNS ITSELF ----
+                    // vc26 proved the JIT end-to-end (HLT exit, RAX=42).
+                    // The foundation suite is the acceptance test this
+                    // project actually needs next: TEST_GUEST_ELF +
+                    // TEST_GUEST_ELF_V2 through the REAL loader, SELF
+                    // container round-trip, guest-syscall mmap, ud2 trap
+                    // routing, GPU submission, libkernel HLE — every step
+                    // a strict output/exit-code contract, ending in a
+                    // machine-checkable "VERDICT: PASS|FAIL" line. Runs
+                    // IN-PROCESS (no fork — the vc26-proven path), once per
+                    // versionCode, flag written BEFORE the run (crash-safe,
+                    // no loop; if a step kills the process, the evidence-
+                    // first report lands inline in px5_main.log).
+                    if (rep.startsWith("PASSED") &&
+                        prefs.getInt("foundationTestVc", -1) != currentVc) {
+                        prefs.edit().putInt("foundationTestVc", currentVc).apply()
+                        com.px5.emulator.core.PX5EventLog.event("foundation",
+                                "auto_run", "STARTING once for vc=$currentVc — " +
+                                "in-process, no fork: 9-step foundation suite, " +
+                                "strict verdicts. If the app dies, the report " +
+                                "is in px5_main.log.")
+                        val frep = try {
+                            fexCoreWrapper?.nativeRunFoundationSelfTestInProcess()
+                                    ?: "VERDICT: FAILED (wrapper missing)"
+                        } catch (t: Throwable) {
+                            "VERDICT: FAILED (${t.message})"
+                        }
+                        val verdictLine = frep.lineSequence().firstOrNull {
+                            it.startsWith("VERDICT:")
+                        } ?: "VERDICT: ABSENT (report truncated)"
+                        com.px5.emulator.core.PX5EventLog.event("foundation",
+                                "result", verdictLine)
+                        try {
+                            fexCoreWrapper?.nativeLogEvent("foundation",
+                                    "foundation self-test (in-process): " +
+                                    frep.take(1500))
+                        } catch (_: Throwable) {}
+                    }
                 }
             }
         }
@@ -540,6 +584,11 @@ fun EmuScreen(
                 )
                 if (!isStubAbi && fexCoreWrapper != null) {
                     Button(
+                        // v1.26: gated on the screen-entry eboot scan — a
+                        // folder with no eboot.bin gets a disabled button and
+                        // one clear message instead of repeated empty-target
+                        // LOAD FAILED rows.
+                        enabled = !ebootMissing,
                         onClick = {
                             scope.launch(Dispatchers.IO) {
                                 val target = run {
@@ -626,6 +675,18 @@ fun EmuScreen(
                     ) {
                         Text("Attempt executable load (ELF/SELF)", fontSize = 11.sp)
                     }
+                }
+                if (ebootMissing) {
+                    // v1.26: the one clear message, replacing the repeated
+                    // exec_load_failed rows the vc26 session produced.
+                    Text(
+                        text = "Load disabled — no eboot.bin in this folder " +
+                               "(scanned at screen entry): not a runnable PS5 " +
+                               "dump. A valid dump or homebrew ELF is required.",
+                        fontSize = 10.sp,
+                        color = Color(0xFFFF8A65),
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    )
                 }
                 loadResult?.let { res ->
                     Text(
