@@ -669,6 +669,43 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop) {
         return res;
     }
 
+    // v1.24 — THE CPU-GATE FIX.
+    // Symbolized 2026-08-31 07:07 device crash (v1.23 auto-run, vc24):
+    //   SIGSEGV si_addr=0x4, pc=libpx5.so+0x3809e4
+    //   FEXCore::Frontend::Decoder::DecodeInstructionsAtEntry +0xc4
+    //     (FEXCore/Source/Interface/Core/Frontend.cpp:1395)
+    //   CSSegment->L where GetSegmentFromIndex() returned &NULL[0]:
+    //   CPUState::segment_arrays[2] is left NULL by an uninitialized host
+    //   (CoreState.h:158) — FEXCore expects the HOST to install the GDT/LDT
+    //   arrays after CreateThread. Every FEX host does this (FEXLoader's
+    //   ThreadManager default-GDT branch; FEXOfflineCompiler::
+    //   SetupCompileThread). PX5 never did — which is the exact signature
+    //   EVERY probe has died with since v1.15, fork children and in-process
+    //   alike: full engine rebuild green, "Guest thread created", SIGSEGV(4)
+    //   at dispatch. Not a JIT fault, not a fork artifact, not a device
+    //   incompatibility — a missing host-side segment-table setup.
+    // Mirror the canonical thin-host initialization (64-bit guest images):
+    static FEXCore::Core::CPUState::gdt_segment s_guestGDT[32] {};
+    auto* frame = thread->CurrentFrame;
+    frame->State.segment_arrays[FEXCore::Core::CPUState::SEGMENT_ARRAY_INDEX_GDT] = &s_guestGDT[0];
+    frame->State.segment_arrays[FEXCore::Core::CPUState::SEGMENT_ARRAY_INDEX_LDT] = &s_guestGDT[0];
+    frame->State.cs_idx = FEXCore::Core::CPUState::DEFAULT_USER_CS << 3;
+    auto* cs = FEXCore::Core::CPUState::GetSegmentFromIndex(
+                   frame->State, frame->State.cs_idx);
+    FEXCore::Core::CPUState::SetGDTBase(cs, 0);
+    FEXCore::Core::CPUState::SetGDTLimit(cs, 0xF'FFFFU);
+    frame->State.cs_cached =
+        FEXCore::Core::CPUState::CalculateGDTBase(
+            *FEXCore::Core::CPUState::GetSegmentFromIndex(
+                frame->State, frame->State.cs_idx));
+    cs->L = 1;  // Long Mode = 64-bit
+    cs->D = 0;  // Default Operand Size = Reserved in long mode
+    PX5_LOGI(LogCategory::FEX,
+             "Guest GDT installed: cs_idx=%#x L=1 D=0 base=0 limit=0xFFFFF "
+             "(v1.24 CPU-gate fix — DecodeInstructionsAtEntry null-segment "
+             "crash eliminated)",
+             frame->State.cs_idx);
+
     g_execThread = thread;
     SmcManager::GetInstance().SetExecThread(thread);
     // Clear any previous run's synchronous-fault record BEFORE execution so
