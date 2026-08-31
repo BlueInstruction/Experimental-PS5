@@ -79,6 +79,7 @@ bool SetConfigKey(const std::string& key, const std::string& value) {
     else if (key == "HideHypervisorBit")     FC::Set(FC::CONFIG_HIDEHYPERVISORBIT, v);
     else if (key == "DisableL2Cache")        FC::Set(FC::CONFIG_DISABLEL2CACHE, v);
     else if (key == "DynamicL1Cache")        FC::Set(FC::CONFIG_DYNAMICL1CACHE, v);
+    else if (key == "Is64BitMode")           FC::Set(FC::CONFIG_IS64BIT_MODE, v);
     else return false;
     return true;
 }
@@ -551,6 +552,24 @@ bool Initialize() {
     PX5_LOGI(LogCategory::FEX, "Initialize: step 0 — Config::Initialize()");
     FEXCore::Config::Initialize();
     g_configInitialized = true;
+
+    // v1.25 — 64-bit guest mode is not optional for this engine. The v1.24
+    // device session proved it the hard way: with the GDT installed
+    // (v1.24 fix), DecodeInstructionsAtEntry reads CS.L=1, computes
+    // BlockInfo.Is64BitMode=true — and then
+    // Frontend.cpp:1396 LOGMAN_THROW_A_FMT(Is64BitMode == Config.Is64BitMode)
+    // FIRED, because IS64BIT_MODE defaults to FALSE (Config.json.in) and
+    // SetConfigKey never mapped it. The assert reached
+    // FEXCore::Assert::ForcedAssert() = asm("hlt #1") = SIGILL(ILL_ILLOPC)
+    // — the exact device crash (pc=ForcedAssert, backtrace AFmt ->
+    // DecodeInstructionsAtEntry +0x130). FEX's own thin host sets this
+    // identically: FEXOfflineCompiler Main.cpp:410
+    //   Config::Set(CONFIG_IS64BIT_MODE, Is64Bit ? "1" : "0");
+    // Must land BEFORE CreateNewContext(): FEX_CONFIG_OPT reads at
+    // context construction. All PX5 guest images are x86-64.
+    FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, "1");
+    PX5_LOGI(LogCategory::FEX, "Initialize: IS64BIT_MODE=1 (x86-64 guest — "
+                               "v1.25: the ForcedAssert/hlt#1 SIGILL fix)");
 
     // v1.16: deferred overrides land here — strictly before
     // CreateNewContext(), per the FEX_CONFIG_OPT read-at-construction
