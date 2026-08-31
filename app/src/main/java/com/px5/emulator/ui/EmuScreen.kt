@@ -593,18 +593,27 @@ fun EmuScreen(
                             scope.launch(Dispatchers.IO) {
                                 val target = run {
                                     val f = java.io.File(path)
-                                    if (f.isDirectory) {
-                                        // v1.19: dump tools land the executable below
-                                        // the game root (decrypted/eboot.bin). The
-                                        // direct-children-only scan is what produced
-                                        // the empty target= / LOAD FAILED in the
-                                        // 2026-08-30 v1.18 session.
-                                        com.px5.emulator.EbootLocator.find(f)?.also {
-                                            com.px5.emulator.core.PX5EventLog.event("gameBoot",
-                                                    "exec_target",
-                                                    "rel=${it.relPath} depth=${it.depth} dirs=${it.dirsVisited}")
-                                        }?.file?.absolutePath ?: ""
-                                    } else path
+                                    val io = when {
+                                        f.isDirectory ->
+                                            // v1.19: dump tools land the executable
+                                            // below the game root (decrypted/
+                                            // eboot.bin) — bounded tree search.
+                                            com.px5.emulator.EbootLocator.find(f)?.also {
+                                                com.px5.emulator.core.PX5EventLog.event("gameBoot",
+                                                        "exec_target",
+                                                        "rel=${it.relPath} depth=${it.depth} dirs=${it.dirsVisited}")
+                                            }?.file?.absolutePath
+                                        f.isFile -> path
+                                        else -> null
+                                    }
+                                    // v1.27: java.io-blind folders (scoped storage)
+                                    // still load — the SAF walk finds the document
+                                    // and the native loader gets a cached copy.
+                                    io ?: safCopyTarget(path, context)?.let { ct ->
+                                        com.px5.emulator.core.PX5EventLog.event("gameBoot",
+                                                "exec_target", ct.second)
+                                        ct.first.absolutePath
+                                    } ?: ""
                                 }
                                 com.px5.emulator.core.PX5EventLog.event("gameBoot",
                                         "exec_load_started", "target=$target")
@@ -613,11 +622,12 @@ fun EmuScreen(
                                 loadResult = if (target.isBlank()) {
                                     com.px5.emulator.core.PX5EventLog.event("gameBoot",
                                             "exec_load_failed",
-                                            "reason=no eboot.bin in folder (tree searched to depth " +
-                                            "${com.px5.emulator.EbootLocator.MAX_DEPTH})")
-                                    "LOAD FAILED: no eboot.bin in folder " +
-                                            "(folder tree searched to depth " +
-                                            "${com.px5.emulator.EbootLocator.MAX_DEPTH})"
+                                            "reason=no eboot.bin target after java.io + " +
+                                            "SAF search (probe evidence: eboot= line in " +
+                                            "the boot report)")
+                                    "LOAD FAILED: no eboot.bin target resolved " +
+                                            "(probe evidence: the eboot= line in the " +
+                                            "boot report)"
                                 } else {
                                     try {
                                         val probe = fexCoreWrapper.nativeLoadExecutableIsolated(target)
@@ -680,9 +690,10 @@ fun EmuScreen(
                     // v1.26: the one clear message, replacing the repeated
                     // exec_load_failed rows the vc26 session produced.
                     Text(
-                        text = "Load disabled — no eboot.bin in this folder " +
-                               "(scanned at screen entry): not a runnable PS5 " +
-                               "dump. A valid dump or homebrew ELF is required.",
+                        text = "Load disabled — the screen-entry scan enumerated " +
+                               "this folder and found no eboot.bin (evidence: the " +
+                               "eboot= boot report line). Not a runnable PS5 dump; " +
+                               "a valid dump or homebrew ELF is required.",
                         fontSize = 10.sp,
                         color = Color(0xFFFF8A65),
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
@@ -801,87 +812,217 @@ private object EmuScreenBoot {
 // Root cause (device log 2026-08-29): a plain java.io.File listing on API
 // 30+ scoped storage returns null for SAF-imported game folders, and the
 // old probe then printed "eboot=ABSENT" for a folder that CONTAINS
-// eboot.bin. The probe is tiered:
+// eboot.bin. The probe is tiered — and since v1.27 every negative verdict
+// CARRIES ITS ENUMERATION EVIDENCE, because an evidence-free ABSENT cannot
+// be told apart from a silently-failed listing (the 2026-08-30/31 device
+// sessions vs the user's own folder listing — eboot.bin visibly present —
+// ended in exactly that unresolvable contradiction):
 //   1. Direct java.io listing (definitive when storage is readable).
-//   2. Bounded recursion through the folder tree — v1.19: dump tools land
-//      eboot.bin below the game root (decrypted/eboot.bin), and the
-//      2026-08-30 v1.18 session showed an honest direct-children ABSENT
-//      while a loadable dump sat one level down. ABSENT is claimed only
-//      after the tree search misses.
-//   3. SAF listing through persisted tree permissions.
-//   4. "unknown(no-list-permission)" — we never fabricate ABSENT.
+//   2. Bounded recursion through the folder tree. ABSENT is claimed only
+//      with the walk counts attached (dirs walked / entries seen /
+//      unreadable dirs).
+//   3. SAF listing through persisted tree permissions — v1.27: bounded
+//      RECURSIVE walk (was direct-children-only, which claimed ABSENT for
+//      nested dumps it never enumerated), including content: game paths.
+//   4. "unknown(...)" — when nothing actually enumerated, we never
+//      fabricate ABSENT, and the load button stays enabled.
 // ---------------------------------------------------------------------------
 private fun probeEbootStatus(path: String, context: Context): String = try {
-    val bootDir = java.io.File(path)
-    if (bootDir.isFile) {
-        "file(${bootDir.length()}B)"
-    } else if (bootDir.isDirectory) {
-        val listed = bootDir.listFiles()
-        val direct = listed?.firstOrNull {
-            it.isFile && it.name.equals("eboot.bin", true)
-        }
-        when {
-            direct != null -> "present(${direct.length()}B)"
-            listed != null -> {
-                // Listing worked but no direct hit — search the bounded
-                // tree before any ABSENT is claimed, and NAME where the
-                // executable sits when it is found below the root.
-                val nested = com.px5.emulator.EbootLocator.find(bootDir)
-                if (nested != null) "present(${nested.file.length()}B,${nested.relPath})"
-                else "ABSENT (folder tree searched, no eboot.bin)"
-            }
-            else -> probeEbootViaSaf(path, context)
-                    ?: "unknown(no-list-permission)"
-        }
+    if (path.startsWith("content:")) {
+        safWalkVerdict(safSearchFromPath(path, context))
+                ?: "unknown(no-list-permission)"
     } else {
-        probeEbootViaSaf(path, context) ?: "path-missing"
+        val bootDir = java.io.File(path)
+        when {
+            bootDir.isFile -> "file(${bootDir.length()}B)"
+            bootDir.isDirectory -> {
+                val listed = bootDir.listFiles()
+                val direct = listed?.firstOrNull {
+                    it.isFile && it.name.equals("eboot.bin", true)
+                }
+                when {
+                    direct != null -> "present(${direct.length()}B)"
+                    listed != null -> {
+                        // Listing worked but no direct hit — search the bounded
+                        // tree before any ABSENT is claimed, and NAME where the
+                        // executable sits when it is found below the root.
+                        val out = com.px5.emulator.EbootLocator.search(bootDir)
+                        out.found?.let { "present(${it.file.length()}B,${it.relPath})" }
+                                ?: ("ABSENT (java.io walked ${out.stats.dirsWalked} dirs, " +
+                                    "${out.stats.entriesSeen} entries, " +
+                                    "${out.stats.unreadableDirs} unreadable)")
+                    }
+                    else -> safWalkVerdict(safSearchFromPath(path, context))
+                            ?: "unknown(no-list-permission)"
+                }
+            }
+            else -> safWalkVerdict(safSearchFromPath(path, context))
+                    ?: "path-missing"
+        }
     }
 } catch (_: Throwable) {
     "unknown(probe-error)"
 }
 
-/** SAF fallback: look for eboot.bin among the children of `path`'s
- *  document inside any persisted read-permission tree that contains it. */
-private fun probeEbootViaSaf(path: String, context: Context): String? = runCatching {
-    val cr = context.contentResolver
-    for (perm in cr.persistedUriPermissions) {
+private class SafFound(val uri: android.net.Uri, val relPath: String, val size: Long)
+
+private class SafWalk(val found: SafFound?,
+                      val dirsWalked: Int,
+                      val dirsEnumerated: Int,
+                      val entriesSeen: Int)
+
+/** Map a negative SAF walk onto the report vocabulary; null = nothing was
+ *  actually enumerated, so the caller must NOT claim ABSENT. */
+private fun safWalkVerdict(w: SafWalk?): String? = when {
+    w == null -> null
+    w.found != null ->
+        if (w.found.size >= 0) "present(${w.found.size}B,${w.found.relPath},SAF)"
+        else "present(${w.found.relPath},SAF)"
+    w.dirsEnumerated > 0 ->
+        "ABSENT(SAF walked ${w.dirsWalked} dirs, ${w.dirsEnumerated} enumerated, " +
+        "${w.entriesSeen} entries)"
+    else -> null
+}
+
+/** (treeUri, startDocId) pairs of persisted trees that cover `path`.
+ *  content: paths search their own tree; real paths are mapped under the
+ *  "primary" persisted trees by prefix. */
+private fun safTargetsFor(path: String, context: Context):
+        List<Pair<android.net.Uri, String>> {
+    if (path.startsWith("content:")) {
+        return runCatching {
+            val uri = android.net.Uri.parse(path)
+            DocumentsContract.getTreeDocumentId(uri) // throws when no tree segment
+            val startDoc = if (DocumentsContract.isTreeUri(uri))
+                DocumentsContract.getTreeDocumentId(uri)
+            else DocumentsContract.getDocumentId(uri)
+            listOf(Pair(uri, startDoc))
+        }.getOrDefault(emptyList())
+    }
+    val out = ArrayList<Pair<android.net.Uri, String>>()
+    for (perm in context.contentResolver.persistedUriPermissions) {
         if (!perm.isReadPermission) continue
         val treeUri = perm.uri
         if (treeUri.scheme != "content") continue
-        val treeDocId = DocumentsContract.getTreeDocumentId(treeUri)
-        val root = treeDocId.substringBefore(':')
-        if (root != "primary") continue
-        val rootRest = treeDocId.substringAfter(':', "")
-        val rootPath = if (rootRest.isBlank()) "/storage/emulated/0"
-                       else "/storage/emulated/0/$rootRest"
-        val normPath = path.trimEnd('/')
-        val normRoot = rootPath.trimEnd('/')
-        if (!(normPath == normRoot || normPath.startsWith("$normRoot/"))) continue
-
-        val rel = if (normPath.length > normRoot.length)
-            normPath.substring(normRoot.length + 1) else ""
-        val targetDocId = if (rel.isBlank()) treeDocId
-                          else "$treeDocId/$rel"
-        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
-                treeUri, targetDocId)
-        cr.query(
-            childrenUri,
-            arrayOf(
-                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                DocumentsContract.Document.COLUMN_MIME_TYPE,
-                DocumentsContract.Document.COLUMN_SIZE),
-            null, null, null)?.use { c ->
-            while (c.moveToNext()) {
-                val name = c.getString(0) ?: continue
-                if (!name.equals("eboot.bin", true)) continue
-                val mime = c.getString(1) ?: ""
-                if (mime == DocumentsContract.Document.MIME_TYPE_DIR) continue
-                val size = if (!c.isNull(2)) c.getLong(2) else -1L
-                return@runCatching if (size >= 0) "present(${size}B,SAF)"
-                                   else "present(SAF)"
+        val mapped: Pair<android.net.Uri, String>? = runCatching {
+            val treeDocId = DocumentsContract.getTreeDocumentId(treeUri)
+            val root = treeDocId.substringBefore(':')
+            if (root != "primary") return@runCatching null
+            val rootRest = treeDocId.substringAfter(':', "")
+            val rootPath = if (rootRest.isBlank()) "/storage/emulated/0"
+                           else "/storage/emulated/0/$rootRest"
+            val normPath = path.trimEnd('/')
+            val normRoot = rootPath.trimEnd('/')
+            if (!(normPath == normRoot || normPath.startsWith("$normRoot/"))) {
+                return@runCatching null
             }
-            return@runCatching "ABSENT(SAF)"
-        }
+            val rel = if (normPath.length > normRoot.length)
+                normPath.substring(normRoot.length + 1) else ""
+            val targetDocId = if (rel.isBlank()) treeDocId else "$treeDocId/$rel"
+            Pair(treeUri, targetDocId)
+        }.getOrNull()
+        if (mapped != null) out.add(mapped)
     }
-    null
-}.getOrNull()
+    return out
+}
+
+/** v1.27 — bounded recursive eboot.bin walk over SAF, mirroring the
+ *  java.io EbootLocator contract (depth 4 / 96 dirs, decrypted-first,
+ *  alphabetical, deterministic). */
+private fun safSearchEboot(context: Context, treeUri: android.net.Uri,
+                           rootDocId: String): SafWalk {
+    data class Entry(val docId: String, val depth: Int, val rel: String)
+    data class Row(val name: String, val isDir: Boolean,
+                   val docId: String, val size: Long)
+    data class DirRow(val name: String, val docId: String,
+                      val depth: Int, val rel: String)
+    val queue = ArrayDeque<Entry>()
+    queue.add(Entry(rootDocId, 0, ""))
+    var walked = 0
+    var enumerated = 0
+    var seen = 0
+    while (queue.isNotEmpty()) {
+        val cur = queue.removeFirst()
+        walked++
+        val rows: List<Row>? = runCatching {
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+                    treeUri, cur.docId)
+            val out = ArrayList<Row>()
+            context.contentResolver.query(
+                childrenUri,
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE,
+                    DocumentsContract.Document.COLUMN_SIZE),
+                null, null, null)?.use { c ->
+                while (c.moveToNext()) {
+                    val docId = c.getString(0) ?: continue
+                    val name = c.getString(1) ?: continue
+                    val mime = c.getString(2) ?: ""
+                    val size = if (c.isNull(3)) -1L else c.getLong(3)
+                    out.add(Row(name,
+                                mime == DocumentsContract.Document.MIME_TYPE_DIR,
+                                docId, size))
+                }
+            }
+            out
+        }.getOrNull()
+        if (rows == null) continue
+        enumerated++
+        seen += rows.size
+        val subDirs = ArrayList<DirRow>()
+        for (r in rows) {
+            val childRel = if (cur.rel.isEmpty()) r.name else "${cur.rel}/${r.name}"
+            if (!r.isDir && r.name.equals("eboot.bin", ignoreCase = true)) {
+                return SafWalk(SafFound(
+                        DocumentsContract.buildDocumentUriUsingTree(treeUri, r.docId),
+                        childRel, r.size), walked, enumerated, seen)
+            }
+            if (r.isDir) subDirs.add(DirRow(r.name, r.docId, cur.depth + 1, childRel))
+        }
+        if (cur.depth + 1 > com.px5.emulator.EbootLocator.MAX_DEPTH ||
+                walked >= com.px5.emulator.EbootLocator.MAX_DIRS) continue
+        subDirs.sortBy { it.name.lowercase() }
+        subDirs.sortByDescending { it.name.equals("decrypted", ignoreCase = true) }
+        for (d in subDirs) queue.add(Entry(d.docId, d.depth, d.rel))
+    }
+    return SafWalk(null, walked, enumerated, seen)
+}
+
+private fun safSearchFromPath(path: String, context: Context): SafWalk? {
+    val targets = safTargetsFor(path, context)
+    if (targets.isEmpty()) return null
+    var walked = 0
+    var enumerated = 0
+    var seen = 0
+    var any = false
+    for ((treeUri, docId) in targets) {
+        val w = runCatching { safSearchEboot(context, treeUri, docId) }.getOrNull()
+                ?: continue
+        any = true
+        if (w.found != null) return w
+        walked += w.dirsWalked
+        enumerated += w.dirsEnumerated
+        seen += w.entriesSeen
+    }
+    return if (any) SafWalk(null, walked, enumerated, seen) else null
+}
+
+/** v1.27 — resolve a loadable eboot target when java.io cannot read the
+ *  game folder: find the document over SAF, copy the bytes into the app
+ *  cache, and hand the native loader the copy's real path. */
+private fun safCopyTarget(path: String, context: Context): Pair<java.io.File, String>? =
+    runCatching {
+        val w = safSearchFromPath(path, context) ?: return@runCatching null
+        val found = w.found ?: return@runCatching null
+        val ins = context.contentResolver.openInputStream(found.uri)
+                  ?: return@runCatching null
+        val dest = java.io.File(context.cacheDir, "saf_eboot.bin")
+        ins.use { s -> dest.outputStream().use { s.copyTo(it, 64 * 1024) } }
+        if (dest.length() == 0L) {
+            dest.delete()
+            return@runCatching null
+        }
+        Pair(dest, "route=saf-copy rel=${found.relPath} bytes=${dest.length()}")
+    }.getOrNull()
