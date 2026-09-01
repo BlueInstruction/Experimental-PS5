@@ -49,7 +49,11 @@ BuiltSelf BuildSelfContainer(
 
 // Convenience wrapper for the common fixture shape: split a WHOLE ELF
 // file image (ehdr + phdrs + payload at p_offset) and wrap it. One
-// flag per PT_LOAD phdr, in order.
+// flag per PT_LOAD phdr, in order. v1.30: each PT_LOAD's entry is
+// emitted as a Blocked entry whose id field names that phdr's index —
+// the resolution shape shadPS4's Elf::LoadSegment requires (the vc30
+// device log proved real containers do NOT pair entries with phdrs by
+// order: 12 entries vs 14 phdrs).
 BuiltSelf BuildSelfFromWholeElf(const std::vector<uint8_t>& elfFile,
                                 const std::vector<uint64_t>& flags);
 

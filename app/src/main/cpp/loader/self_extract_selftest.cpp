@@ -127,7 +127,9 @@ SubResult TestCompressedSegmentRoundTrip() {
     const std::vector<uint8_t> phdrs(g.image.begin() + 0x40,
                                      g.image.begin() + 0x78);
     const SelfFixtures::BuiltSelf s = SelfFixtures::BuildSelfContainer(
-        ehdr, phdrs, {z}, {kSegFlagSigned | kSegFlagCompressed},
+        ehdr, phdrs, {z},
+        {kSegFlagSigned | kSegFlagCompressed | kSegFlagBlocked |
+         (0ull << kSegIdShift)},
         {g.payload.size()});
     const ExtractResult res = ExtractInnerElf(s.bytes.data(), s.bytes.size());
     if (!res.ok) { r.detail = "extract failed: " + res.error; return r; }
@@ -160,6 +162,73 @@ SubResult TestEncryptedSegmentRefused() {
     return r;
 }
 
+// ---- v1.30: the vc30 device shape — entry count != phdr count -------
+// The real Dreaming Sarah eboot.bin carries 12 SELF entries vs 14 phdrs
+// and v1.29 refused it. The contract is shadPS4's: a Blocked entry with
+// id = phdr index serves that phdr's bytes; extra header-only phdrs
+// (PT_TLS here, like the real file's PT_GNU_*/PT_SCE_* tail) need no
+// entry at all. This subtest pins that regression forever.
+SubResult TestCountMismatchResolvedById() {
+    SubResult r{"self_count_mismatch_by_id", false, ""};
+    const GuestElf g = MakeGuestElf();
+    // Grow the guest to 2 phdrs: phdr[0] = the PT_LOAD (payload moved to
+    // 0xC0 so the second phdr fits at 0x78), phdr[1] = PT_TLS (no data
+    // served — shadPS4 module.cpp never LoadSegments a PT_TLS).
+    constexpr uint64_t kMovedPayloadOff = 0xC0;
+    std::vector<uint8_t> img2 = g.image;
+    img2.resize(kMovedPayloadOff + g.payload.size(), 0);
+    memcpy(img2.data() + kMovedPayloadOff, g.payload.data(),
+           g.payload.size());
+    const uint64_t movedOff = kMovedPayloadOff;
+    memcpy(img2.data() + 0x48, &movedOff, 8);      // phdr[0].p_offset
+    const uint16_t phnum2 = 2;
+    memcpy(img2.data() + 0x38, &phnum2, 2);        // e_phnum
+    uint8_t* tls = img2.data() + 0x78;             // phdr[1]: PT_TLS
+    const uint32_t tlsType = 7;
+    const uint64_t tlsOff = 0, tlsSz = 0x10;
+    memcpy(tls + 0x00, &tlsType, 4);
+    memcpy(tls + 0x08, &tlsOff, 8);
+    memcpy(tls + 0x20, &tlsSz, 8);                 // p_filesz
+    memcpy(tls + 0x28, &tlsSz, 8);                 // p_memsz
+
+    const std::vector<uint8_t> ehdr2(img2.begin(), img2.begin() + 0x40);
+    const std::vector<uint8_t> phdrs2(img2.begin() + 0x40,
+                                      img2.begin() + 0x40 + 2 * 0x38);
+    // ONE entry for TWO phdrs: blocked, id=0 (backs the PT_LOAD only).
+    const SelfFixtures::BuiltSelf s = SelfFixtures::BuildSelfContainer(
+        ehdr2, phdrs2, {g.payload},
+        {kSegFlagSigned | kSegFlagBlocked | (0ull << kSegIdShift)},
+        {g.payload.size()});
+    const ExtractResult res = ExtractInnerElf(s.bytes.data(), s.bytes.size());
+    if (!res.ok) {
+        r.detail = "count mismatch refused (v1.29 bug shape): " + res.error;
+        return r;
+    }
+    if (res.segmentCount != 1 || res.innerPhdrs != 2) {
+        r.detail = "counts wrong (segments=" +
+                   std::to_string(res.segmentCount) + " phdrs=" +
+                   std::to_string(res.innerPhdrs) + ")";
+        return r;
+    }
+    // Rebuilt phdr[0].offset must point at the appended payload.
+    const uint64_t rebuiltOff = 0x40 + 2 * 0x38;
+    if (res.elfBytes.size() < rebuiltOff + g.payload.size()) {
+        r.detail = "rebuilt image short";
+        return r;
+    }
+    if (memcmp(res.elfBytes.data() + rebuiltOff, g.payload.data(),
+               g.payload.size()) != 0) {
+        r.detail = "payload bytes mismatch";
+        return r;
+    }
+    if (res.extractedSegments != 1 || res.inflatedSegments != 0) {
+        r.detail = "accounting wrong";
+        return r;
+    }
+    r.pass = true;
+    return r;
+}
+
 SubResult TestBadMagicRefused() {
     SubResult r{"self_bad_magic", false, ""};
     std::vector<uint8_t> junk(0x100, 0xAB);
@@ -179,6 +248,7 @@ bool RunSelfExtractSelfTest(std::string* report) {
         TestPlainSegmentRoundTrip(),
         TestCompressedSegmentRoundTrip(),
         TestEncryptedSegmentRefused(),
+        TestCountMismatchResolvedById(),
         TestBadMagicRefused(),
     };
 

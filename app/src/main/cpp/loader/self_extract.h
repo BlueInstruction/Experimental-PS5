@@ -53,14 +53,24 @@
 //     innerElfPos + e_phoff.
 //   segment data: at self_segment_header[i].fileOffset (absolute).
 //
-// EXTRACTION CONTRACT
+// EXTRACTION CONTRACT (v1.30 — corrected against shadPS4's REAL
+// resolution, verified in src/core/loader/elf.cpp Elf::LoadSegment +
+// src/core/module.cpp LoadModuleToMemory):
 //   The extractor rebuilds a STANDALONE ELF64: inner header + phdrs,
-//   each PT_LOAD's p_offset rewritten to point at its reassembled data
-//   appended below (the classic self2elf shape, no decryption). The
-//   rebuilt image then flows through the ordinary ELF loader + mapper,
-//   so nothing downstream special-cases SELF.
-//   Self segment j is matched to ELF phdr j BY ORDER (the shadPS4
-//   assumption); count mismatches are a named error.
+//   each data-carrying phdr's p_offset rewritten to point at its
+//   reassembled bytes appended below (the classic self2elf shape, no
+//   decryption). The rebuilt image then flows through the ordinary ELF
+//   loader + mapper, so nothing downstream special-cases SELF.
+//   RESOLUTION: the SELF entry table and the inner ELF's phdr table are
+//   INDEPENDENT counts — real eboot.bin carries 12 entries vs 14 phdrs
+//   (vc30 device log), and shadPS4 never compares them. A phdr's bytes
+//   live in the Blocked entry (flags bit 11) whose id field
+//   ((flags >> 20) & 0xFFF) names the backing phdr index; the pull is
+//   seg.fileOffset + (p_offset - idPhdr.p_offset). phdrs served for
+//   data: PT_LOAD, PT_DYNAMIC, PT_SCE_DYNLIBDATA, PT_SCE_RELRO (the
+//   exact set shadPS4 routes through LoadSegment). v1.29 matched
+//   segment j to phdr j BY ORDER and rejected count mismatches — that
+//   gate was a v1.29 invention, refuted by the vc30 session, removed.
 
 #ifndef PX5_LOADER_SELF_EXTRACT_H
 #define PX5_LOADER_SELF_EXTRACT_H
@@ -81,6 +91,14 @@ constexpr uint64_t kSegFlagEncrypted  = 1ull << 1;
 constexpr uint64_t kSegFlagSigned     = 1ull << 2;
 constexpr uint64_t kSegFlagCompressed = 1ull << 3;
 constexpr uint64_t kSegFlagBlocked    = 1ull << 11;
+
+// The phdr index a Blocked entry backs lives in flags bits 20-31
+// (shadPS4 self_segment_header::GetId).
+constexpr uint32_t kSegIdShift = 20;
+constexpr uint32_t kSegIdMask  = 0xFFFu;
+inline uint32_t SegId(uint64_t flags) {
+    return static_cast<uint32_t>((flags >> kSegIdShift) & kSegIdMask);
+}
 
 // Hard safety bounds (real SELF segments are far below these; anything
 // larger is treated as corruption, not decoded).

@@ -119,6 +119,7 @@ BuiltSelf BuildSelfFromWholeElf(const std::vector<uint8_t>& elfFile,
     std::vector<uint8_t> innerPhdrs;
     std::vector<std::vector<uint8_t>> payloads;
     std::vector<uint64_t> memSizes;
+    std::vector<uint64_t> entryFlags;
     for (uint16_t i = 0; i < ehdr.phnum; ++i) {
         const size_t phPos = static_cast<size_t>(ehdr.phoff) +
                              static_cast<size_t>(i) * ehdr.phentsize;
@@ -135,15 +136,21 @@ BuiltSelf BuildSelfFromWholeElf(const std::vector<uint8_t>& elfFile,
             elfFile.begin() + ph.offset,
             elfFile.begin() + ph.offset + ph.filesz);
         memSizes.push_back(ph.memsz);
+        // v1.30: fixture entries model the REAL resolution shape — a
+        // Blocked entry (bit 11) whose id field names the phdr index it
+        // backs (shadPS4 elf.cpp Elf::LoadSegment scans exactly these).
+        entryFlags.push_back(
+            flags[entryFlags.size()] | PX5::SelfExtract::kSegFlagBlocked |
+            (static_cast<uint64_t>(i) << PX5::SelfExtract::kSegIdShift));
     }
 
-    // The container indexes segments by PHDR order; payloads currently
+    // The container indexes segments by PHDR id; payloads currently
     // hold only the PT_LOAD subset. For fixture purposes the inner ELF
     // is expected to be all-PT_LOAD (true for the test guests); anything
     // else is a caller error and yields an empty build.
     if (payloads.size() != flags.size()) return {};
 
-    return BuildSelfContainer(innerEhdr, innerPhdrs, payloads, flags,
+    return BuildSelfContainer(innerEhdr, innerPhdrs, payloads, entryFlags,
                               memSizes);
 }
 
