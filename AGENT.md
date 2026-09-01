@@ -175,7 +175,8 @@ evidence citation attached in the PR/commit message.
 
 The PS5 graphics pipeline will be modeled after what the research emulators
 demonstrate publicly ([Kyty](https://github.com/KytyPS5/KytyPS5),
-[SharpEmu](https://github.com/sharpemu/sharpemu)) plus shadPS4's proven
+[SharpEmu](https://github.com/sharpemu/sharpemu),
+[prosper](https://github.com/mattias800/prosper)) plus shadPS4's proven
 PS4-era design ([shadPS4](https://github.com/shadps4-emu/shadPS4)):
 
 1. guest command buffers are translated into an internal GPU IR;
@@ -194,7 +195,8 @@ Reference links retained from the old README (curated):
 * Debugging/validation: baldurk/renderdoc · ValveSoftware/Fossilize
 * Adreno ecosystem: bylaws/libadrenotools (+ eden-emulator /
   Pipetto-crypto forks), bylaws/liblinkernsbypass
-* Emulator references: RPCS3 (CPU/memory/kernel patterns),
+* Emulator references: prosper (PS5 OS/HLE/AGC/RDNA2→SPIR-V architecture),
+  RPCS3 (CPU/memory/kernel patterns),
   JICA98/Bachata-S4 (Android PS4 attempt), ps5-linux/* (hardware research)
 
 Misclassification guard-list (NOT our layers — do not import as engine
@@ -245,3 +247,23 @@ proprietary keys, commercial game assets, or copyrighted system binaries.
 It exists to run legally obtained homebrew/software on hardware the user
 owns, using open-source engines (FEX, Mesa/Turnip, Android NDK) glued by
 original code in this repository.
+
+---
+
+## 11. External references & credits posture
+
+1. External repositories are used primarily as **engineering references**.
+   Studying architecture, file formats, algorithms, APIs, and observable
+   behavior is free and is never blocked by a repository's license state
+   (known, unknown, restrictive, or incompatible).
+2. Designs are derived from observed behavior, public specifications,
+   binary formats, interfaces, and multiple independent implementations.
+   Core PSX5 components are clean-room reimplementations.
+3. Copying or vendoring external source is a deliberate exception, not a
+   default. It triggers a license check at the moment of copying — nothing
+   more. Acknowledgment then belongs in the README **Credits** section
+   (normal GitHub practice), plus a one-line license note in the fetch
+   script if a dependency is vendored. No separate license ledgers, reuse
+   maps, or reference documents are maintained.
+4. The README Credits section stays truthful: only projects actually used,
+   linked, or studied as references are listed.
