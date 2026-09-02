@@ -44,7 +44,7 @@ Requirements: JDK 17 · Gradle 8.9 · SDK API 35 · NDK 27.3.13750724 · CMake 3
 ```bash
 ./tools/fetch_fexcore.sh          # materializes pinned upstream FEX sources
 export PX5_FEXCORE_ROOT="$PWD/../deps/FEX"
-gradle assembleDebug --no-daemon
+gradle assembleRelease --no-daemon
 ```
 
 CI (`PX5 Build APK`) performs exactly this sequence on every push to

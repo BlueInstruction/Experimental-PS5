@@ -91,6 +91,14 @@ fun EmuScreen(
     val scope = rememberCoroutineScope()
     val activity = context as? android.app.Activity
 
+    // v1.37 — opening the diagnostics & log viewer from INSIDE the game
+    // must never end the session: mark the peek so the stage's dispose
+    // path keeps the landscape lock and the session alive.
+    val openLogsInSession = {
+        Px5Settings.gameSessionPeeking = true
+        onOpenLogs()
+    }
+
     var renderStats by remember { mutableStateOf("renderer idle") }
     var fpsText by remember { mutableStateOf("") }
     var frametimeText by remember { mutableStateOf("") }
@@ -137,7 +145,16 @@ fun EmuScreen(
     }
 
     // ---- stage shell: force landscape + immersive, restore on exit --------
+    // v1.37 — the game session gate. Entering the stage opens a game
+    // session; while it is active the WHOLE app stays landscape, including
+    // the diagnostics & log screen (an orientation flip mid-session
+    // recreates the surface under the engine and crashes the game).
+    // Navigating to the in-game log viewer disposes this composable, so
+    // the dispose path only ends the session when it is a REAL exit —
+    // the peek marker set by the menu's log row distinguishes the two.
     DisposableEffect(Unit) {
+        Px5Settings.setGameSessionActive(true)
+        Px5Settings.gameSessionPeeking = false
         activity?.requestedOrientation =
             ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         val controller = activity?.window?.let { win ->
@@ -147,8 +164,11 @@ fun EmuScreen(
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         controller?.hide(WindowInsetsCompat.Type.systemBars())
         onDispose {
-            activity?.let { Px5Settings.applyOrientation(it) }
-            controller?.show(WindowInsetsCompat.Type.systemBars())
+            if (!Px5Settings.gameSessionPeeking) {
+                Px5Settings.setGameSessionActive(false)
+                activity?.let { Px5Settings.applyOrientation(it) }
+                controller?.show(WindowInsetsCompat.Type.systemBars())
+            }
         }
     }
 
@@ -164,12 +184,20 @@ fun EmuScreen(
         onDispose {
             val seconds = (System.currentTimeMillis() - startedAt) / 1000
             game?.let { gameViewModel?.addPlayTime(it.id, seconds) }
-            com.px5.emulator.core.PX5EventLog.event(
-                "gameBoot", "game_exit", "path=$path seconds=$seconds")
-            try {
-                fexCoreWrapper?.nativeLogEvent(
-                    "gameBoot", "game_exit seconds=$seconds path=$path")
-            } catch (_: Throwable) {}
+            // v1.37 — navigating to the in-game log viewer also disposes
+            // this effect; that is a peek, not a session end, and must not
+            // report game_exit while the game keeps running.
+            if (!Px5Settings.gameSessionPeeking) {
+                com.px5.emulator.core.PX5EventLog.event(
+                    "gameBoot", "game_exit", "path=$path seconds=$seconds")
+                try {
+                    fexCoreWrapper?.nativeLogEvent(
+                        "gameBoot", "game_exit seconds=$seconds path=$path")
+                } catch (_: Throwable) {}
+            } else {
+                com.px5.emulator.core.PX5EventLog.event(
+                    "gameBoot", "game_peek_logs", "path=$path seconds=$seconds")
+            }
         }
     }
 
@@ -568,7 +596,7 @@ fun EmuScreen(
                 progress01 = animatedBootProgress,
                 error = bootError,
                 onRetry = { bootRetryToken++ },
-                onOpenLogs = onOpenLogs,
+                onOpenLogs = openLogsInSession,
                 onExit = onBackClick
             )
         }
@@ -597,7 +625,7 @@ fun EmuScreen(
                 },
                 onOpenLogs = {
                     menuOpen = false
-                    onOpenLogs()
+                    openLogsInSession()
                 },
                 onExit = onBackClick
             )

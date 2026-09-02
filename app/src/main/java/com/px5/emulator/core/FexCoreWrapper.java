@@ -129,6 +129,17 @@ public class FexCoreWrapper {
     public native String nativeGetEngineCounters();
 
     /**
+     * v1.37 — Eden-style host documentation block (General / CPU / GPU /
+     * Memory), all measured at runtime: system build properties,
+     * /proc/cpuinfo core-part topology + feature flags, a REAL Vulkan
+     * probe through the engine's Vulkan loader (device name, API version,
+     * packed driver version — the vulkaninfo/DevCheck numbers), and
+     * /proc/meminfo MemTotal. The same block is written into px5_main.log
+     * at engine init. A probe failure names its stage; nothing invented.
+     */
+    public native String nativeGetHostDeviceInfo();
+
+    /**
      * Applies one FEXCore config override through the real layered config
      * (FEXCore::Config::Set). Keys mirror FEX's own FEX_* options:
      * TSOEnabled, VectorTSOEnabled, HalfBarrierTSOEnabled, MemcpySetTSOEnabled,

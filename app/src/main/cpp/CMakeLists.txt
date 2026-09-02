@@ -70,7 +70,8 @@ if(ANDROID_ABI STREQUAL "x86_64")
             utils/crash_handler.cpp
             utils/heartbeat.cpp
             utils/logger.cpp
-            utils/diag_bridge.cpp)
+            utils/diag_bridge.cpp
+            utils/host_info.cpp)
     # The stub target ships no MemoryManager backend; gnm_submit's default
     # resolver therefore compiles down to the identity path (the same policy
     # the host tests use) instead of pulling in memory/memory.cpp.
@@ -187,6 +188,7 @@ add_library(
         utils/heartbeat.cpp
         utils/diag_bridge.cpp
         utils/linker_ns_bypass.cpp
+        utils/host_info.cpp
         media/media_codec_hle.cpp)
 
 target_include_directories(px5 PRIVATE

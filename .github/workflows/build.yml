@@ -9,7 +9,7 @@ on:
 
 jobs:
   build-apk:
-    name: Build Debug APK
+    name: Build Release APK
     runs-on: ubuntu-latest
     env:
       PX5_FEXCORE_ROOT: ${{ github.workspace }}/../deps/FEX
@@ -53,14 +53,20 @@ jobs:
       run: |
         rm -rf app/.cxx .gradle app/build .cxx
 
-    - name: Build Debug APK
-      run: gradle assembleDebug --no-daemon --stacktrace --info
+    # v1.37 — assembleRelease, NOT assembleDebug. A debuggable APK carries
+    # the "debug" version badge in the system app info on Android 12+ (the
+    # v1.36 session showed "1.36-debug" on the user's device); the release
+    # type reports its clean versionName. It is still signed with the
+    # auto-generated debug keystore (see build.gradle.kts buildTypes), so
+    # the artifact installs exactly like before — no upload secrets needed.
+    - name: Build Release APK
+      run: gradle assembleRelease --no-daemon --stacktrace --info
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: px5-alpha-debug-apk
-        path: app/build/outputs/apk/debug/*.apk
+        name: px5-alpha-apk
+        path: app/build/outputs/apk/release/*.apk
         retention-days: 30
 
     # v1.20 — symbolization pair for the crash reports. The crash handler

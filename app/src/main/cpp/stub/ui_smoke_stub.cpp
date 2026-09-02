@@ -30,6 +30,7 @@
 #include "../loader/self_extract_selftest.h"
 #include "../loader/runtime_linker_selftest.h"
 #include "../utils/logger.h"
+#include "../utils/host_info.h"
 
 namespace fs = std::filesystem;
 
@@ -134,6 +135,15 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeGetEngineCounters(
         JNIEnv* env, jobject) {
     return env->NewStringUTF(
         "x86_64 UI-smoke ABI: no FEXCore counters on this ABI.");
+}
+
+// v1.37 — the SAME real HostInfo block on the smoke ABI: host_info.cpp is
+// compiled into this target too, so even the CI smoke build reports
+// measured General/CPU/GPU/Memory data (nothing invented per ABI).
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeGetHostDeviceInfo(
+        JNIEnv* env, jobject) {
+    return env->NewStringUTF(PX5::HostInfo::BuildReport().c_str());
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

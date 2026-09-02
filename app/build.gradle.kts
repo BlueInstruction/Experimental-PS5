@@ -43,8 +43,8 @@ android {
         applicationId = "com.px5.emulator"
         minSdk = 28
         targetSdk = 35
-        versionCode = 37
-        versionName = "1.36"
+        versionCode = 38
+        versionName = "1.37"
 
         buildConfigField("String", "GIT_SHA", "\"${gitSha()}\"")
         buildConfigField("String", "FEXCORE_PIN", "\"${fexCorePin()}\"")
@@ -109,6 +109,20 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+        }
+    }
+
+    // v1.37 — CI now ships a RELEASE APK signed with the debug keystore.
+    // Debuggable builds get a "debug" version badge in the system app info
+    // on Android 12+ skins (the v1.36 device session showed "1.36-debug"
+    // in the app's own version row context); a release build reports its
+    // clean versionName everywhere. No obfuscation: native debugging and
+    // symbolization stay straightforward, matching Eden's CI posture.
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            isShrinkResources = false
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 

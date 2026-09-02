@@ -85,7 +85,7 @@ Steps:
 ```bash
 ./tools/fetch_fexcore.sh                       # materializes $PX5_FEXCORE_ROOT
 export PX5_FEXCORE_ROOT="$PWD/../deps/FEX"     # default location of step 1
-gradle assembleDebug --no-daemon               # produces debug APK (both ABIs)
+gradle assembleRelease --no-daemon             # produces release APK (both ABIs, debug-keystore signed; v1.37 CI artifact)
 ```
 
 The CMake layer fails fast with an explanatory error if

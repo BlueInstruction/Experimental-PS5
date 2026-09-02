@@ -37,6 +37,32 @@ object Px5Settings {
     private val _orientationMode = MutableStateFlow(0)
     val orientationMode: StateFlow<Int> = _orientationMode
 
+    // ---- Game session orientation gate (v1.37) -----------------------------
+    // A game session is the window between EmuScreen entering composition
+    // and the user explicitly leaving it. While it is active the whole app
+    // is LANDSCAPE — including the diagnostics & log screen reachable from
+    // the in-game menu. An orientation flip mid-session (portrait log
+    // viewer) recreates the display surface under the running engine and
+    // crashes the game (2026-09-02 device session), so the session flag
+    // overrides the shell preference everywhere: applyOrientation() forces
+    // SENSOR_LANDSCAPE until the session ends.
+    @Volatile private var gameSessionActive = false
+
+    /** True while the user is peeking at the in-game logs screen; the
+     *  stage composable is disposed during that navigation but the game
+     *  session (and its landscape lock) must survive it. */
+    @Volatile var gameSessionPeeking: Boolean = false
+
+    /** Entered when the emulation stage composes; left ONLY on an explicit
+     *  stage exit (back/exit from the stage itself — not on navigating to
+     *  the in-game log viewer). */
+    fun isGameSessionActive(): Boolean = gameSessionActive
+
+    fun setGameSessionActive(active: Boolean) {
+        gameSessionActive = active
+        if (!active) gameSessionPeeking = false
+    }
+
     /** Show the on-screen DualSense pad on the emulation stage. */
     private val _showTouchPad = MutableStateFlow(true)
     val showTouchPad: StateFlow<Boolean> = _showTouchPad
@@ -111,9 +137,19 @@ object Px5Settings {
     }
 
     /** Applies the persisted orientation mode to the host activity.
-     *  Mode 0 now explicitly releases any previous override (the emulation
-     *  stage forces landscape while open and hands the shell back here). */
+     *
+     *  v1.37 — while a game session is active this ALWAYS forces
+     *  SENSOR_LANDSCAPE, no matter what the shell preference says: every
+     *  screen reachable during the session (stage, in-game menu, in-game
+     *  diagnostics & log viewer) runs landscape until the game exits.
+     *  Outside a session the shell mode applies: 0 = release any previous
+     *  override, 1 = landscape, 2 = portrait. */
     fun applyOrientation(activity: android.app.Activity) {
+        if (gameSessionActive) {
+            activity.requestedOrientation =
+                android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            return
+        }
         when (_orientationMode.value) {
             1 -> activity.requestedOrientation =
                 android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE

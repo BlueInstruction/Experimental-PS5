@@ -25,6 +25,7 @@
 #include "utils/breadcrumbs.h"
 #include "utils/crash_handler.h"
 #include "utils/heartbeat.h"
+#include "utils/host_info.h"
 #include "loader/self_extract.h"
 #include "loader/runtime_linker_selftest.h"
 
@@ -1051,8 +1052,31 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeInitRuntimeContext(
         PX5_LOGI(PX5::LogCategory::CORE, "build identity: %s",
                  identity.c_str());
     }
+    // v1.37 — Eden-style device documentation at log start. Every pasted
+    // engine log now opens with the measured host block (General / CPU /
+    // GPU / Memory), so "what hardware produced this?" never needs a
+    // follow-up question — and GPU complaints can be answered from the
+    // paste itself (real Vulkan probe: device name / API / driver build).
+    // A probe failure prints its failing stage; no plausible constants.
+    try {
+        PX5::HostInfo::LogIntoEngineLog();
+    } catch (...) {
+        PX5_LOGW(PX5::LogCategory::SYSTEM,
+                 "host device info: probe failed (suppressed)");
+    }
     PX5_LOGI(PX5::LogCategory::CORE,
              "Runtime context wired: crash reports + driver dirs ready");
+}
+
+// v1.37 — the Eden-style host documentation block for Settings > Debug >
+// About device. Same measured source as the engine-log header: system
+// build properties, /proc/cpuinfo core-part topology + feature flags, a
+// real Vulkan probe (device name / API / packed driver version), and
+// MemTotal. Nothing invented.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeGetHostDeviceInfo(
+        JNIEnv* env, jobject) {
+    return env->NewStringUTF(PX5::HostInfo::BuildReport().c_str());
 }
 
 // Single Kotlin->native event passthrough for boot-critical moments.

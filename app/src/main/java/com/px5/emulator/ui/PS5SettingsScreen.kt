@@ -1,6 +1,5 @@
 package com.px5.emulator.ui
 
-import android.os.Build
 import android.os.StatFs
 import java.io.File
 import androidx.compose.foundation.background
@@ -35,6 +34,7 @@ import com.px5.emulator.core.FexCoreWrapper
 import com.px5.emulator.core.Px5Settings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Settings — six fixed tabs mirroring the Eden emulator layout:
@@ -290,16 +290,12 @@ private fun LazyListScope.generalSection(
                 soundManager.playNavigationSound()
             }
         )
-        val orientationMode by Px5Settings.orientationMode.collectAsState()
-        SettingsSegmented(
-            label = "Screen orientation",
-            options = listOf("System", "Landscape", "Portrait"),
-            selectedIndex = orientationMode,
-            onSelect = { i ->
-                Px5Settings.setOrientationMode(i)
-                soundManager.playNavigationSound()
-            }
-        )
+        // v1.37 — the "Screen orientation" segmented control is gone from
+        // here: the shell orientation is a one-tap flip on the main page
+        // (where it belongs), and during a game session the orientation is
+        // forced landscape regardless of any preference. A second control
+        // in General only invited the portrait-mid-game crash the session
+        // gate now prevents.
     }
     item {
         val appInfo = androidx.compose.ui.platform.LocalContext.current
@@ -445,12 +441,32 @@ private fun LazyListScope.debugSection(
     item {
         SettingsHeader("Debug")
         SettingsSubHeader("About device")
-        SettingsItemText("Device", "${Build.MANUFACTURER} ${Build.MODEL}")
-        SettingsItemText(
-            "Android",
-            "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"
-        )
-        SettingsItemText("ABI", Build.SUPPORTED_ABIS.firstOrNull() ?: "?")
+        // v1.37 — the Eden-style measured device block (General / CPU / GPU
+        // / Memory), identical to the one the engine writes at the top of
+        // px5_main.log: system build properties, /proc/cpuinfo core-part
+        // topology + feature flags, a REAL Vulkan probe (device name, API
+        // version, packed driver version), and MemTotal. First call runs
+        // the probe, so it loads off the main thread; while it runs the
+        // panel says so instead of showing stale or invented numbers.
+        val wrapper = fexCoreWrapper
+        var deviceReport by remember { mutableStateOf<String?>(null) }
+        LaunchedEffect(wrapper) {
+            if (deviceReport != null) return@LaunchedEffect
+            deviceReport = withContext(Dispatchers.IO) {
+                try {
+                    wrapper?.nativeGetHostDeviceInfo()
+                        ?: "(no engine on this ABI — device info unavailable)"
+                } catch (t: Throwable) {
+                    "(device info probe failed: ${t.message})"
+                }
+            }
+        }
+        val report = deviceReport
+        if (report != null) {
+            MonoReportBox(report)
+        } else {
+            SettingsItemText("Device", "measuring (Vulkan probe running)…")
+        }
         SettingsItemText("CPU bridge", fexCoreStatus)
     }
     item {

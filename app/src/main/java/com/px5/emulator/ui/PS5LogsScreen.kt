@@ -52,6 +52,19 @@ fun PS5LogsScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
+    // v1.37 — when opened from an ACTIVE game session (in-game menu →
+    // "Diagnostics & logs") this screen must stay LANDSCAPE: the log flip
+    // to portrait under a running game recreates the display surface and
+    // crashes it. Outside a session the shell orientation preference
+    // governs, so this effect only acts on an active session.
+    DisposableEffect(Unit) {
+        if (com.px5.emulator.core.Px5Settings.isGameSessionActive()) {
+            (context as? android.app.Activity)?.requestedOrientation =
+                android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        }
+        onDispose {}
+    }
+
     var selectedSink by remember { mutableIntStateOf(0) }
     var autoRefresh by remember { mutableStateOf(true) }
     var logText by remember { mutableStateOf("loading…") }
