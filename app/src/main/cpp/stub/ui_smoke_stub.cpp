@@ -228,7 +228,7 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunLoaderSelfTest(
     // v1.31: the runtime linker self-test is pure C++ (registry + dynamic
     // reader) — the smoke ABI runs the REAL thing, same policy as above.
     std::string rl;
-    PX5::RuntimeLinker::RunRuntimeLinkerSelfTest(&rl);
+    PX5::RunRuntimeLinkerSelfTest(&rl);
     return env->NewStringUTF(
         (report + "\n--- runtime linker ---\n" + rl).c_str());
 }

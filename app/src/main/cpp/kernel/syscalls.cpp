@@ -220,7 +220,7 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
         return 0;
     }
 
-    case PX5::RuntimeLinker::kPx5NidGateSyscall: {
+    case kPx5NidGateSyscall: {
         // PX5 NID gate (v1.31): a0 = NID, a1..a5 = HLE arguments. Real
         // dispatch into the RuntimeLinker registry: registered HLE exports
         // are bionic-native host functions; unknown NIDs and guest-kind

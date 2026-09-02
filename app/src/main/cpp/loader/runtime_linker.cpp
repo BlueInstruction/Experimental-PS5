@@ -12,7 +12,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace PX5::RuntimeLinker {
+namespace PX5 {
 
 namespace {
 
@@ -342,4 +342,4 @@ DynamicInfo ParseDynamicFromElfImage(const uint8_t* data, size_t size) {
     return out;
 }
 
-} // namespace PX5::RuntimeLinker
+} // namespace PX5

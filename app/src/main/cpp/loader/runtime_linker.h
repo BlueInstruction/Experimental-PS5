@@ -43,7 +43,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace PX5::RuntimeLinker {
+namespace PX5 {
 
 // Reserved guest syscall number for the NID gate (see header comment).
 constexpr uint32_t kPx5NidGateSyscall = 0x5C500001u;
@@ -136,6 +136,6 @@ struct DynamicInfo {
 
 DynamicInfo ParseDynamicFromElfImage(const uint8_t* data, size_t size);
 
-} // namespace PX5::RuntimeLinker
+} // namespace PX5
 
 #endif // PX5_LOADER_RUNTIME_LINKER_H

@@ -10,7 +10,7 @@
 #include <cstring>
 #include <vector>
 
-namespace PX5::RuntimeLinker {
+namespace PX5 {
 
 namespace {
 
@@ -208,4 +208,4 @@ bool RunRuntimeLinkerSelfTest(std::string* report) {
     return allOk;
 }
 
-} // namespace PX5::RuntimeLinker
+} // namespace PX5

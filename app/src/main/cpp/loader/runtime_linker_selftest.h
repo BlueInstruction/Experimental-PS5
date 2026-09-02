@@ -16,7 +16,7 @@
 #include <cstdint>
 #include <string>
 
-namespace PX5::RuntimeLinker {
+namespace PX5 {
 
 // Runs all subtests; returns true iff every one passed. `report` (optional)
 // receives a multi-line report whose first line begins PASS or FAIL.
@@ -48,6 +48,6 @@ constexpr uint8_t kNidGateStubCode[] = {
 };
 constexpr size_t kNidGateStubSize = sizeof(kNidGateStubCode);
 
-} // namespace PX5::RuntimeLinker
+} // namespace PX5
 
 #endif // PX5_LOADER_RUNTIME_LINKER_SELFTEST_H

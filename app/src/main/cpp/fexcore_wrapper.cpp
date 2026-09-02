@@ -785,7 +785,7 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunLoaderSelfTest(JNIEnv* env,
             // in the same isolated child and append both reports verbatim.
             std::string rl;
             const bool rlOk =
-                PX5::RuntimeLinker::RunRuntimeLinkerSelfTest(&rl);
+                PX5::RunRuntimeLinkerSelfTest(&rl);
             t.step("runtime linker self-test ok=%d (%zu chars)",
                    rlOk ? 1 : 0, rl.size());
             return rep + "\n--- runtime linker ---\n" + rl;
