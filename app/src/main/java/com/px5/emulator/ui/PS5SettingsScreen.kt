@@ -759,21 +759,26 @@ private fun LazyListScope.graphicsSection(
         }
         Spacer(Modifier.height(8.dp))
         // Reports the engine's own summary, including the driverVerified=
-        // mapping proof. Single refresh control, single home (this tab).
+        // mapping proof. v1.36: AUTO-refreshed — pulled on first composition
+        // and re-read on every ON_RESUME (returning from the manager sheet,
+        // an import picker, or a game session), so the always-manual
+        // "Refresh driver state" button is gone. Eden/Vita3K never ask the
+        // user to re-probe by hand; neither does this screen anymore.
         var driverSummary by remember { mutableStateOf("") }
-        Button(
-            onClick = {
-                driverSummary = fexCoreWrapper?.nativeGetDriverManagerSummary()
-                    ?: "engine library unavailable"
-            },
-            colors = ButtonDefaults.buttonColors(
-                containerColor = px5Colors().control, contentColor = px5Colors().text
-            ),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-            Spacer(Modifier.width(6.dp))
-            Text("Refresh driver state", fontSize = 12.sp)
+        fun pullDriverSummary() {
+            driverSummary = fexCoreWrapper?.nativeGetDriverManagerSummary()
+                ?: "engine library unavailable"
+        }
+        LaunchedEffect(Unit) { pullDriverSummary() }
+        val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+        androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+            val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                    pullDriverSummary()
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
         }
         if (driverSummary.isNotEmpty()) MonoReportBox(driverSummary)
     }

@@ -62,6 +62,18 @@ fun PS5TurnipDriverSheet(
     var summary by remember { mutableStateOf("querying engine…") }
     var busy by remember { mutableStateOf(false) }
 
+    // v1.36 — name the REAL device ICD instead of guessing: Qualcomm ships
+    // it as vulkan.adreno.so under the vendor hw dirs (the JSON the system
+    // libvulkan loader reads points there). Falls back to the loader name
+    // when the layout is unexpected — never a invented path.
+    val systemIcdName = remember {
+        listOf(
+            "/vendor/lib64/hw/vulkan.adreno.so",
+            "/system/vendor/lib64/hw/vulkan.adreno.so"
+        ).firstOrNull { java.io.File(it).isFile }?.let { java.io.File(it).name }
+            ?: "libvulkan.so"
+    }
+
     suspend fun refreshSummary() {
         summary = runCatching { fexCoreWrapper?.nativeGetDriverManagerSummary() ?: "engine unavailable" }
             .getOrDefault("engine unavailable")
@@ -165,7 +177,7 @@ fun PS5TurnipDriverSheet(
                 item {
                     DriverRow(
                         title = "System Qualcomm Adreno driver",
-                        subtitle = "Default device ICD (libvulkan.so)",
+                        subtitle = "Device ICD — $systemIcdName",
                         selected = activeMode == 0,
                         enabled = !busy,
                         onSelect = {
@@ -235,7 +247,9 @@ fun PS5TurnipDriverSheet(
             if (slots.isEmpty()) {
                 Text(
                     text = "No imported drivers yet. Import a Turnip/Mesa driver package " +
-                            "(vulkan.turnip.so, libvulkan.so, libvulkan_adreno.so — arm64-v8a).",
+                            "(vulkan.turnip.so, libvulkan.so, libvulkan_adreno.so — arm64-v8a). " +
+                            "Non-public platform deps (libhardware.so, …) are bundled " +
+                            "automatically from the device at import.",
                     fontSize = 12.sp,
                     color = px5Colors().textSecondary,
                     fontFamily = TitilliumFontFamily,

@@ -14,8 +14,8 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExitToApp
@@ -118,6 +118,20 @@ fun EmuScreen(
     // raw text panel over the game.
     var menuOpen by remember { mutableStateOf(false) }
     var padEditing by remember { mutableStateOf(false) }
+
+    // v1.36 — Eden semantics for the system back gesture: it IS the console
+    // button. In-game it opens the pause menu (or resumes from it); during
+    // boot/failure it leaves the stage; in pad-edit mode it leaves editing.
+    // The old floating top-bar buttons are gone — this gesture plus the pad's
+    // PS button are the only stage-level controls, matching Eden/Vita3K.
+    BackHandler {
+        when {
+            padEditing -> padEditing = false
+            menuOpen -> menuOpen = false          // back in menu == resume
+            bootDone && bootError == null -> menuOpen = true
+            else -> onBackClick()
+        }
+    }
     var padLayout by remember {
         mutableStateOf(PadLayout.decode(Px5Settings.padLayoutJson.value))
     }
@@ -531,90 +545,13 @@ fun EmuScreen(
             )
         }
 
-        // ---- overlay layer 2: minimal top bar (menu / title / chips) -------
-        // v1.32: the raw diagnostics wall and the manual load button are
-        // GONE from the game surface — engine evidence lives in the Logs
-        // screen; the boot is the branded loading overlay below.
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color.Black.copy(alpha = 0.35f))
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(
-                onClick = { menuOpen = true },
-                modifier = Modifier
-                    .size(36.dp)
-                    .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.14f))
-            ) {
-                Icon(
-                    Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Game menu",
-                    tint = Color.White,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-            Spacer(Modifier.width(8.dp))
-            Column {
-                Text(
-                    text = game?.name ?: path.substringAfterLast('/'),
-                    color = Color.White, fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = TitilliumFontFamily, maxLines = 1
-                )
-                Text(
-                    text = game?.titleId ?: "",
-                    color = Color(0xFF2E8CFF), fontSize = 10.sp,
-                    fontFamily = TitilliumFontFamily, maxLines = 1
-                )
-            }
-            Spacer(Modifier.weight(1f))
-            sessionReport?.let {
-                StatusChip("session report", Color(0xFFE2C74B))
-                Spacer(Modifier.width(6.dp))
-            }
-            if (showFps && fpsText.isNotEmpty()) {
-                StatusChip(fpsText, Color(0xFF69F0AE))
-                Spacer(Modifier.width(6.dp))
-            }
-            if (showFrametime && frametimeText.isNotEmpty()) {
-                StatusChip(frametimeText, Color(0xFF7DD3FC))
-                Spacer(Modifier.width(6.dp))
-            }
-            IconButton(
-                onClick = { Px5Settings.setShowTouchPad(!showPad) },
-                modifier = Modifier
-                    .size(34.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (showPad) Color(0xFF0070D1).copy(alpha = 0.55f)
-                        else Color.White.copy(alpha = 0.14f)
-                    )
-            ) {
-                Icon(
-                    Icons.Default.SportsEsports, contentDescription = "Toggle pad",
-                    tint = Color.White, modifier = Modifier.size(17.dp)
-                )
-            }
-            Spacer(Modifier.width(6.dp))
-            IconButton(
-                onClick = { if (showPad) padEditing = !padEditing },
-                modifier = Modifier
-                    .size(34.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (padEditing) Color(0xFFE2C74B).copy(alpha = 0.55f)
-                        else Color.White.copy(alpha = 0.14f)
-                    )
-            ) {
-                Icon(
-                    Icons.Default.Edit, contentDescription = "Edit pad layout",
-                    tint = Color.White, modifier = Modifier.size(15.dp)
-                )
-            }
-        }
+        // v1.36 — overlay layer 2 is GONE. The floating top bar (back arrow,
+        // game title, pad toggle, pad-edit pencil) lived in places that
+        // covered play surface and felt like launcher chrome over a console
+        // game. Everything it did lives in the pause menu (PS button or the
+        // back gesture), which already carries Resume / Logs / pad controls /
+        // Exit — Eden semantics. The FPS/frametime counters moved into that
+        // menu too (see EmuInGameMenu).
 
         // ---- overlay layer 3: boot loading overlay (0 -> 100, branded) -----
         androidx.compose.animation.AnimatedVisibility(
@@ -647,6 +584,8 @@ fun EmuScreen(
                 gameName = game?.name ?: path.substringAfterLast('/'),
                 padShown = showPad,
                 sessionReport = sessionReport,
+                fpsText = if (showFps) fpsText else "",
+                frametimeText = if (showFrametime) frametimeText else "",
                 onResume = { menuOpen = false },
                 onTogglePad = {
                     Px5Settings.setShowTouchPad(!showPad)
@@ -972,6 +911,8 @@ private fun EmuInGameMenu(
     gameName: String,
     padShown: Boolean,
     sessionReport: String?,
+    fpsText: String = "",
+    frametimeText: String = "",
     onResume: () -> Unit,
     onTogglePad: () -> Unit,
     onEditPad: () -> Unit,
@@ -1022,6 +963,16 @@ private fun EmuInGameMenu(
                     fontFamily = TitilliumFontFamily,
                     maxLines = 1
                 )
+                // v1.36 — the counters that used to float over the game
+                // surface. They belong in this menu: the player opens the
+                // menu to READ diagnostics, not mid-combat.
+                if (fpsText.isNotEmpty() || frametimeText.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (fpsText.isNotEmpty()) StatusChip(fpsText, Color(0xFF69F0AE))
+                        if (frametimeText.isNotEmpty()) StatusChip(frametimeText, Color(0xFF7DD3FC))
+                    }
+                }
                 if (sessionReport != null) {
                     Spacer(Modifier.height(6.dp))
                     Text(

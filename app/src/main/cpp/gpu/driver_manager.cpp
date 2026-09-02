@@ -80,6 +80,33 @@ void LogSlotInventory(const std::string& dir, const std::string& soname) {
              inv.c_str());
 }
 
+// v1.36 — the platform library directories the namespace searches AFTER the
+// slot dir. The 2026-09-02 vc36 session showed the real blocker: 2026-era
+// AdrenoTools-style Turnip packages (e.g. "Turnip v26.3.0-R4") carry
+// DT_NEEDED entries for NON-public platform libs (libhardware.so) that no
+// app-visible namespace links by default — SHARED shares only the public
+// library list. Searching the device's own lib dirs mirrors exactly what
+// the system sphal namespace does when IT loads /vendor's vulkan.adreno.so:
+// vendor dir first, then the platform set. Bundled deps still win (slot dir
+// is first), and the import pipeline additionally COPIES the needed
+// platform libs into the slot dir (see MainActivity's dependency bundler),
+// so both this preload and the adrenotools hook at vkCreateInstance see
+// the same file set.
+#ifdef PX5_HAVE_ADRENOTOOLS
+std::vector<std::string> PlatformLibDirs() {
+    return {
+        "/odm/lib64", "/vendor/lib64", "/system/vendor/lib64",
+        "/system_ext/lib64", "/system/lib64",
+    };
+}
+
+std::string SlotFirstLdPath(const std::string& slotDir) {
+    std::string ld = slotDir.back() == '/' ? slotDir : slotDir + "/";
+    for (const auto& p : PlatformLibDirs()) { ld += ":" + p; }
+    return ld;
+}
+#endif
+
 // Replicates what the adrenotools hook does internally — an isolated,
 // system-sharing linker namespace whose search path is the driver dir —
 // and reports the REAL linker error for the driver soname. Runs only on
@@ -96,11 +123,12 @@ void NamespaceDlopenProbe(const std::string& dir, const std::string& soname) {
         return;
     }
     const std::string dirSlash = dir.back() == '/' ? dir : dir + "/";
+    const std::string ldPath = SlotFirstLdPath(dir);
     struct android_namespace_t* ns = android_create_namespace(
             "px5-driver-diag",
-            dirSlash.c_str(),          // ld_library_path: bundled deps resolve
+            ldPath.c_str(),            // slot dir first, then platform dirs
             nullptr,
-            ANDROID_NAMESPACE_TYPE_SHARED,   // share the parent's system libs
+            ANDROID_NAMESPACE_TYPE_SHARED,   // share the parent's public libs
             dirSlash.c_str(),          // permitted path for app-files dir
             nullptr);                  // parent = caller namespace
     if (!ns) {
@@ -250,11 +278,12 @@ void* DlopenDriverSharedNamespace(const std::string& dir,
         return nullptr;
     }
     const std::string dirSlash = dir.back() == '/' ? dir : dir + "/";
+    const std::string ldPath = SlotFirstLdPath(dir);
     struct android_namespace_t* ns = android_create_namespace(
             "px5-driver-load",
-            dirSlash.c_str(),          // ld_library_path: bundled deps
+            ldPath.c_str(),            // slot dir first, then platform dirs
             nullptr,
-            ANDROID_NAMESPACE_TYPE_SHARED,   // system libs reachable
+            ANDROID_NAMESPACE_TYPE_SHARED,   // public system libs reachable
             dirSlash.c_str(),          // permitted path for app-files dir
             nullptr);                  // parent = caller namespace
     if (!ns) {
@@ -623,10 +652,11 @@ bool GpuDriverManager::PreloadActiveDriverForVerification() {
                      "; final proof at first vkCreateInstance";
     PX5_LOGW(LogCategory::GPU,
              "Driver preload via plain dlopen unavailable for '%s' "
-             "(INCONCLUSIVE, not a failure verdict — platform libs such as "
-             "libhardware.so are not visible to app namespaces; the designed "
-             "load is the adrenotools hook at first vkCreateInstance, "
-             "proven by the maps check): plain: %s%s%s",
+             "(INCONCLUSIVE, not a failure verdict — the shared-namespace "
+             "search now covers the slot dir plus the platform lib dirs, and "
+             "the importer bundles non-public platform deps into the slot; "
+             "the designed load is the adrenotools hook at first "
+             "vkCreateInstance, proven by the maps check): plain: %s%s%s",
              slot.label.c_str(), plainErr.c_str(),
 #ifdef PX5_HAVE_ADRENOTOOLS
              " | shared-ns: ", nsErr.c_str()

@@ -622,6 +622,14 @@ fun AppNavigation(
                                     val label = metaName
                                         ?: (metaVendor?.let { v -> "$v driver" }
                                             ?: "Driver ${dir.name}")
+                                    // v1.36 — bundle the package's non-public
+                                    // platform deps (libhardware.so etc.) next
+                                    // to the driver .so, so the slot dir is
+                                    // self-sufficient for BOTH the preload
+                                    // namespace and the adrenotools hook at
+                                    // vkCreateInstance.
+                                    val bundledDeps = bundleDriverDeps(
+                                        libForSlot, libForSlot.parentFile ?: dir)
                                     val slot = wrapper.nativeRegisterDriverSlot(
                                         label, libForSlot.absolutePath, soname
                                     )
@@ -636,6 +644,7 @@ fun AppNavigation(
                                         PX5EventLog.event("driverImport", "installed",
                                                 "slot=$slot label=$label soname=$soname " +
                                                         "path=${libForSlot.absolutePath} " +
+                                                        "bundled=${bundledDeps.joinToString(",")} " +
                                                         "source=${if (hasMeta) "meta.json" else "filename-scan"}")
                                         val provenance = listOfNotNull(
                                             metaVendor, metaDriverVersion
@@ -644,6 +653,9 @@ fun AppNavigation(
                                                 label +
                                                 (if (provenance.isNotBlank()) " ($provenance)" else "") +
                                                 "\n${libForSlot.name} -> ${libForSlot.absolutePath}" +
+                                                (if (bundledDeps.isNotEmpty())
+                                                    "\n+${bundledDeps.size} platform dep(s) bundled: " +
+                                                            bundledDeps.joinToString(", ") else "") +
                                                 (if (hasMeta) "\nsource: meta.json (libraryName)" else
                                                     "\nsource: filename scan (no meta.json)")
                                     } else {
@@ -896,4 +908,153 @@ object PhysicalControllerBridge {
         w.nativeSetTriggers(l2, r2)
         return true
     }
+}
+
+// ---------------------------------------------------------------------------
+// v1.36 — GPU driver package dependency bundling.
+//
+// The 2026-09-02 vc36 session proved the wall for 2026-era AdrenoTools-style
+// Turnip packages ("Turnip v26.3.0-R4"): the driver .so carries DT_NEEDED
+// entries for NON-public platform libraries (libhardware.so). No app-visible
+// linker namespace resolves those — a SHARED namespace shares only the
+// public library list — so the preload failed AND the adrenotools hook's
+// load at vkCreateInstance (whose namespace searches the slot dir only)
+// would fall back to the system driver. Eden/Vita3K never hit this because
+// their ecosystem packages are NDK-built and self-contained.
+//
+// Fix, matching what the system itself does for /vendor's vulkan.adreno.so:
+// at import time we read the driver's DT_NEEDED set (ELF64 parser below),
+// copy every non-core dependency from the device's own lib dirs into the
+// slot dir — transitively, so the bundled libs' own needs are covered — and
+// log exactly what was bundled. After this the slot dir is self-sufficient:
+// both our verification namespace and the hook resolve all deps there.
+// ---------------------------------------------------------------------------
+private val kPlatformLibDirs = listOf(
+    "/odm/lib64", "/vendor/lib64", "/system/vendor/lib64",
+    "/system_ext/lib64", "/system/lib64"
+)
+
+// Bionic + the guaranteed-public libs every SHARED namespace already links.
+// Never copy these: shadowing them is at best pointless, at worst harmful.
+private val kNeverBundle = setOf(
+    "libc.so", "libm.so", "libdl.so", "liblog.so", "libz.so",
+    "libstdc++.so", "libc++.so", "libc++_shared.so",
+    "libandroid.so", "libnativewindow.so", "libvulkan.so",
+    "libEGL.so", "libGLESv2.so", "libGLESv1_CM.so"
+)
+
+private class Phdr(val type: Int, val offset: Long, val vaddr: Long, val filesz: Long)
+
+private fun leU16(b: ByteArray, o: Int): Int =
+    (b[o].toInt() and 0xFF) or ((b[o + 1].toInt() and 0xFF) shl 8)
+
+private fun leU32(b: ByteArray, o: Int): Int =
+    leU16(b, o) or (leU16(b, o + 2) shl 16)
+
+private fun leU64(b: ByteArray, o: Int): Long =
+    (leU32(b, o).toLong() and 0xFFFFFFFFL) or
+            ((leU32(b, o + 4).toLong() and 0xFFFFFFFFL) shl 32)
+
+// Reads the ELF64 program headers; empty list for anything that is not a
+// little-endian ELF64 image (the import gate only accepts AArch64 anyway).
+private fun readElf64Phdrs(raf: java.io.RandomAccessFile): List<Phdr> {
+    val h = ByteArray(64)
+    raf.seek(0)
+    if (raf.read(h) != 64) return emptyList()
+    if (h[0] != 0x7F.toByte() || h[1] != 'E'.code.toByte() ||
+        h[2] != 'L'.code.toByte() || h[3] != 'F'.code.toByte()) return emptyList()
+    if (h[4].toInt() != 2 || h[5].toInt() != 1) return emptyList()  // 64-bit LE
+    val phOff = leU64(h, 0x20)
+    val phEnt = leU16(h, 0x36)
+    val phNum = leU16(h, 0x38)
+    if (phEnt < 56 || phNum == 0 || phNum > 256) return emptyList()
+    val buf = ByteArray(phEnt * phNum)
+    raf.seek(phOff)
+    if (raf.read(buf) != buf.size) return emptyList()
+    return (0 until phNum).map { i ->
+        val b = i * phEnt
+        Phdr(
+            leU32(buf, b),                      // p_type
+            leU64(buf, b + 8),                  // p_offset
+            leU64(buf, b + 0x10),               // p_vaddr
+            leU64(buf, b + 0x20)                // p_filesz
+        )
+    }
+}
+
+private fun vaddrToFileOffset(phdrs: List<Phdr>, v: Long): Long? =
+    phdrs.firstOrNull {
+        it.type == 1 /*PT_LOAD*/ && v >= it.vaddr && v < it.vaddr + it.filesz
+    }?.let { it.offset + (v - it.vaddr) }
+
+// DT_NEEDED sonames of an ELF64 shared object (best effort; empty on any
+// parse surprise — the bundler then simply bundles nothing).
+private fun elfNeededLibraries(so: File): List<String> = runCatching {
+    java.io.RandomAccessFile(so, "r").use { raf ->
+        val phdrs = readElf64Phdrs(raf)
+        if (phdrs.none { it.type == 1 }) return emptyList()
+        val dyn = phdrs.firstOrNull { it.type == 2 /*PT_DYNAMIC*/ }
+            ?: return emptyList()
+        val dynBuf = ByteArray(minOf(dyn.filesz, 256L * 1024L).toInt())
+        raf.seek(dyn.offset)
+        raf.readFully(dynBuf)
+        var strTabV = -1L
+        val needed = mutableListOf<Long>()
+        var i = 0
+        while (i + 16 <= dynBuf.size) {
+            when (leU64(dynBuf, i)) {
+                0L -> break                                    // DT_NULL
+                1L -> needed += leU64(dynBuf, i + 8)           // DT_NEEDED
+                5L -> strTabV = leU64(dynBuf, i + 8)           // DT_STRTAB
+            }
+            i += 16
+        }
+        if (strTabV <= 0 || needed.isEmpty()) return emptyList()
+        val strOff = vaddrToFileOffset(phdrs, strTabV) ?: return emptyList()
+        val strLen = minOf(256L * 1024L, raf.length() - strOff).toInt()
+        if (strLen <= 0) return emptyList()
+        val strBuf = ByteArray(strLen)
+        raf.seek(strOff)
+        raf.readFully(strBuf)
+        needed.mapNotNull { off ->
+            if (off >= strBuf.size) return@mapNotNull null
+            var end = off.toInt()
+            while (end < strBuf.size && strBuf[end] != 0.toByte()) end++
+            String(strBuf, off.toInt(), end - off.toInt(), Charsets.UTF_8)
+                .takeIf { it.isNotBlank() }
+        }
+    }
+}.getOrDefault(emptyList())
+
+// Copies every missing non-core DT_NEEDED dependency of `driverSo` (and of
+// each copied dependency, transitively) into `slotDir`, sourcing from the
+// device's own lib dirs. Returns the bundled names for the event log.
+private fun bundleDriverDeps(driverSo: File, slotDir: File): List<String> {
+    val bundled = mutableListOf<String>()
+    val seen = mutableSetOf(driverSo.name)
+    val queue = ArrayDeque<File>()
+    queue.addLast(driverSo)
+    var guard = 0
+    while (queue.isNotEmpty() && guard++ < 64) {
+        val lib = queue.removeFirst()
+        for (name in elfNeededLibraries(lib)) {
+            if (name in kNeverBundle || !seen.add(name)) continue
+            val src = kPlatformLibDirs.firstOrNull { d ->
+                File(d, name).isFile
+            }?.let { File(it, name) }
+            if (src == null) {
+                com.px5.emulator.core.PX5EventLog.event(
+                    "driverImport", "dep_not_on_device",
+                    "lib=$name needed_by=${lib.name}")
+                continue
+            }
+            val dst = File(slotDir, name)
+            if (!dst.isFile || dst.length() != src.length()) {
+                src.copyTo(dst, overwrite = true)
+            }
+            bundled += name
+            queue.addLast(dst)
+        }
+    }
+    return bundled
 }

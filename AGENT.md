@@ -149,7 +149,7 @@ CI job).
 | DYN-style eboot loading (PS5 0xFE10 inner ELF) | implemented in-tree (v1.32; v1.34 two-phase load: map RWX → copy → seal to ELF flags, fixing the vc34 write-to-RO-text ACCERR) | vc35 device session: the game's OWN code path (guest crash with RIP inside the game text range or its first real syscall) + foundation 5b/6/10 `[PASS]` |
 | Game boot UX | v1.35: the game's own cover card leads the 0→100 boot pipeline; failure = symbolic title id + one clean centered card, the loader's detailed reason lives only in the Logs screen; Eden-style in-game menu | vc35 device session: cover renders from the library entry, boot overlay completes without a diagnostics wall |
 | Audio/input | functional wrappers, atomics-honest input | on-device gamepad echo test |
-| Driver switching (Turnip ↔ vendor) | slot manager present | per-app lib dir swap verified via `vulkaninfo` inside app sandbox |
+| Driver switching (Turnip ↔ vendor) | v1.36: slot manager + adrenotools hook; the importer bundles the package's non-public platform DT_NEEDED deps (libhardware.so class) into the slot dir and the driver namespaces search the platform lib dirs as fallback | vc37 device session: the imported Turnip v26.x pack reports `driverVerified=yes` with its soname mapped in /proc/self/maps |
 | UI shell | Steam-Deck-style Compose shell, functional preferences | no dead buttons; each control mutates a real setting |
 
 Forbidden status vocabulary: "works", "supported", "runs" without an

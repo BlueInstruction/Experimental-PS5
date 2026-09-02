@@ -985,18 +985,19 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeVerifyDriverSlot(
         // v1.18 wording: this entry runs the PRELOAD (plain dlopen, then a
         // shared-namespace dlopen) — not adrenotools' hooked load, which
         // happens later at the loader's first vkCreateInstance.
-        // v1.23: "FAILED" claimed a verdict plain dlopen cannot deliver —
-        // Turnip needs libhardware.so, which no app-visible namespace
-        // provides, so preload unavailability is INCONCLUSIVE. The real
-        // verdict is the hook load + maps check at first vkCreateInstance.
+        // v1.36: the shared namespace searches the slot dir first, then the
+        // platform lib dirs, and the importer bundles non-public platform
+        // deps (libhardware.so) into the slot — a preload OK now maps the
+        // same file set the hook will load. It still answers INCONCLUSIVE
+        // rather than FAILED when it cannot load: the final verdict remains
+        // the maps check after the first vkCreateInstance.
         PX5_LOGI(PX5::LogCategory::GPU,
                  "Driver slot %d eager verification: preload %s",
                  static_cast<int>(slotIndex),
                  loaded ? "OK"
                         : "UNAVAILABLE via plain dlopen (INCONCLUSIVE — "
-                          "platform libs not visible to app namespaces; "
-                          "the designed load is the adrenotools hook at "
-                          "first vkCreateInstance, proven by the maps check)");
+                          "the final verdict is the adrenotools hook load + "
+                          "maps check at first vkCreateInstance)");
     }
     mgr.VerifyActiveDriverMapped();
     return env->NewStringUTF(mgr.SummaryString().c_str());
