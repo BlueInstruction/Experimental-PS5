@@ -719,7 +719,8 @@ fun AppNavigation(
                     gameViewModel = gameViewModel,
                     fexCoreStatus = fexCoreStatus,
                     fexCoreWrapper = fexCoreWrapper,
-                    onBackClick = { navController.popBackStack() }
+                    onBackClick = { navController.popBackStack() },
+                    onOpenLogs = { navController.navigate("logs") }
                 )
             }
         }

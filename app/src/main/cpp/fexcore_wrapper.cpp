@@ -704,40 +704,38 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGpuProof(JNIEnv* env,
                                                             jobject) {
     PX5::Breadcrumb::Set("jni: GpuProof enter");
-    // v1.16 — fork-isolated containment: a driver fault inside the proof
-    // costs the child (+ a verified dump), never the app.
-    //
-    // v1.18 — the child no longer submits on the SINGLETON's queue at all.
-    // The old child ran RunOffscreenClearProof on the inherited device:
-    // driver-internal state created by the PARENT process, fork-COW'd —
-    // and a forked child submitting on parent-created driver state is the
-    // hazard the 2026-08-30 device video shows ("CRASHED in isolated child
-    // (signal 11)", si_addr=0x0 right after the gpu.proof:submit
-    // breadcrumb, before fence_wait). The child now builds a completely
-    // fresh instance/device (RunSelfContainedProof) that opens its OWN drm
-    // render-node fd — a clean kernel context sharing nothing with the
-    // parent — so the proof measures the actual driver stack (system or
-    // hooked Turnip: the loader + hook + ICD are inherited mappings,
-    // binding happens per fresh instance) without ever touching
-    // parent-created driver objects.
+    // v1.32 — the boot GPU proof runs IN-PROCESS again, and that is the
+    // honest verdict path. Device-proven history of this decision:
+    //   * v1.16 moved the proof into a fork()ed child (containment).
+    //   * v1.18 made the child build a fresh instance/device because a
+    //     forked child submitting on parent-created driver state faulted.
+    //   * vc32 (this session): the fresh-instance child now aborts at
+    //     ENTRY — "gpu.proof: enter (self-contained)" then SIGABRT(6)
+    //     (bionic tgkill self-signal, pid==tid, before any proof crumb).
+    //     A forked child cannot safely drive the Vulkan loader / ICD
+    //     dlopen path on this bionic+linker-hook stack, so the isolated
+    //     variant reports CRASHED for a stack that actually WORKS — the
+    //     same session's IN-PROCESS self-contained proof passed on the
+    //     identical Turnip driver ("fresh instance/device clear submit +
+    //     fenced OK", px5_main.log 03:38:24).
+    // The render loop is stopped around the probe (its queue is the only
+    // parent driver state we touch), and the PX5 crash handler stays
+    // armed: a driver fault now costs the app process the same report it
+    // would have written for the child — into px5_main.log, with the
+    // register dump. Isolation for GPU work returns with fork+exec
+    // (a real child binary), not with fork().
     auto& gpu = PX5::VulkanGpuDevice::GetInstance();
     const bool wasRendering = gpu.StopRenderLoopForProbe();
 
-    const std::string report = RunIsolated(
-        "GPU proof",
-        [&gpu](ChildTrail& t) -> std::string {
-            t.step("self-contained proof enter");
-            std::string detail;
-            const bool ok = gpu.RunSelfContainedProof(detail);
-            t.step("proof returned ok=%d", ok ? 1 : 0);
-            return std::string(ok ? "PASS | " : "FAIL | ") + detail;
-        },
-        15000);
+    std::string detail;
+    const bool ok = gpu.RunSelfContainedProof(detail);
+    PX5::Breadcrumb::Set("jni: GpuProof inproc ok=%d", ok ? 1 : 0);
 
     if (wasRendering) gpu.ResumeRenderLoopAfterProbe();
 
-    // Keep the UI contract: PASS/FAIL/CRASHED prefix + detail. The crash
-    // path carries the verified dump path from VerifyChildDump.
+    // UI contract preserved: PASS/FAIL prefix + detail.
+    const std::string report =
+        std::string(ok ? "PASS | " : "FAIL | ") + detail;
     PX5::Breadcrumb::Set("jni: GpuProof done rep=%.64s", report.c_str());
     return env->NewStringUTF(report.c_str());
 }

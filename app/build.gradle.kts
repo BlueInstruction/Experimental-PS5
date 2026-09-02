@@ -43,8 +43,8 @@ android {
         applicationId = "com.px5.emulator"
         minSdk = 28
         targetSdk = 35
-        versionCode = 32
-        versionName = "1.31"
+        versionCode = 33
+        versionName = "1.32"
 
         buildConfigField("String", "GIT_SHA", "\"${gitSha()}\"")
         buildConfigField("String", "FEXCORE_PIN", "\"${fexCorePin()}\"")
