@@ -103,22 +103,6 @@ public:
     // Human-readable window info for evidence UI (hex numbers pre-formatted).
     std::string GetWindowInfoString() const;
 
-    // Guest window anchor (0 before Initialize succeeds). Read-only fact,
-    // safe from any thread after Initialize; used by the loader to base
-    // DYN-style images and by the syscall bridge for low-VA mirroring.
-    uint64_t GetGuestBase() const;
-    uint64_t GetGuestEnd() const;   // exclusive
-
-    // v1.32 guest ABI policy: PS5-style guests issue MAP_FIXED mmaps at
-    // low addresses (the vc32 fixture asks 0x49000000 and demands the
-    // bridge return 0x149000000 — the window answer). Any fixed address
-    // below the window anchor is mirrored 4 GiB up into the window:
-    //     translated = va + 0x100000000
-    // Returns true and overwrites `va` when the translation applies and
-    // the result lands inside the window; false leaves `va` untouched
-    // (the caller then sees the manager's honest window rejection).
-    bool TranslateLowFixedVa(uint64_t& va) const;
-
 private:
     MemoryManager() = default;
     ~MemoryManager() = default;

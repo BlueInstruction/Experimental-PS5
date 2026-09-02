@@ -1,70 +1,43 @@
 package com.px5.emulator.ui
 
-import androidx.compose.animation.Crossfade
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.Text
-import androidx.compose.material3.VerticalDivider
+import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.ScreenRotation
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.*
+import androidx.compose.material3.TabRowDefaults
+import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.px5.emulator.GameEntity
 import com.px5.emulator.GameViewModel
-import com.px5.emulator.R
 import com.px5.emulator.SoundManager
 import com.px5.emulator.core.FexCoreWrapper
 import com.px5.emulator.core.Px5Settings
 import java.text.DateFormat
 import java.util.Date
 
-/**
- * PS5HomeScreen — the real game library.
- *
- * Honesty rules enforced here:
- *  * No seeded demo games: an empty library shows an empty state with
- *    real import actions. Nothing invents content.
- *  * Details show only real fields (format, title id, byte size from
- *    disk, version parsed from param.json / PKG SFO, real last-played
- *    and accumulated play time tracked by the app itself).
- *  * No fake trophy bars, no "82% completed" activity cards, no store.
- *
- * Orientation: the shell adapts — landscape keeps the PS5 carousel plus
- * side detail panel, portrait switches to a vertical cover grid with the
- * detail panel below. Both directions are fully usable (the old build
- * was landscape-locked).
- */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PS5HomeScreen(
     games: List<GameEntity>,
@@ -77,14 +50,10 @@ fun PS5HomeScreen(
     onImportFileClick: () -> Unit,
     onImportFolderClick: () -> Unit
 ) {
-    var selectedTab by remember { mutableStateOf(0) } // 0: Games
-    var selectedIndex by remember { mutableStateOf(0) }
-
+    var showAddMenu by remember { mutableStateOf(false) }
+    var showGameDetails by remember { mutableStateOf<GameEntity?>(null) }
     val context = androidx.compose.ui.platform.LocalContext.current
 
-    // One-tap orientation flip from the game hub (portrait <-> landscape).
-    // Persists the forced mode; "System" default remains available in
-    // Settings → System → Appearance.
     val onRotate = {
         soundManager.playNavigationSound()
         val landscapeNow = context.resources.configuration.orientation ==
@@ -94,455 +63,261 @@ fun PS5HomeScreen(
         Unit
     }
 
-    val displayedList = remember(games, selectedTab) {
-        if (selectedTab == 0) games else emptyList()
-    }
-    val selectedGame = displayedList.getOrNull(selectedIndex) ?: displayedList.firstOrNull()
+    val darkBackground = px5Colors().background
+    val surfaceColor = px5Colors().surface
+    val textColor = px5Colors().text
+    val textSecondary = px5Colors().textSecondary
+    val accentColor = px5Colors().accent
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(px5Colors().background)
-    ) {
-        // Ambient backdrop
-        Crossfade(
-            targetState = selectedGame?.id,
-            animationSpec = tween(durationMillis = 400),
-            label = "BackdropCrossfade"
-        ) { _ ->
-            val backdropPainter = safePainterResource(id = R.drawable.ps5background_all)
-            if (backdropPainter != null) {
-                Image(
-                    painter = backdropPainter,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
-                    alpha = px5Colors().backdropAlpha
-                )
-            }
-        }
-
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            px5Colors().fadeTop,
-                            px5Colors().fadeBottom.copy(alpha = 0.85f),
-                            px5Colors().fadeBottom
-                        )
-                    )
-                )
-        )
-
-        Column(modifier = Modifier.fillMaxSize()) {
-            PS5TopHeader(
-                selectedTab = selectedTab,
-                onTabSelected = { tab ->
-                    selectedTab = tab
-                    selectedIndex = 0
-                    soundManager.playNavigationSound()
+    Scaffold(
+        containerColor = darkBackground,
+        topBar = {
+            TopAppBar(
+                title = { 
+                    Text("PSX5 Emulator", fontWeight = FontWeight.Bold, color = textColor) 
                 },
-                onSettingsClick = {
-                    soundManager.playNavigationSound()
-                    onOpenSettings()
+                actions = {
+                    IconButton(onClick = onRotate) {
+                        Icon(Icons.Default.ScreenRotation, contentDescription = "Rotate", tint = textColor)
+                    }
+                    Box {
+                        IconButton(onClick = { showAddMenu = true }) {
+                            Icon(Icons.Default.Add, contentDescription = "Install", tint = textColor)
+                        }
+                        DropdownMenu(
+                            expanded = showAddMenu,
+                            onDismissRequest = { showAddMenu = false },
+                            modifier = Modifier.background(surfaceColor)
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Install firmware / folder", color = textColor) },
+                                onClick = { showAddMenu = false; onImportFolderClick() },
+                                leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null, tint = textColor) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Install .pkg / .elf", color = textColor) },
+                                onClick = { showAddMenu = false; onImportFileClick() },
+                                leadingIcon = { Icon(Icons.Default.InsertDriveFile, contentDescription = null, tint = textColor) }
+                            )
+                        }
+                    }
+                    IconButton(onClick = { soundManager.playNavigationSound(); onOpenSettings() }) {
+                        Icon(Icons.Default.Settings, contentDescription = "Settings", tint = textColor)
+                    }
                 },
-                onRotateClick = onRotate
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = surfaceColor
+                )
             )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // NOTE: no engine telemetry chips here. The CPU BRIDGE / VULKAN
-            // strip used to sit on the home screen and ate portrait space
-            // while duplicating the Control Center's Engine Status card —
-            // that card is now the single home of Vulkan ACTIVE state.
-
-            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-                val isLandscape = maxWidth > 700.dp
-                if (isLandscape) {
-                    LandscapeLibrary(
-                        games = displayedList,
-                        selectedIndex = selectedIndex,
-                        selectedGame = selectedGame,
-                        onSelect = { index ->
-                            selectedIndex = index
-                            soundManager.playNavigationSound()
-                        },
-                        onActivate = { game ->
-                            soundManager.playActivationSound()
-                            onGameSelected(game.path)
-                        },
-                        onImportFileClick = onImportFileClick,
-                        onImportFolderClick = onImportFolderClick,
-                        gameViewModel = gameViewModel
-                    )
-                } else {
-                    PortraitLibrary(
-                        games = displayedList,
-                        onGameSelected = { game ->
-                            soundManager.playActivationSound()
-                            onGameSelected(game.path)
-                        },
-                        onImportFileClick = onImportFileClick,
-                        onImportFolderClick = onImportFolderClick,
-                        gameViewModel = gameViewModel
-                    )
+        }
+    ) { innerPadding ->
+        Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
+            if (games.isEmpty()) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.FolderOpen,
+                            contentDescription = null,
+                            tint = textSecondary,
+                            modifier = Modifier.size(64.dp)
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "No games installed",
+                            color = textSecondary,
+                            fontSize = 16.sp
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Button(
+                            onClick = onImportFolderClick,
+                            colors = ButtonDefaults.buttonColors(containerColor = surfaceColor, contentColor = accentColor),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, accentColor)
+                        ) {
+                            Text("Install Game")
+                        }
+                    }
+                }
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(minSize = 100.dp),
+                    contentPadding = PaddingValues(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    items(games, key = { it.id }) { game ->
+                        EmulatorGameCard(
+                            game = game,
+                            onClick = {
+                                soundManager.playActivationSound()
+                                onGameSelected(game.path)
+                            },
+                            onLongClick = { showGameDetails = game },
+                            surfaceColor = surfaceColor,
+                            textColor = textColor,
+                            textSecondary = textSecondary
+                        )
+                    }
                 }
             }
         }
     }
-}
 
-// ---------------------------------------------------------------------------
-// Landscape: carousel + selected-game detail panel
-// ---------------------------------------------------------------------------
-
-@Composable
-private fun LandscapeLibrary(
-    games: List<GameEntity>,
-    selectedIndex: Int,
-    selectedGame: GameEntity?,
-    onSelect: (Int) -> Unit,
-    onActivate: (GameEntity) -> Unit,
-    onImportFileClick: () -> Unit,
-    onImportFolderClick: () -> Unit,
-    gameViewModel: GameViewModel
-) {
-    Column(modifier = Modifier.fillMaxSize()) {
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 40.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            itemsIndexed(games) { index, item ->
-                PX5GameCardTile(
-                    game = item,
-                    isSelected = index == selectedIndex,
-                    onClick = {
-                        if (index == selectedIndex) onActivate(item) else onSelect(index)
-                    }
-                )
-            }
-            item {
-                PX5GameCardTile(
-                    game = games.firstOrNull() ?: GameEntity(id = "add", name = "", path = ""),
-                    isSelected = false,
-                    isAddTile = true,
-                    onClick = onImportFileClick
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(20.dp))
-
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = 40.dp)
-        ) {
-            if (games.isEmpty()) {
-                EmptyLibraryState(
-                    onImportFileClick = onImportFileClick,
-                    onImportFolderClick = onImportFolderClick
-                )
-            } else if (selectedGame != null) {
-                GameDetailPanel(
-                    game = selectedGame,
-                    gameViewModel = gameViewModel,
-                    onPlay = { onActivate(selectedGame) },
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
+    if (showGameDetails != null) {
+        GameDetailDialog(
+            game = showGameDetails!!,
+            gameViewModel = gameViewModel,
+            onDismiss = { showGameDetails = null },
+            onPlay = {
+                soundManager.playActivationSound()
+                onGameSelected(showGameDetails!!.path)
+                showGameDetails = null
+            },
+            surfaceColor = surfaceColor,
+            textColor = textColor,
+            textSecondary = textSecondary,
+            accentColor = accentColor
+        )
     }
 }
 
-// ---------------------------------------------------------------------------
-// Portrait: vertical cover grid + import CTA
-// ---------------------------------------------------------------------------
-
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun PortraitLibrary(
-    games: List<GameEntity>,
-    onGameSelected: (GameEntity) -> Unit,
-    onImportFileClick: () -> Unit,
-    onImportFolderClick: () -> Unit,
-    gameViewModel: GameViewModel
+private fun EmulatorGameCard(
+    game: GameEntity,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    surfaceColor: androidx.compose.ui.graphics.Color,
+    textColor: androidx.compose.ui.graphics.Color,
+    textSecondary: androidx.compose.ui.graphics.Color
 ) {
-    if (games.isEmpty()) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Spacer(modifier = Modifier.weight(1f))
-            EmptyLibraryState(
-                onImportFileClick = onImportFileClick,
-                onImportFolderClick = onImportFolderClick
-            )
-            Spacer(modifier = Modifier.weight(1.4f))
-        }
-    } else {
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(minSize = 110.dp),
-            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-            modifier = Modifier.fillMaxSize()
-        ) {
-            items(games, key = { it.id }) { game ->
-                PX5GameGridTile(game = game, onClick = { onGameSelected(game) })
-            }
-            item {
-                PX5GameGridTile(game = games.first(), isAddTile = true, onClick = onImportFileClick)
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Empty state — the honest front door
-// ---------------------------------------------------------------------------
-
-@Composable
-private fun EmptyLibraryState(
-    onImportFileClick: () -> Unit,
-    onImportFolderClick: () -> Unit
-) {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
+    Card(
+        shape = RoundedCornerShape(4.dp),
+        colors = CardDefaults.cardColors(containerColor = surfaceColor),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 24.dp)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
     ) {
-        Icon(
-            imageVector = Icons.Default.FolderOpen,
-            contentDescription = null,
-            tint = px5Colors().textSecondary,
-            modifier = Modifier.size(56.dp)
-        )
-        Spacer(modifier = Modifier.height(14.dp))
-        Text(
-            text = "Your library is empty",
-            fontSize = 22.sp,
-            fontWeight = FontWeight.Bold,
-            color = px5Colors().text,
-            fontFamily = TitilliumFontFamily
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = "Add a PS5 game: a decrypted dump folder (eboot.bin + param.json), " +
-                    "a .pkg, or an .elf file. Covers are taken from the game's sce_sys icons.",
-            fontSize = 13.sp,
-            color = px5Colors().textSecondary,
-            fontFamily = TitilliumFontFamily,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            modifier = Modifier.padding(horizontal = 24.dp)
-        )
-        Spacer(modifier = Modifier.height(20.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(
-                onClick = onImportFileClick,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = PS5AccentBlue,
-                    contentColor = Color.White
-                ),
-                shape = RoundedCornerShape(20.dp)
+        Column {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(0.75f)
+                    .background(androidx.compose.ui.graphics.Color.Black),
+                contentAlignment = Alignment.Center
             ) {
-                Text("Add file (.pkg / .elf)", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                val cover = rememberGameCover(game.coverPath)
+                if (cover != null) {
+                    Image(
+                        bitmap = cover,
+                        contentDescription = game.name,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Text(
+                        text = game.name.take(2).uppercase(),
+                        color = textSecondary,
+                        fontSize = 32.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
-            Button(
-                onClick = onImportFolderClick,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = px5Colors().controlStrong,
-                    contentColor = px5Colors().text
-                ),
-                shape = RoundedCornerShape(20.dp)
-            ) {
-                Text("Add folder (dump)", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Detail panel — real fields only
-// ---------------------------------------------------------------------------
-
-@Composable
-private fun GameDetailPanel(
-    game: GameEntity,
-    gameViewModel: GameViewModel,
-    onPlay: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    var showMenu by remember { mutableStateOf(false) }
-
-    Column(
-        modifier = modifier.verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            // Cover thumbnail
-            val cover = rememberGameCover(game.coverPath)
-            if (cover != null) {
-                Image(
-                    bitmap = cover,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .width(72.dp)
-                        .height(102.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .border(1.dp, px5Colors().hairline, RoundedCornerShape(10.dp))
-                )
-                Spacer(modifier = Modifier.width(16.dp))
-            }
-
-            Column(modifier = Modifier.weight(1f)) {
+            Column(modifier = Modifier.padding(8.dp)) {
                 Text(
                     text = game.name,
-                    fontSize = 30.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = px5Colors().text,
-                    fontFamily = TitilliumFontFamily,
-                    maxLines = 2,
-                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                    color = textColor,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    FormatBadge(game.format)
-                    if (game.titleId.isNotBlank()) {
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = game.titleId,
-                            color = px5Colors().textSecondary,
-                            fontSize = 13.sp,
-                            fontFamily = TitilliumFontFamily,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                }
-            }
-
-            // Options menu (favorite / remove)
-            Box {
-                IconButton(
-                    onClick = { showMenu = true },
-                    modifier = Modifier
-                        .size(44.dp)
-                        .clip(CircleShape)
-                        .background(px5Colors().control)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.MoreVert,
-                        contentDescription = "More",
-                        tint = px5Colors().text
-                    )
-                }
-                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                    DropdownMenuItem(
-                        text = { Text(if (game.isFavorite) "Remove from Favorites" else "Add to Favorites") },
-                        onClick = {
-                            gameViewModel.toggleFavorite(game.id, !game.isFavorite)
-                            showMenu = false
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Remove from Library") },
-                        onClick = {
-                            gameViewModel.delete(game.id)
-                            showMenu = false
-                        }
-                    )
-                }
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = game.titleId.ifBlank { game.format },
+                    color = textSecondary,
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
-
-        Spacer(modifier = Modifier.height(6.dp))
-
-        // Real metadata lines — every value comes from the import record.
-        DetailLine("Status", game.status)
-        if (game.version.isNotBlank()) DetailLine("Version", game.version)
-        DetailLine("Size", formatBytes(game.sizeBytes))
-        if (game.lastPlayedMillis > 0) {
-            DetailLine(
-                "Last played",
-                DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
-                    .format(Date(game.lastPlayedMillis))
-            )
-        } else {
-            DetailLine("Last played", "Never")
-        }
-        DetailLine("Play time", formatDuration(game.playTimeSeconds))
-        if (game.format == "DUMP" || game.format == "ELF") {
-            DetailLine("Location", game.path, mono = true)
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        Button(
-            onClick = onPlay,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = px5Colors().text,
-                contentColor = px5Colors().background
-            ),
-            shape = RoundedCornerShape(24.dp),
-            contentPadding = PaddingValues(horizontal = 32.dp, vertical = 14.dp)
-        ) {
-            Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = "Open in Engine",
-                fontWeight = FontWeight.Bold,
-                fontSize = 15.sp,
-                fontFamily = TitilliumFontFamily
-            )
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
     }
 }
 
 @Composable
-private fun FormatBadge(format: String) {
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
-            .background(PS5AccentBlue.copy(alpha = 0.25f))
-            .border(1.dp, px5Colors().accentGlow.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
-            .padding(horizontal = 8.dp, vertical = 3.dp)
-    ) {
-        Text(
-            text = format,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold,
-            color = px5Colors().accentGlow,
-            fontFamily = TitilliumFontFamily
-        )
-    }
+private fun GameDetailDialog(
+    game: GameEntity,
+    gameViewModel: GameViewModel,
+    onDismiss: () -> Unit,
+    onPlay: () -> Unit,
+    surfaceColor: androidx.compose.ui.graphics.Color,
+    textColor: androidx.compose.ui.graphics.Color,
+    textSecondary: androidx.compose.ui.graphics.Color,
+    accentColor: androidx.compose.ui.graphics.Color
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = surfaceColor,
+        titleContentColor = textColor,
+        textContentColor = textSecondary,
+        title = {
+            Text(text = game.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                DetailLineDialog("Format", game.format, textColor, textSecondary)
+                if (game.titleId.isNotBlank()) DetailLineDialog("Title ID", game.titleId, textColor, textSecondary)
+                if (game.version.isNotBlank()) DetailLineDialog("Version", game.version, textColor, textSecondary)
+                DetailLineDialog("Size", formatBytes(game.sizeBytes), textColor, textSecondary)
+                if (game.lastPlayedMillis > 0) {
+                    DetailLineDialog(
+                        "Last Played",
+                        DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+                            .format(Date(game.lastPlayedMillis)),
+                        textColor, textSecondary
+                    )
+                } else {
+                    DetailLineDialog("Last Played", "Never", textColor, textSecondary)
+                }
+                DetailLineDialog("Play Time", formatDuration(game.playTimeSeconds), textColor, textSecondary)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onPlay) {
+                Text("Start", color = accentColor, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = {
+                    gameViewModel.delete(game.id)
+                    onDismiss()
+                }
+            ) {
+                Text("Uninstall", color = androidx.compose.ui.graphics.Color(0xFFEF5350))
+            }
+        }
+    )
 }
 
 @Composable
-private fun DetailLine(label: String, value: String, mono: Boolean = false) {
+private fun DetailLineDialog(label: String, value: String, textColor: androidx.compose.ui.graphics.Color, textSecondary: androidx.compose.ui.graphics.Color) {
     Row(modifier = Modifier.fillMaxWidth()) {
         Text(
             text = label,
             fontSize = 13.sp,
-            color = px5Colors().textSecondary,
-            fontFamily = TitilliumFontFamily,
-            modifier = Modifier.width(110.dp)
+            color = textSecondary,
+            modifier = Modifier.width(90.dp)
         )
         Text(
             text = value,
             fontSize = 13.sp,
-            color = px5Colors().text,
-            fontFamily = if (mono) androidx.compose.ui.text.font.FontFamily.Monospace else TitilliumFontFamily,
+            color = textColor,
             modifier = Modifier.weight(1f)
         )
     }

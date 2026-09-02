@@ -414,28 +414,4 @@ std::string MemoryManager::GetWindowInfoString() const {
     return buf;
 }
 
-uint64_t MemoryManager::GetGuestBase() const {
-    std::lock_guard<std::mutex> lk(m_mutex);
-    return m_guestBase;
-}
-
-uint64_t MemoryManager::GetGuestEnd() const {
-    std::lock_guard<std::mutex> lk(m_mutex);
-    return m_guestBase + m_windowSize;
-}
-
-bool MemoryManager::TranslateLowFixedVa(uint64_t& va) const {
-    std::lock_guard<std::mutex> lk(m_mutex);
-    if (!m_initialized || va >= m_guestBase) return false;
-    // Mirror 4 GiB up: 0x49000000 -> 0x149000000 (the vc32 fixture's
-    // demanded answer). The window anchor 0x140000000 is itself a
-    // 4 GiB-mirrored shape (0x1_40000000), so low guest VAs land at the
-    // architecturally matching window offset.
-    const uint64_t rebased = va + 0x100000000ull;
-    if (rebased < m_guestBase ||
-        rebased >= m_guestBase + m_windowSize) return false;
-    va = rebased;
-    return true;
-}
-
 } // namespace PX5

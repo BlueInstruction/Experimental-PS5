@@ -83,13 +83,6 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
     {
         std::lock_guard<std::mutex> lk(g_stateMutex);
         ++g_stats.totalCalls;
-        // v1.32 post-exit hygiene: once the guest recorded its exit, only
-        // the exit family still goes through. A guest that keeps running
-        // past exit_group (runaway fixture / corrupted control flow) must
-        // not keep issuing work — deny quietly and let it reach its HLT.
-        if (g_hasExitCode && nr != NR_exit && nr != NR_exit_group) {
-            return 0;
-        }
     }
 
     switch (nr) {
@@ -137,25 +130,12 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
             LogUnimplemented(nr, "mmap(non-fixed/anon)", a0, a1, a3);
             return kErrNoSys;
         }
-        // v1.32 guest ABI policy: MAP_FIXED requests below the window
-        // anchor are mirrored 4 GiB up into the window and the guest
-        // receives the TRANSLATED address (vc32 fixture contract:
-        // mmap(0x49000000) must return 0x149000000, then round-trip a
-        // magic through it). Without the mirror the manager rejects
-        // low VAs and every such guest aborts its own path with -EINVAL.
-        uint64_t addr = a0;
-        if (MemoryManager::GetInstance().TranslateLowFixedVa(addr)) {
-            PX5_LOGI(LogCategory::KERNEL,
-                     "guest mmap low-VA mirror: 0x%llx -> 0x%llx (%zu B)",
-                     (unsigned long long)a0, (unsigned long long)addr,
-                     (size_t)a1);
-        }
         uint32_t flags = MemoryFlags::PAGE_NONE;
         if (a2 & PROT_READ)  flags |= MemoryFlags::PAGE_READ;
         if (a2 & PROT_WRITE) flags |= MemoryFlags::PAGE_WRITE;
         if (a2 & PROT_EXEC)  flags |= MemoryFlags::PAGE_EXEC;
         const uint64_t mapped =
-            MemoryManager::GetInstance().MapMemory(addr, a1, flags, "guest_mmap");
+            MemoryManager::GetInstance().MapMemory(a0, a1, flags, "guest_mmap");
         std::lock_guard<std::mutex> lk(g_stateMutex);
         g_stats.handledCalls++;
         return mapped ? mapped : kErrInval;

@@ -59,9 +59,9 @@ val PS_CIRCLE = Color(0xFFFF6B6B)
 val PS_CROSS = Color(0xFF8AB8FF)
 val PS_SQUARE = Color(0xFFF07BD0)
 
-private val GLASS_FILL = Color(0xFF0F1218)
-private val GLASS_EDGE = Color.White.copy(alpha = 0.28f)
-private val GLASS_PRESSED = Color(0xFF2E8CFF)
+private val GLASS_FILL = Color.Transparent
+private val GLASS_EDGE = Color.White.copy(alpha = 0.35f)
+private val GLASS_PRESSED = Color.White.copy(alpha = 0.20f)
 
 /** Face-button glyph shapes, stroke-drawn (no fonts, no bitmaps). */
 private enum class PsGlyph { TRIANGLE, CIRCLE, CROSS, SQUARE }

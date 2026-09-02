@@ -28,48 +28,30 @@ import com.px5.emulator.core.Px5Settings
 // ---------------------------------------------------------------------------
 
 // ---- Raw brand constants (dark is the identity; accents shared) ----------
-val PS5DarkBackground = Color(0xFF0E1218)   // Deck navy
-val PS5DarkSurface    = Color(0xFF17202B)   // elevated slate surface
-val PS5AccentBlue     = Color(0xFF0070D1)   // PS5 identity blue
-val PS5TrophyBronze   = Color(0xFFCD7F32)
-val PS5TrophySilver   = Color(0xFFC0C0C0)
-val PS5TrophyGold     = Color(0xFFFFD700)
+val PS5DarkBackground = Color(0xFF121212)   // Vita3K dark
+val PS5DarkSurface    = Color(0xFF1E1E1E)   // Vita3K surface
+val PS5AccentBlue     = Color(0xFF0078D7)   // Vita3K blue
 
 // Legacy aliases kept for non-composable references.
-val PS5CardBackground = Color(0xFF1F2A38)
+val PS5CardBackground = Color(0xFF1E1E1E)
 
-// Font families — uses the exact same definitions as the working PX5 repo.
-// The res/font/titillium_web.xml font-family XML (synced from PX5 in this
-// commit) maps FontWeight values to the correct .ttf files, so we don't
-// need to enumerate every weight here — Compose resolves via the XML.
-val TitilliumFontFamily = FontFamily(
-    Font(R.font.titilliumweb_regular, FontWeight.Normal),
-    Font(R.font.titilliumweb_semibold, FontWeight.SemiBold),
-    Font(R.font.titilliumweb_bold, FontWeight.Bold)
-)
-
-val PlayStationFontFamily = FontFamily(
-    Font(R.font.playstation4, FontWeight.Normal)
-)
+// Font families
+val TitilliumFontFamily = FontFamily.Default
+val PlayStationFontFamily = FontFamily.Default
 
 // ---------------------------------------------------------------------------
 // Semantic shell colors — the single theming contract.
-//
-// Every UI surface reads tokens from LocalPX5Colors instead of raw
-// constants, which is what makes the Light theme real rather than a
-// reskin of text alone. Terminal-style boxes (log/report panels) are
-// intentionally dark in BOTH themes, like Dolphin/Eden debug panels.
 // ---------------------------------------------------------------------------
 @Immutable
 data class PX5Colors(
     val background: Color,
     val surface: Color,
-    val sheet: Color,          // bottom sheets / dialogs
-    val card: Color,           // translucent card fill
-    val control: Color,        // icon buttons / secondary chips
-    val controlStrong: Color,  // pressed-level fills, header buttons
-    val hairline: Color,       // borders/dividers
-    val scrim: Color,          // modal dim overlay
+    val sheet: Color,
+    val card: Color,
+    val control: Color,
+    val controlStrong: Color,
+    val hairline: Color,
+    val scrim: Color,
     val text: Color,
     val textSecondary: Color,
     val accent: Color,
@@ -77,53 +59,53 @@ data class PX5Colors(
     val teal: Color,
     val success: Color,
     val danger: Color,
-    val infoMono: Color,       // monospace evidence text
-    val fadeTop: Color,        // home ambient gradient
+    val infoMono: Color,
+    val fadeTop: Color,
     val fadeBottom: Color,
-    val backdropAlpha: Float   // home ambient art strength
+    val backdropAlpha: Float
 )
 
 val DarkPX5Colors = PX5Colors(
     background      = PS5DarkBackground,
     surface         = PS5DarkSurface,
-    sheet           = Color(0xFF141A24),
-    card            = Color.White.copy(alpha = 0.05f),
-    control         = Color.White.copy(alpha = 0.08f),
-    controlStrong   = Color.White.copy(alpha = 0.12f),
-    hairline        = Color.White.copy(alpha = 0.13f),
+    sheet           = PS5DarkSurface,
+    card            = PS5DarkBackground,
+    control         = Color(0xFF2A2A2A),
+    controlStrong   = Color(0xFF333333),
+    hairline        = Color(0xFF2A2A2A),
     scrim           = Color.Black.copy(alpha = 0.65f),
-    text            = Color(0xFFF2F5FA),
-    textSecondary   = Color(0xFF9BA7BC),
+    text            = Color(0xFFE0E0E0),
+    textSecondary   = Color(0xFFA0A0A0),
     accent          = PS5AccentBlue,
-    accentGlow      = Color(0xFF2E8CFF),
-    teal            = Color(0xFF1FB6CD),
-    success         = Color(0xFF69F0AE),
-    danger          = Color(0xFFFF5252),
-    infoMono        = Color(0xFF7DD3FC),
+    accentGlow      = PS5AccentBlue,
+    teal            = PS5AccentBlue,
+    success         = Color(0xFF4CAF50),
+    danger          = Color(0xFFF44336),
+    infoMono        = Color(0xFF81D4FA),
     fadeTop         = Color.Black.copy(alpha = 0.5f),
-    fadeBottom      = Color(0xFF0B0E14),
+    fadeBottom      = Color(0xFF121212),
     backdropAlpha   = 0.35f
 )
 
 val LightPX5Colors = PX5Colors(
-    background      = Color(0xFFEFF2F7),
-    surface         = Color(0xFFF8FAFD),
+    background      = Color(0xFFF5F5F5),
+    surface         = Color(0xFFFFFFFF),
     sheet           = Color(0xFFFFFFFF),
-    card            = Color(0xFF12203A).copy(alpha = 0.05f),
-    control         = Color(0xFF12203A).copy(alpha = 0.07f),
-    controlStrong   = Color(0xFF12203A).copy(alpha = 0.11f),
-    hairline        = Color(0xFF12203A).copy(alpha = 0.14f),
-    scrim           = Color.Black.copy(alpha = 0.45f),
-    text            = Color(0xFF141A24),
-    textSecondary   = Color(0xFF54617A),
+    card            = Color(0xFFEEEEEE),
+    control         = Color(0xFFE0E0E0),
+    controlStrong   = Color(0xFFCCCCCC),
+    hairline        = Color(0xFFE0E0E0),
+    scrim           = Color.Black.copy(alpha = 0.5f),
+    text            = Color(0xFF212121),
+    textSecondary   = Color(0xFF757575),
     accent          = PS5AccentBlue,
-    accentGlow      = Color(0xFF005CB8),
-    teal            = Color(0xFF0B7E90),
-    success         = Color(0xFF187B4B),
-    danger          = Color(0xFFC62828),
-    infoMono        = Color(0xFF0B5E8F),
-    fadeTop         = Color.White.copy(alpha = 0.0f),
-    fadeBottom      = Color(0xFFE4E9F1),
+    accentGlow      = PS5AccentBlue,
+    teal            = PS5AccentBlue,
+    success         = Color(0xFF4CAF50),
+    danger          = Color(0xFFF44336),
+    infoMono        = Color(0xFF0288D1),
+    fadeTop         = Color.White.copy(alpha = 0.5f),
+    fadeBottom      = Color(0xFFF5F5F5),
     backdropAlpha   = 0.10f
 )
 

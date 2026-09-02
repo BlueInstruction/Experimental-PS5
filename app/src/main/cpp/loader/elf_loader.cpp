@@ -218,31 +218,6 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
              (unsigned long long)ehdr.entry, ehdr.phnum);
     Breadcrumb::Set("elf: parse ok phnum=%u", (unsigned)ehdr.phnum);
 
-    // v1.32 — THE GAME-LOAD BLOCKER FIX (vc32 device evidence: six boot
-    // attempts, all identical). Real PS5 eboot.bin inner ELFs are SONY
-    // DYN-style: e_type 0xFE10 (65040) with RELATIVE p_vaddr values — the
-    // vc32 log's inner facts were innerType=65040 entry=0x70 phdr#0
-    // VA=0x0 size=0x2e70bc. Mapping raw p_vaddr rejects at VA=0x0
-    // ("segment mapping rejected ... mapped=0.00 MiB") and the boot dies
-    // before a single byte is mapped. Policy: DYN-style images are based
-    // at the guest-window anchor — every segment lands at base+p_vaddr,
-    // the entry becomes base+e_entry, and the loaded image stays inside
-    // the manager's window contract.
-    constexpr uint16_t kEtDyn        = 3;       // standard PIE/shared
-    constexpr uint16_t kEtSceDynamic = 0xFE10;  // 65040 — SONY DYN-style exec
-    const bool dynStyle = ehdr.type == kEtDyn || ehdr.type == kEtSceDynamic;
-    const uint64_t loadBase = dynStyle ? mem.GetGuestBase() : 0;
-    if (dynStyle) {
-        PX5_LOGI(LogCategory::LOADER,
-                 "ELF %s: DYN-style image (type=%u) — basing at guest "
-                 "window anchor 0x%llx (segments at base+p_vaddr, entry "
-                 "base+e_entry)",
-                 origin.c_str(), ehdr.type,
-                 (unsigned long long)loadBase);
-        Breadcrumb::Set("elf: dyn-style base=0x%llx",
-                        (unsigned long long)loadBase);
-    }
-
     bool mappedAny = false;
     for (uint16_t i = 0; i < ehdr.phnum; ++i) {
         const size_t off = static_cast<size_t>(ehdr.phoff) +
@@ -261,7 +236,7 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
                         (unsigned)i, (unsigned long long)ph.vaddr,
                         (unsigned long long)ph.memsz);
         LoadedElfImage::Segment seg{};
-        seg.vaddr  = loadBase + ph.vaddr;
+        seg.vaddr  = ph.vaddr;
         seg.filesz = static_cast<size_t>(ph.filesz);
         seg.memsz  = static_cast<size_t>(ph.memsz);
         seg.flags  = ProtFromFlags(ph.flags);
@@ -313,12 +288,7 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
         return false;
     }
 
-    // v1.32: entry is an IMAGE-OFFSET for DYN-style images (the vc32
-    // eboot carried entry=0x70) — the executable address is base+entry.
-    // The entryMapped gate below then validates against the ABSOLUTE
-    // segment extents, exactly as before, so a bogus entry still refuses
-    // to dispatch instead of running zeroed pages.
-    out.entryPoint = ehdr.entry ? (loadBase + ehdr.entry) : out.imageLowVa;
+    out.entryPoint = ehdr.entry ? ehdr.entry : out.imageLowVa;
 
     // v1.29 hard gate — the vc29 lesson. The foundation fixture carried
     // entry = image base + 0x80 while the segment held only 46 bytes, so

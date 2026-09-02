@@ -338,7 +338,17 @@ fun AppNavigation(
     fexCoreStatus: String,
     gameViewModel: GameViewModel = viewModel()
 ) {
-    val games by gameViewModel.allGames.collectAsStateWithLifecycle()
+    val realGames by gameViewModel.allGames.collectAsStateWithLifecycle()
+    val games = if (realGames.isEmpty()) listOf(
+        GameEntity(
+            id = "demo_game_ui_test",
+            name = "Test Game (UI Preview)",
+            titleId = "UI-TEST",
+            path = "dummy/path",
+            status = "Ready",
+            sizeBytes = 25000000000
+        )
+    ) else realGames
     val navController = rememberNavController()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -719,8 +729,7 @@ fun AppNavigation(
                     gameViewModel = gameViewModel,
                     fexCoreStatus = fexCoreStatus,
                     fexCoreWrapper = fexCoreWrapper,
-                    onBackClick = { navController.popBackStack() },
-                    onOpenLogs = { navController.navigate("logs") }
+                    onBackClick = { navController.popBackStack() }
                 )
             }
         }
@@ -769,7 +778,7 @@ private fun ImportStatusCard(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
-            .background(px5Colors().sheet.copy(alpha = 0.97f))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
             .padding(16.dp)
     ) {
         Column {
@@ -777,22 +786,20 @@ private fun ImportStatusCard(
                 text = if (busy) "Importing…" else "Import finished",
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
-                color = if (busy) px5Colors().infoMono else px5Colors().success,
-                fontFamily = TitilliumFontFamily
+                color = if (busy) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
             )
             Text(
                 text = text,
                 fontSize = 12.sp,
-                color = px5Colors().text.copy(alpha = 0.85f),
-                fontFamily = TitilliumFontFamily,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 6.dp, bottom = 8.dp)
             )
             if (!busy) {
                 Button(
                     onClick = onDismiss,
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = px5Colors().controlStrong,
-                        contentColor = px5Colors().text
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer
                     ),
                     shape = RoundedCornerShape(10.dp)
                 ) {

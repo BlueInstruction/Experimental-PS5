@@ -18,6 +18,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.material3.TabRowDefaults
+import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,6 +58,7 @@ private val CATEGORIES = listOf(
     SettingsCategory("Debug", Icons.Default.BugReport)
 )
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PS5SettingsScreen(
     soundManager: SoundManager,
@@ -70,132 +73,74 @@ fun PS5SettingsScreen(
 ) {
     var selectedCategory by remember { mutableStateOf(0) }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(px5Colors().background)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .windowInsetsPadding(WindowInsets.statusBars)
-                .padding(horizontal = 20.dp, vertical = 16.dp)
-        ) {
-            // Header
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(
-                    onClick = {
-                        soundManager.playNavigationSound()
-                        onBackClick()
+    Scaffold(
+        containerColor = px5Colors().background,
+        topBar = {
+            Column {
+                TopAppBar(
+                    title = { 
+                        Text("Settings", fontWeight = FontWeight.Bold, color = px5Colors().text) 
                     },
-                    modifier = Modifier
-                        .size(44.dp)
-                        .clip(CircleShape)
-                        .background(px5Colors().control)
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
-                        tint = px5Colors().text
-                    )
-                }
-                Spacer(modifier = Modifier.width(16.dp))
-                Text(
-                    text = "Settings",
-                    fontSize = 26.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = px5Colors().text,
-                    fontFamily = TitilliumFontFamily
-                )
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-                val wide = maxWidth >= 700.dp
-
-                if (wide) {
-                    Row(
-                        modifier = Modifier.fillMaxSize(),
-                        horizontalArrangement = Arrangement.spacedBy(20.dp)
-                    ) {
-                        // Sidebar (wide screens only)
-                        Column(
-                            modifier = Modifier
-                                .width(230.dp)
-                                .fillMaxHeight()
-                                .verticalScroll(rememberScrollState()),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            CATEGORIES.forEachIndexed { i, cat ->
-                                SettingsCategoryTab(
-                                    title = cat.title,
-                                    icon = cat.icon,
-                                    isSelected = selectedCategory == i,
-                                    onClick = {
-                                        selectedCategory = i
-                                        soundManager.playNavigationSound()
-                                    }
-                                )
-                            }
+                    navigationIcon = {
+                        IconButton(onClick = {
+                            soundManager.playNavigationSound()
+                            onBackClick()
+                        }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = px5Colors().text)
                         }
-                        SettingsPanel(
-                            category = selectedCategory,
-                            soundManager = soundManager,
-                            fexCoreStatus = fexCoreStatus,
-                            fexCoreWrapper = fexCoreWrapper,
-                            onImportFileClick = onImportFileClick,
-                            onImportFolderClick = onImportFolderClick,
-                            onScanGamesClick = onScanGamesClick,
-                            onOpenTurnipManagerClick = onOpenTurnipManagerClick,
-                            onOpenLogsClick = onOpenLogsClick
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = px5Colors().surface)
+                )
+                ScrollableTabRow(
+                    selectedTabIndex = selectedCategory,
+                    containerColor = px5Colors().surface,
+                    contentColor = px5Colors().accent,
+                    edgePadding = 0.dp,
+                    indicator = { tabPositions ->
+                        TabRowDefaults.SecondaryIndicator(
+                            Modifier.tabIndicatorOffset(tabPositions[selectedCategory]),
+                            color = px5Colors().accent
                         )
                     }
-                } else {
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        // Chip row (portrait)
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            CATEGORIES.forEachIndexed { i, cat ->
-                                SettingsChip(
-                                    title = cat.title,
-                                    icon = cat.icon,
-                                    isSelected = selectedCategory == i,
-                                    onClick = {
-                                        selectedCategory = i
-                                        soundManager.playNavigationSound()
-                                    }
-                                )
+                ) {
+                    CATEGORIES.forEachIndexed { i, cat ->
+                        Tab(
+                            selected = selectedCategory == i,
+                            onClick = {
+                                selectedCategory = i
+                                soundManager.playNavigationSound()
+                            },
+                            text = { 
+                                Text(
+                                    text = cat.title, 
+                                    color = if (selectedCategory == i) px5Colors().accent else px5Colors().textSecondary,
+                                    fontWeight = if (selectedCategory == i) FontWeight.Bold else FontWeight.Normal
+                                ) 
                             }
-                        }
-                        Spacer(modifier = Modifier.height(14.dp))
-                        SettingsPanel(
-                            category = selectedCategory,
-                            soundManager = soundManager,
-                            fexCoreStatus = fexCoreStatus,
-                            fexCoreWrapper = fexCoreWrapper,
-                            onImportFileClick = onImportFileClick,
-                            onImportFolderClick = onImportFolderClick,
-                            onScanGamesClick = onScanGamesClick,
-                            onOpenTurnipManagerClick = onOpenTurnipManagerClick,
-                            onOpenLogsClick = onOpenLogsClick
                         )
                     }
                 }
             }
         }
+    ) { innerPadding ->
+        SettingsPanel(
+            modifier = Modifier.padding(innerPadding),
+            category = selectedCategory,
+            soundManager = soundManager,
+            fexCoreStatus = fexCoreStatus,
+            fexCoreWrapper = fexCoreWrapper,
+            onImportFileClick = onImportFileClick,
+            onImportFolderClick = onImportFolderClick,
+            onScanGamesClick = onScanGamesClick,
+            onOpenTurnipManagerClick = onOpenTurnipManagerClick,
+            onOpenLogsClick = onOpenLogsClick
+        )
     }
 }
 
 @Composable
 private fun SettingsPanel(
+    modifier: Modifier = Modifier,
     category: Int,
     soundManager: SoundManager,
     fexCoreStatus: String,
@@ -206,30 +151,22 @@ private fun SettingsPanel(
     onOpenTurnipManagerClick: () -> Unit,
     onOpenLogsClick: () -> Unit
 ) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = px5Colors().card),
-        shape = RoundedCornerShape(18.dp),
-        modifier = Modifier
+    LazyColumn(
+        modifier = modifier
             .fillMaxSize()
-            .border(1.dp, px5Colors().hairline, RoundedCornerShape(18.dp))
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            when (category) {
-                0 -> systemSection(fexCoreStatus, fexCoreWrapper, soundManager)
-                1 -> generalSection(soundManager,
-                        onImportFileClick, onImportFolderClick, onScanGamesClick)
-                2 -> graphicsSection(fexCoreWrapper, soundManager,
-                        onOpenTurnipManagerClick)
-                3 -> inputSection()
-                4 -> audioSection(soundManager)
-                5 -> debugSection(fexCoreStatus, fexCoreWrapper, soundManager,
-                        onOpenLogsClick)
-            }
+        when (category) {
+            0 -> systemSection(fexCoreStatus, fexCoreWrapper, soundManager)
+            1 -> generalSection(soundManager,
+                    onImportFileClick, onImportFolderClick, onScanGamesClick)
+            2 -> graphicsSection(fexCoreWrapper, soundManager,
+                    onOpenTurnipManagerClick)
+            3 -> inputSection()
+            4 -> audioSection(soundManager)
+            5 -> debugSection(fexCoreStatus, fexCoreWrapper, soundManager,
+                    onOpenLogsClick)
         }
     }
 }
@@ -260,14 +197,6 @@ private fun LazyListScope.systemSection(
             }
         )
         SettingsItemText("Bridge status", fexCoreStatus)
-        Text(
-            text = "Guest code executes through the FEXCore JIT on the " +
-                    "calling thread. The engine currently runs one guest " +
-                    "execution thread; a multicore guest scheduler does not " +
-                    "exist yet, so there is no CPU core count setting.",
-            fontSize = 12.sp, color = px5Colors().textSecondary,
-            fontFamily = TitilliumFontFamily
-        )
     }
     item {
         // ---- Translation parameters — FEXCore's real config layer -------
@@ -333,11 +262,6 @@ private fun LazyListScope.systemSection(
             }
         )
         Text(
-            text = "Overrides go through FEXCore's config layer and take " +
-                    "effect at engine start. Active overrides:",
-            fontSize = 12.sp, color = px5Colors().textSecondary, fontFamily = TitilliumFontFamily
-        )
-        MonoReportBox(
             overrides.entries.joinToString("\n") { "${it.key}=${it.value}" }
                 .ifEmpty { "(none — engine defaults apply)" }
         )
@@ -415,12 +339,6 @@ private fun LazyListScope.generalSection(
             Spacer(Modifier.width(6.dp))
             Text("Scan common storage locations", fontSize = 12.sp)
         }
-        Text(
-            text = "The scan looks for eboot.bin dump folders and .pkg/.iso files in Download, " +
-                    "PX5/Games and other readable locations. Nothing is modified or moved.",
-            fontSize = 12.sp, color = px5Colors().textSecondary, fontFamily = TitilliumFontFamily,
-            modifier = Modifier.padding(top = 8.dp)
-        )
     }
     item {
         SettingsSubHeader("Storage")
@@ -459,7 +377,7 @@ private fun LazyListScope.inputSection() {
         SettingsHeader("Input")
         SettingsToggleItem(
             title = "Enable virtual controls",
-            subtitle = "On-screen DualSense overlay on the emulation stage",
+            subtitle = "Display on-screen controls",
             checked = Px5Settings.showTouchPad.collectAsState().value,
             onCheckedChange = { v -> Px5Settings.setShowTouchPad(v) }
         )
@@ -480,14 +398,6 @@ private fun LazyListScope.inputSection() {
                 thumbColor = PS5AccentBlue, activeTrackColor = px5Colors().accentGlow
             )
         )
-        Text(
-            text = "Physical controllers (USB/Bluetooth gamepads on handhelds) " +
-                    "drive the same native input bridge while the emulation " +
-                    "stage is open. Per-button remapping and a drag layout " +
-                    "editor are not implemented yet.",
-            fontSize = 12.sp, color = px5Colors().textSecondary,
-            fontFamily = TitilliumFontFamily
-        )
     }
 }
 
@@ -503,7 +413,7 @@ private fun LazyListScope.audioSection(soundManager: SoundManager) {
         SettingsItemText("Audio driver", "AAudio (system)")
         SettingsToggleItem(
             title = "UI sound effects",
-            subtitle = "Navigation and activation sounds",
+            subtitle = "",
             checked = soundEffectsEnabled,
             onCheckedChange = {
                 soundEffectsEnabled = it
@@ -512,16 +422,12 @@ private fun LazyListScope.audioSection(soundManager: SoundManager) {
         )
         SettingsToggleItem(
             title = "Background music",
-            subtitle = "Ambient theme music on the home screen",
+            subtitle = "",
             checked = bgMusicEnabled,
             onCheckedChange = {
                 bgMusicEnabled = it
                 soundManager.isBgMusicEnabled = it
             }
-        )
-        Text(
-            text = "In-game audio output is not implemented yet (Phase C).",
-            fontSize = 12.sp, color = px5Colors().textSecondary, fontFamily = TitilliumFontFamily
         )
     }
 }
@@ -559,12 +465,8 @@ private fun LazyListScope.debugSection(
         if (counters.isNotBlank()) {
             MonoReportBox(counters)
         } else {
-            Text(
-                text = "Engine not initialized — no counters to report.",
-                fontSize = 12.sp, color = px5Colors().textSecondary,
-                fontFamily = TitilliumFontFamily
-            )
         }
+
     }
     item {
         SettingsSubHeader("Self-tests")
@@ -638,31 +540,7 @@ private fun LazyListScope.debugSection(
                 Text("Run conformance IN-PROCESS (unsafe — may kill the app)",
                      fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
-            Text(
-                text = "No fork containment. If the device JIT faults, the " +
-                       "app closes — the crash report (module-resolved PC + " +
-                       "instruction bytes) is still written to the unified " +
-                       "log before death. A PASS here proves the JIT works " +
-                       "and the isolated-child crash is a fork artifact.",
-                fontSize = 11.sp,
-                color = px5Colors().textSecondary,
-                fontFamily = TitilliumFontFamily,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-            inProcResult?.let { res ->
-                Text(
-                    text = res,
-                    fontSize = 12.sp,
-                    color = when {
-                        res.startsWith("PASSED") -> px5Colors().success
-                        res.startsWith("SKIPPED") -> px5Colors().textSecondary
-                        else -> px5Colors().danger
-                    },
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                    modifier = Modifier.padding(top = 6.dp)
-                )
-            }
+                
             Spacer(Modifier.height(10.dp))
 
             var running by remember { mutableStateOf(false) }
@@ -733,10 +611,6 @@ private fun LazyListScope.debugSection(
             (context.getExternalFilesDir(null)?.resolve("logs")?.absolutePath
                 ?: context.filesDir.resolve("logs").absolutePath)
         )
-        Text(
-            text = "Captured crashes and uncaught exceptions:",
-            fontSize = 12.sp, color = px5Colors().textSecondary, fontFamily = TitilliumFontFamily
-        )
         Spacer(modifier = Modifier.height(8.dp))
         var logText by remember { mutableStateOf(com.px5.emulator.PX5Application.getCrashLogs(context)) }
         Box(
@@ -805,10 +679,6 @@ private fun LazyListScope.graphicsSection(
             Text("Game resolution", fontSize = 14.sp, color = px5Colors().text, fontFamily = TitilliumFontFamily, fontWeight = FontWeight.SemiBold)
             Text("${scale.value}%", fontSize = 14.sp, color = px5Colors().accentGlow, fontFamily = TitilliumFontFamily, fontWeight = FontWeight.Bold)
         }
-        Text(
-            "Render-target scale relative to the swapchain size (50–200%)",
-            fontSize = 12.sp, color = px5Colors().textSecondary, fontFamily = TitilliumFontFamily
-        )
         Slider(
             value = scale.value.toFloat(),
             onValueChange = { v -> Px5Settings.setResScalePct(v.toInt()) },
@@ -821,19 +691,19 @@ private fun LazyListScope.graphicsSection(
         Spacer(modifier = Modifier.height(8.dp))
         SettingsToggleItem(
             title = "Show FPS",
-            subtitle = "Frames per second, computed from the engine frame counter",
+            subtitle = "Show FPS counter",
             checked = Px5Settings.showFps.collectAsState().value,
             onCheckedChange = { v -> Px5Settings.setShowFps(v) }
         )
         SettingsToggleItem(
             title = "Show frametime",
-            subtitle = "Milliseconds per frame, from the same counter",
+            subtitle = "Show frame times",
             checked = Px5Settings.showFrametime.collectAsState().value,
             onCheckedChange = { v -> Px5Settings.setShowFrametime(v) }
         )
         SettingsToggleItem(
             title = "V-Sync / frame pacing",
-            subtitle = if (vsync.value) "FIFO present mode (tear-free)"
+            subtitle = if (vsync.value) "Enable V-Sync"
                        else "MAILBOX / IMMEDIATE when available",
             checked = vsync.value,
             onCheckedChange = { v -> Px5Settings.setVsync(v) }
@@ -854,12 +724,6 @@ private fun LazyListScope.graphicsSection(
                 soundManager.playNavigationSound()
             }
         )
-        Text(
-            text = "Conservative prefers host memory for images, aggressive " +
-                    "requires device-local memory. Applies to engine image " +
-                    "allocations; broader policies arrive with real render targets.",
-            fontSize = 12.sp, color = px5Colors().textSecondary, fontFamily = TitilliumFontFamily
-        )
 
         // Present mode — explicit selection, validated against the device's
         // supported modes at swapchain build (unsupported choices fall back
@@ -874,10 +738,6 @@ private fun LazyListScope.graphicsSection(
                 fexCoreWrapper?.nativeSetPresentMode(i)
                 soundManager.playNavigationSound()
             }
-        )
-        Text(
-            text = "Modes the device does not report fall back automatically — the HUD shows the real mode.",
-            fontSize = 12.sp, color = px5Colors().textSecondary, fontFamily = TitilliumFontFamily
         )
     }
     item {
