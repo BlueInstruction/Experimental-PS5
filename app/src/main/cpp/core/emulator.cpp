@@ -9,6 +9,8 @@
 #include "../tests/test_guest.h"
 #include "loader/elf_loader.h"
 #include "loader/self_fixtures.h"
+#include "loader/runtime_linker.h"
+#include "loader/runtime_linker_selftest.h"
 #include "utils/logger.h"
 #include "utils/breadcrumbs.h"
 #include "utils/crash_handler.h"
@@ -507,6 +509,57 @@ std::string Emulator::SelfTestFoundation() {
                         " phys=0x" + ([&]{ char b[24];
                             snprintf(b,sizeof(b),"%llx",(unsigned long long)phys); return std::string(b);}()));
         if (!hleOk) goto done;
+    }
+
+    // --- Step 10: NID gate — first PS5-style import call lands on a
+    // bionic-native HLE function (v1.31). Guest bytes call the reserved
+    // gate syscall; GuestSyscalls routes to RuntimeLinker; the registered
+    // HLE function returns 7+35=42; the guest exits with it. This is the
+    // seam every future libSce* HLE module plugs into.
+    {
+        auto& mm = MemoryManager::GetInstance();
+        const size_t ps10 = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+        auto& rl = RuntimeLinker::GetInstance();
+        rl.Reset();
+        rl.RegisterHleExport("libpx5test", kGateTestNid, "test_gate_add",
+            [](const uint64_t* args, size_t argc) -> int64_t {
+                int64_t s = 0;
+                for (size_t i = 0; i < argc; ++i) s += (int64_t)args[i];
+                return s;
+            });
+
+        constexpr uint64_t kGateVa = 0x140000000ULL + 0x00800000ULL;
+        constexpr uint64_t kGateStackTop = 0x148000000ULL;
+        mm.MapMemory(kGateVa, kNidGateStubSize,
+                     MemoryFlags::PAGE_READ | MemoryFlags::PAGE_WRITE |
+                     MemoryFlags::PAGE_EXEC, "nid_gate_stub");
+        memcpy(mm.GetHostPointer(kGateVa), kNidGateStubCode, kNidGateStubSize);
+        mm.MapMemory(kGateStackTop - ps10 * 4, ps10 * 4,
+                     MemoryFlags::PAGE_READ | MemoryFlags::PAGE_WRITE,
+                     "nid_gate_stack");
+
+        GuestSyscalls::ResetRun();
+        auto r10 = FexCoreIntegration::ExecuteAtHostRip(
+            reinterpret_cast<uint64_t>(mm.GetHostPointer(kGateVa)),
+            reinterpret_cast<uint64_t>(mm.GetHostPointer(kGateStackTop)));
+
+        mm.UnmapMemory(kGateVa, kNidGateStubSize);
+        mm.UnmapMemory(kGateStackTop - ps10 * 4, ps10 * 4);
+
+        const auto& gst = rl.Stats();
+        const bool gateOk = r10.started && r10.exitCode == kGateExpectedExit &&
+                            gst.gateCalls == 1 && gst.resolvedHle == 1;
+        char gline[192];
+        snprintf(gline, sizeof(gline),
+                 "%s 10. NID gate | guest->gate-syscall->bionic HLE->exit%llu "
+                 "| nid=0x%08llx gateCalls=%llu resolvedHle=%llu",
+                 gateOk ? "[PASS]" : "[FAIL]",
+                 (unsigned long long)r10.exitCode,
+                 (unsigned long long)kGateTestNid,
+                 (unsigned long long)gst.gateCalls,
+                 (unsigned long long)gst.resolvedHle);
+        push(gline);
+        if (!gateOk) goto done;
     }
 
     verdict = "PASS";

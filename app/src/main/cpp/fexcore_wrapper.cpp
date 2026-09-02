@@ -26,6 +26,7 @@
 #include "utils/crash_handler.h"
 #include "utils/heartbeat.h"
 #include "loader/self_extract.h"
+#include "loader/runtime_linker_selftest.h"
 
 namespace fs = std::filesystem;
 
@@ -780,7 +781,14 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunLoaderSelfTest(JNIEnv* env,
             std::string rep;
             PX5::SelfExtract::RunSelfExtractSelfTest(&rep);
             t.step("extractor self-test returned (%zu chars)", rep.size());
-            return rep;
+            // v1.31: the runtime linker self-test is pure C++ too — run it
+            // in the same isolated child and append both reports verbatim.
+            std::string rl;
+            const bool rlOk =
+                PX5::RuntimeLinker::RunRuntimeLinkerSelfTest(&rl);
+            t.step("runtime linker self-test ok=%d (%zu chars)",
+                   rlOk ? 1 : 0, rl.size());
+            return rep + "\n--- runtime linker ---\n" + rl;
         },
         10000);
     return env->NewStringUTF(report.c_str());

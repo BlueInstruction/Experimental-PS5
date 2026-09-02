@@ -1,5 +1,6 @@
 #include "syscalls.h"
 #include "../memory/memory.h"
+#include "../loader/runtime_linker.h"
 #include "../utils/logger.h"
 
 #include <cerrno>
@@ -217,6 +218,21 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
         std::lock_guard<std::mutex> lk(g_stateMutex);
         g_stats.handledCalls++;
         return 0;
+    }
+
+    case PX5::RuntimeLinker::kPx5NidGateSyscall: {
+        // PX5 NID gate (v1.31): a0 = NID, a1..a5 = HLE arguments. Real
+        // dispatch into the RuntimeLinker registry: registered HLE exports
+        // are bionic-native host functions; unknown NIDs and guest-kind
+        // exports fail by name (see DispatchNid) and return ENOSYS here.
+        const uint64_t gateArgs[5] = {a1, a2, a3, a4, a5};
+        const RuntimeLinker::GateResult gr =
+            RuntimeLinker::GetInstance().DispatchNid(a0, gateArgs, 5);
+        {
+            std::lock_guard<std::mutex> lk(g_stateMutex);
+            g_stats.handledCalls++;   // outcome tracked in linker stats
+        }
+        return gr.ok ? static_cast<uint64_t>(gr.value) : kErrNoSys;
     }
 
     case NR_futex:                           // single-threaded guests only

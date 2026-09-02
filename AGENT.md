@@ -145,6 +145,7 @@ CI job).
 | GPU command translation (GNM-ish queue → Vulkan) | **not started** — design in §7 | first triangle through GNM-to-Vulkan path |
 | Shader compiler seam | **not started** | SPIR-V emitted for one micro-shader |
 | libkernel HLE | minimal surface v1 | syscall-count parity vs Kyty reference tables |
+| Runtime linker + NID gate (guest -> bionic HLE) | implemented in-tree (v1.31): reserved-syscall gate into the export registry; PT_DYNAMIC reader; linker self-test runs on both ABIs | foundation step 10 `[PASS]` (exit 42) in the next on-device report + CI smoke green |
 | Audio/input | functional wrappers, atomics-honest input | on-device gamepad echo test |
 | Driver switching (Turnip ↔ vendor) | slot manager present | per-app lib dir swap verified via `vulkaninfo` inside app sandbox |
 | UI shell | Steam-Deck-style Compose shell, functional preferences | no dead buttons; each control mutates a real setting |

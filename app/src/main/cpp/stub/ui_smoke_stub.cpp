@@ -28,6 +28,7 @@
 #include "../gpu/vulkan_device.h"
 #include "../gpu/gnm/gnm_selftest.h"
 #include "../loader/self_extract_selftest.h"
+#include "../loader/runtime_linker_selftest.h"
 #include "../utils/logger.h"
 
 namespace fs = std::filesystem;
@@ -224,7 +225,12 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunLoaderSelfTest(
         JNIEnv* env, jobject) {
     std::string report;
     PX5::SelfExtract::RunSelfExtractSelfTest(&report);
-    return env->NewStringUTF(report.c_str());
+    // v1.31: the runtime linker self-test is pure C++ (registry + dynamic
+    // reader) — the smoke ABI runs the REAL thing, same policy as above.
+    std::string rl;
+    PX5::RuntimeLinker::RunRuntimeLinkerSelfTest(&rl);
+    return env->NewStringUTF(
+        (report + "\n--- runtime linker ---\n" + rl).c_str());
 }
 extern "C" JNIEXPORT void JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeInitRuntimeContext(
