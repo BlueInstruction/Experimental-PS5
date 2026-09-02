@@ -266,7 +266,21 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
         seg.memsz  = static_cast<size_t>(ph.memsz);
         seg.flags  = ProtFromFlags(ph.flags);
 
-        if (!mem.MapMemory(seg.vaddr, seg.memsz, seg.flags,
+        // v1.34 — TWO-PHASE LOAD (the vc34 lesson, Dreaming Sarah
+        // PPSA02929). The real eboot's first PT_LOAD is R-only
+        // (prot=4, 2.9 MB of text at p_vaddr=0). v1.32 mapped the
+        // FINAL protection up front and then memcpy'd the segment
+        // contents host-side: a guaranteed write into a read-only
+        // page — SIGSEGV ACCERR si_addr=0x140000000 before a single
+        // game instruction ran. Every fixture we ship is RWX, which
+        // is why the whole self-test suite stayed green while the
+        // first real image died on byte one of the copy.
+        //   phase 1: map R|W|X, copy the file bytes in
+        //   phase 2: re-protect to the segment's ELF-declared flags
+        const uint32_t kLoadProt = MemoryFlags::PAGE_READ |
+                                   MemoryFlags::PAGE_WRITE |
+                                   MemoryFlags::PAGE_EXEC;
+        if (!mem.MapMemory(seg.vaddr, seg.memsz, kLoadProt,
                            "PT_LOAD#" + std::to_string(i))) {
             out.error = "segment mapping rejected: VA=0x" +
                         [&]{ char b[24]; snprintf(b, sizeof(b), "%llx",
@@ -294,6 +308,28 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
             memcpy(hostVa, data + ph.offset, seg.filesz);
         }
         // memsz > filesz region stays zeroed (anonymous reservation).
+
+        // Phase 2 — seal the segment at its ELF-declared protection.
+        // ProtectMemory also fires the JIT invalidation contract when
+        // the W bit comes off an executable range.
+        if (seg.flags != kLoadProt) {
+            if (!mem.ProtectMemory(seg.vaddr, seg.memsz, seg.flags)) {
+                out.error = "segment re-protect failed: VA=0x" +
+                            [&]{ char b[24]; snprintf(b, sizeof(b), "%llx",
+                                 (unsigned long long)seg.vaddr); return std::string(b); }() +
+                            " prot=0x" +
+                            [&]{ char b[8]; snprintf(b, sizeof(b), "%x",
+                                 seg.flags); return std::string(b); }();
+                PX5_LOGE(LogCategory::LOADER,
+                         "ProtectMemory FAILED for segment #%u VA=0x%llx — %s",
+                         i, (unsigned long long)seg.vaddr, out.error.c_str());
+                Breadcrumb::Set("elf: PT_LOAD#%u re-protect FAILED",
+                                (unsigned)i);
+                return false;
+            }
+            Breadcrumb::Set("elf: PT_LOAD#%u sealed prot=0x%x",
+                            (unsigned)i, seg.flags);
+        }
 
         out.segments.push_back(seg);
         out.imageLowVa  = std::min(out.imageLowVa, seg.vaddr);
