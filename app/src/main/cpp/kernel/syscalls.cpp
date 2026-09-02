@@ -226,7 +226,7 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
         // are bionic-native host functions; unknown NIDs and guest-kind
         // exports fail by name (see DispatchNid) and return ENOSYS here.
         const uint64_t gateArgs[5] = {a1, a2, a3, a4, a5};
-        const RuntimeLinker::GateResult gr =
+        const GateResult gr =
             RuntimeLinker::GetInstance().DispatchNid(a0, gateArgs, 5);
         {
             std::lock_guard<std::mutex> lk(g_stateMutex);
