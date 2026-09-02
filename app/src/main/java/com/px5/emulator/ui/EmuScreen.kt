@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.pm.ActivityInfo
 import android.provider.DocumentsContract
 import com.px5.emulator.PhysicalControllerBridge
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -36,6 +37,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -624,6 +626,7 @@ fun EmuScreen(
             EmuBootLoading(
                 gameName = game?.name ?: path.substringAfterLast('/'),
                 titleId = game?.titleId ?: "",
+                coverPath = game?.coverPath ?: "",
                 stage = bootStage,
                 progress01 = animatedBootProgress,
                 error = bootError,
@@ -744,16 +747,18 @@ private fun StatusChip(text: String, tint: Color) {
 }
 
 // ---------------------------------------------------------------------------
-// v1.32 — the boot experience. A branded full-screen loading stage
-// (PSX5 wordmark, game identity, honest stage label, smooth 0..100 bar),
-// modeled on what Eden/Vita3K show between "Play" and the first frame.
-// Failure states are one clean card with named actions — never a wall of
-// monospace over the game.
+// v1.35 — the boot experience. The game's OWN cover card leads the screen
+// (library cover at the home-card size, game name, title id, honest stage
+// label, smooth 0..100 bar), modeled on what Eden/Vita3K show between
+// "Play" and the first frame. Failure states show only the symbolic title
+// id plus one clean centered card ("Couldn't start the game") with named
+// actions — the detailed reason lives in the Logs screen, never here.
 // ---------------------------------------------------------------------------
 @Composable
 private fun EmuBootLoading(
     gameName: String,
     titleId: String,
+    coverPath: String,
     stage: String,
     progress01: Float,
     error: String?,
@@ -772,47 +777,33 @@ private fun EmuBootLoading(
             ),
         contentAlignment = Alignment.Center
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.padding(horizontal = 40.dp)
-        ) {
-            Text(
-                text = "PSX5",
-                color = Color.White,
-                fontSize = 30.sp,
-                fontWeight = FontWeight.Bold,
-                fontFamily = TitilliumFontFamily,
-                letterSpacing = 3.sp
-            )
-            Spacer(Modifier.height(6.dp))
-            Box(
-                modifier = Modifier
-                    .width(52.dp)
-                    .height(3.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(PS5AccentBlue)
-            )
-            Spacer(Modifier.height(26.dp))
-            Text(
-                text = gameName,
-                color = c.text,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.SemiBold,
-                fontFamily = TitilliumFontFamily,
-                textAlign = TextAlign.Center,
-                maxLines = 2
-            )
-            if (titleId.isNotEmpty()) {
-                Spacer(Modifier.height(3.dp))
+        if (error == null) {
+            // ---- booting: the game's own card + the one honest bar --------
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.padding(horizontal = 40.dp)
+            ) {
+                BootGameCover(gameName = gameName, coverPath = coverPath)
+                Spacer(Modifier.height(14.dp))
                 Text(
-                    text = titleId,
-                    color = c.textSecondary,
-                    fontSize = 11.sp,
-                    fontFamily = TitilliumFontFamily
+                    text = gameName,
+                    color = c.text,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    fontFamily = TitilliumFontFamily,
+                    textAlign = TextAlign.Center,
+                    maxLines = 2
                 )
-            }
-            Spacer(Modifier.height(30.dp))
-            if (error == null) {
+                if (titleId.isNotEmpty()) {
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        text = titleId,
+                        color = c.textSecondary,
+                        fontSize = 11.sp,
+                        fontFamily = TitilliumFontFamily
+                    )
+                }
+                Spacer(Modifier.height(26.dp))
                 // ---- the bar ------------------------------------------------
                 Box(
                     modifier = Modifier
@@ -852,30 +843,46 @@ private fun EmuBootLoading(
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                     )
                 }
-            } else {
-                // ---- the one clean failure card -----------------------------
+            }
+        } else {
+            // ---- failure: only the symbolic title id + one clean card -----
+            // (the detailed reason is in the Logs screen — never here)
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp)
+            ) {
+                if (titleId.isNotEmpty()) {
+                    Text(
+                        text = titleId,
+                        color = c.textSecondary,
+                        fontSize = 13.sp,
+                        fontFamily = TitilliumFontFamily
+                    )
+                    Spacer(Modifier.height(22.dp))
+                }
                 Column(
                     modifier = Modifier
-                        .width(320.dp)
+                        .fillMaxWidth(0.5f)
+                        .widthIn(min = 320.dp)
                         .clip(RoundedCornerShape(16.dp))
                         .background(c.sheet)
                         .border(1.dp, c.danger.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
-                        .padding(16.dp)
+                        .padding(horizontal = 18.dp, vertical = 22.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
                         "Couldn't start the game",
                         color = c.text, fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold,
-                        fontFamily = TitilliumFontFamily
+                        fontFamily = TitilliumFontFamily,
+                        textAlign = TextAlign.Center
                     )
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        error,
-                        color = c.textSecondary, fontSize = 12.sp,
-                        fontFamily = TitilliumFontFamily
-                    )
-                    Spacer(Modifier.height(14.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // v1.35: the loader's detailed reason is NOT printed here —
+                    // the Logs screen carries the full evidence.
+                    Spacer(Modifier.height(16.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Button(
                             onClick = onRetry,
                             colors = ButtonDefaults.buttonColors(
@@ -918,6 +925,39 @@ private fun EmuBootLoading(
                     }
                 }
             }
+        }
+    }
+}
+
+/** v1.35 — the boot screen's game identity: the library cover at the
+ *  home-card size; an initials tile when no cover was imported. */
+@Composable
+private fun BootGameCover(gameName: String, coverPath: String) {
+    val c = px5Colors()
+    Box(
+        modifier = Modifier
+            .size(120.dp, 170.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF121822))
+            .border(1.dp, c.hairline, RoundedCornerShape(12.dp)),
+        contentAlignment = Alignment.Center
+    ) {
+        val cover = rememberGameCover(coverPath)
+        if (cover != null) {
+            Image(
+                bitmap = cover,
+                contentDescription = gameName,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Text(
+                text = gameName.take(2).uppercase(),
+                color = c.textSecondary,
+                fontSize = 30.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = TitilliumFontFamily
+            )
         }
     }
 }

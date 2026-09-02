@@ -74,7 +74,7 @@ fun PS5HomeScreen(
         topBar = {
             TopAppBar(
                 title = { 
-                    Text("PSX5 Emulator", fontWeight = FontWeight.Bold, color = textColor) 
+                    Text("PSX5", fontWeight = FontWeight.Bold, color = textColor)
                 },
                 actions = {
                     IconButton(onClick = onRotate) {
