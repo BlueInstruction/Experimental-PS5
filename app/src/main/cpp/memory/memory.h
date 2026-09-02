@@ -16,6 +16,18 @@ namespace MemoryFlags {
     constexpr uint32_t PAGE_READ  = 0x1;
     constexpr uint32_t PAGE_WRITE = 0x2;
     constexpr uint32_t PAGE_EXEC  = 0x4;
+
+    // v1.38 — AArch64 honors execute-only literally: a PROT_EXEC-only page
+    // rejects DATA loads (SEGV_ACCERR), and the FEXCore decoder must READ
+    // guest instruction bytes to compile them (Frontend.cpp PeekByte:129).
+    // PS5 game images ship XOM-hardened text segments (PF_X without PF_R);
+    // sealing one literally killed the vc38 session on its first entry-byte
+    // fetch (si_addr=0x140000070, si_code=2). W absence is honored — only
+    // the READ bit is forced back on executable pages. Every ARM64 FEX host
+    // does the same.
+    constexpr uint32_t HostReadableExec(uint32_t flags) {
+        return (flags & PAGE_EXEC) ? (flags | PAGE_READ) : flags;
+    }
 }
 
 // ---------------------------------------------------------------------------

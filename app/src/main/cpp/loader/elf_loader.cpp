@@ -312,14 +312,30 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
         // Phase 2 — seal the segment at its ELF-declared protection.
         // ProtectMemory also fires the JIT invalidation contract when
         // the W bit comes off an executable range.
-        if (seg.flags != kLoadProt) {
-            if (!mem.ProtectMemory(seg.vaddr, seg.memsz, seg.flags)) {
+        //
+        // v1.38 — PS5 XOM segments. PS5 game images declare their text
+        // execute-only (PF_X without PF_R — the console enforces XOM in
+        // hardware). AArch64 enforces it too: the CPU refuses DATA loads
+        // from an exec-only page (SEGV_ACCERR), and FEXCore's decoder
+        // READS guest instruction bytes (Frontend.cpp PeekByte). The
+        // vc38 session died on exactly that fetch at the eboot entry
+        // (si_addr=0x140000070, DecodeInstructionsAtEntry). Never seal a
+        // guest page below-read; the W bit is honored as declared.
+        const uint32_t sealFlags = MemoryFlags::HostReadableExec(seg.flags);
+        if (sealFlags != seg.flags) {
+            PX5_LOGI(LogCategory::LOADER,
+                     "  XOM: PT_LOAD#%u declared exec-only (flags=0x%x) — "
+                     "sealed R|X (0x%x) so the JIT can fetch bytes",
+                     i, seg.flags, sealFlags);
+        }
+        if (sealFlags != kLoadProt) {
+            if (!mem.ProtectMemory(seg.vaddr, seg.memsz, sealFlags)) {
                 out.error = "segment re-protect failed: VA=0x" +
                             [&]{ char b[24]; snprintf(b, sizeof(b), "%llx",
                                  (unsigned long long)seg.vaddr); return std::string(b); }() +
                             " prot=0x" +
                             [&]{ char b[8]; snprintf(b, sizeof(b), "%x",
-                                 seg.flags); return std::string(b); }();
+                                 sealFlags); return std::string(b); }();
                 PX5_LOGE(LogCategory::LOADER,
                          "ProtectMemory FAILED for segment #%u VA=0x%llx — %s",
                          i, (unsigned long long)seg.vaddr, out.error.c_str());
@@ -328,7 +344,7 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
                 return false;
             }
             Breadcrumb::Set("elf: PT_LOAD#%u sealed prot=0x%x",
-                            (unsigned)i, seg.flags);
+                            (unsigned)i, sealFlags);
         }
 
         out.segments.push_back(seg);

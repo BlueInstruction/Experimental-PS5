@@ -161,10 +161,14 @@ bool MemoryManager::MapMemoryImpl_Unlocked(uint64_t vaddr, size_t size,
         CollectExecOverlaps_Unlocked(vaLo, vaHi, *invalidatedOut);
     }
 
+    // v1.38: executable pages are never mapped below-read
+    // (MemoryFlags::HostReadableExec) — the JIT must be able to fetch
+    // guest bytes. W/X bits pass through untouched.
+    const uint32_t hostFlags = MemoryFlags::HostReadableExec(flags);
     int prot = PROT_NONE;
-    if (flags & MemoryFlags::PAGE_READ)  prot |= PROT_READ;
-    if (flags & MemoryFlags::PAGE_WRITE) prot |= PROT_WRITE;
-    if (flags & MemoryFlags::PAGE_EXEC)  prot |= PROT_EXEC;
+    if (hostFlags & MemoryFlags::PAGE_READ)  prot |= PROT_READ;
+    if (hostFlags & MemoryFlags::PAGE_WRITE) prot |= PROT_WRITE;
+    if (hostFlags & MemoryFlags::PAGE_EXEC)  prot |= PROT_EXEC;
 
     char* hostLo = static_cast<char*>(m_hostWindow) + (vaLo - m_guestBase);
     if (mprotect(hostLo, vaHi - vaLo, prot) != 0) {
@@ -174,7 +178,7 @@ bool MemoryManager::MapMemoryImpl_Unlocked(uint64_t vaddr, size_t size,
         return false;
     }
 
-    m_allocations[vaLo] = { vaLo, vaHi - vaLo, flags, tag };
+    m_allocations[vaLo] = { vaLo, vaHi - vaLo, hostFlags, tag };
     m_allocatedBytes += vaHi - vaLo;
     PX5_LOGI(LogCategory::MEMORY,
              "Mapped guest VA 0x%llx-0x%llx (%zu B, prot=%d, tag=%s)",
@@ -278,17 +282,20 @@ bool MemoryManager::ProtectMemory(uint64_t vaddr, size_t size, uint32_t flags) {
         const uint64_t vaLo = RoundDown64(vaddr, kPageSize);
         const uint64_t vaHi = RoundUp64(vaddr + size, kPageSize);
 
+        // v1.38: same never-below-read rule as the map path — a guest
+        // mprotect(PROT_EXEC) must stay fetchable for the JIT.
+        const uint32_t hostFlags = MemoryFlags::HostReadableExec(flags);
         int prot = 0;
-        if (flags & MemoryFlags::PAGE_READ)  prot |= PROT_READ;
-        if (flags & MemoryFlags::PAGE_WRITE) prot |= PROT_WRITE;
-        if (flags & MemoryFlags::PAGE_EXEC)  prot |= PROT_EXEC;
+        if (hostFlags & MemoryFlags::PAGE_READ)  prot |= PROT_READ;
+        if (hostFlags & MemoryFlags::PAGE_WRITE) prot |= PROT_WRITE;
+        if (hostFlags & MemoryFlags::PAGE_EXEC)  prot |= PROT_EXEC;
 
         // Invalidate only when the W bit is being taken OFF an exec range:
         // adding W does not stale the JIT (bytes unchanged); dropping W can
         // only follow a byte change made possible by a prior W, which the
         // map/write paths above already reported. Removing W here (e.g. the
         // guest sealing text) still ends the range's compiled lifetime.
-        const bool writeChanging = (flags & MemoryFlags::PAGE_WRITE) == 0;
+        const bool writeChanging = (hostFlags & MemoryFlags::PAGE_WRITE) == 0;
         if (writeChanging) {
             CollectExecOverlaps_Unlocked(vaLo, vaHi, invalidated);
         }
