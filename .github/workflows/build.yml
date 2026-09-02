@@ -35,6 +35,14 @@ jobs:
       with:
         gradle-version: '8.9'
 
+    # v1.33 hardening: some external editors / AI-studio syncs strip the
+    # executable bit on round-trip (vc33 incident: fetch scripts + gradlew
+    # landed as 100644 and both CI jobs died with exit 126 Permission
+    # denied before Gradle even ran). Re-assert the modes here so the
+    # build is immune to that class of damage.
+    - name: Re-assert executable bits
+      run: chmod +x gradlew tools/fetch_fexcore.sh tools/fetch_adrenotools.sh
+
     - name: Fetch pinned FEXCore sources
       run: ./tools/fetch_fexcore.sh
 

@@ -60,6 +60,11 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      # v1.33 hardening: re-assert exec bits some external syncs strip
+      # (vc33 incident: 100644 fetch scripts -> exit 126 Permission denied).
+      - name: Re-assert executable bits
+        run: chmod +x gradlew tools/fetch_fexcore.sh tools/fetch_adrenotools.sh
+
       - name: Fetch pinned FEXCore sources
         run: ./tools/fetch_fexcore.sh
 
