@@ -48,6 +48,18 @@ static std::string CopyString(JNIEnv* env, jstring s) {
     return out;
 }
 
+// v1.39 — the crash handler (linked on EVERY ABI) now reads the live guest
+// CPU state. The smoke ABI has no FEXCore bridge, so these resolve to the
+// honest "no live guest thread" answers instead of undefined symbols.
+namespace PX5::FexCoreIntegration {
+bool GetLiveGuestState(uint64_t*, uint64_t*, uint64_t*, uint64_t*) {
+    return false;
+}
+bool SetLiveGuestSegmentBase(bool, uint64_t) {
+    return false;
+}
+} // namespace PX5::FexCoreIntegration
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_stringFromJNI(JNIEnv* env, jobject) {
     return env->NewStringUTF(
