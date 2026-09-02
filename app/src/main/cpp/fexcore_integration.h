@@ -27,6 +27,16 @@ struct ExecResult {
     GuestTrapInfo guestTrap;         // populated when the guest trapped
 };
 
+// v1.39 — live guest CPU-state accessors (no locks; safe from the syscall
+// bridge on the guest thread itself and from the crash handler).
+// GetLiveGuestState returns false when no guest thread is executing.
+bool GetLiveGuestState(uint64_t* rip, uint64_t* rsp,
+                       uint64_t* fsBase, uint64_t* gsBase);
+// arch_prctl(ARCH_SET_FS / ARCH_SET_GS) backend: writes the guest-visible
+// segment base into the executing thread's CPUState. Returns false when no
+// guest thread is live (the bridge then reports EINVAL honestly).
+bool SetLiveGuestSegmentBase(bool isFs, uint64_t base);
+
 bool Initialize();                    // Config -> features -> context -> core
 void Shutdown();
 bool IsInitialized();

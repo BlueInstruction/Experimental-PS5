@@ -1,6 +1,7 @@
 #include "crash_handler.h"
 #include "logger.h"
 #include "utils/breadcrumbs.h"
+#include "../fexcore_integration.h"
 
 #include <android/log.h>
 #include <csignal>
@@ -462,6 +463,54 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {   // NOLINT(bugpro
         if (w.mainFd >= 0) {
             long n2 = Breadcrumb::DumpToFd(w.mainFd);
             (void)n2;
+        }
+    }
+
+    // ---- section 5b: live guest execution state (v1.39) -----------------
+    // When the crash fired while FEXCore had a guest thread live, the host
+    // dump alone says almost nothing about WHERE the guest was. The CPU
+    // state frame is plain heap memory (no locks needed to read it), and
+    // the guest window is identity-mapped, so /proc/self/mem reaches the
+    // guest bytes even through execute-only pages. This block is the
+    // difference between "SIGSEGV at 0x0" and "guest was AT instruction X
+    // doing Y".
+    {
+        uint64_t grip = 0, grsp = 0, fsb = 0, gsb = 0;
+        if (FexCoreIntegration::GetLiveGuestState(&grip, &grsp, &fsb, &gsb)) {
+            snprintf(line, sizeof(line),
+                     "guest_state: rip=0x%llx rsp=0x%llx fs_base=0x%llx "
+                     "gs_base=0x%llx\n",
+                     (unsigned long long)grip, (unsigned long long)grsp,
+                     (unsigned long long)fsb, (unsigned long long)gsb);
+            append(line);
+            if (grip) {
+                unsigned char gb[16];
+                memset(gb, 0xCC, sizeof gb);
+                bool gotG = false;
+                const int memFd = open("/proc/self/mem", O_RDONLY);
+                if (memFd >= 0) {
+                    const ssize_t rd = pread(memFd, gb, sizeof gb,
+                                             static_cast<off_t>(grip));
+                    if (rd == static_cast<ssize_t>(sizeof gb)) gotG = true;
+                    close(memFd);
+                }
+                if (gotG) {
+                    char* p = line;
+                    p += snprintf(p, sizeof(line) - 8,
+                                  "guest bytes @rip: ");
+                    for (int b = 0; b < 16; ++b) {
+                        p += snprintf(p, 4, "%02x ", gb[b]);
+                    }
+                    *p++ = '\n';
+                    *p = '\0';
+                    append(line);
+                } else {
+                    append("guest bytes @rip: (unreadable)\n");
+                }
+            }
+            sync();
+        } else {
+            append("guest_state: (no live guest thread)\n");
         }
     }
 

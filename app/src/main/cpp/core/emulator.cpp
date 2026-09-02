@@ -114,8 +114,119 @@ FexCoreIntegration::ExecResult Emulator::ExecuteLoadedGuest() {
         res.error = "host bridge failed for entry/stack";
         return res;
     }
-    // Linux _start expects argc=0 at [rsp]; anonymous reservation pages
-    // are already zeroed, so no explicit arg-write needed.
+
+    // v1.39 — REAL initial stack (FEXLoader ELFCodeLoader::SetupStack
+    // layout). The vc39 session proved the guest RUNS on device, then died
+    // doing an atomic on address 0: [rsp] was a zeroed page, so the PS5 crt
+    // read argc=0/argv=NULL and no auxv at all. Layout mirrors the reference:
+    //   [sp+0]  argc                     (8)
+    //   [sp+8]  argv[0..n-1] pointers    (8 each)
+    //           argv NULL                (8)  -- folded into the "pad" slot
+    //           envp NULL                (8)
+    //           auxv pairs               (16 each, AT_NULL terminated)
+    //           argv[0] string, platform string ("x86_64")
+    //           (16-byte align), AT_RANDOM 16 bytes
+    // ELF facts (AT_PHDR/AT_PHNUM) are read from the MAPPED image header,
+    // not from a cached parse — the report stays honest to what is mapped.
+    {
+        struct AuxPair { uint64_t type; uint64_t val; };
+        std::vector<AuxPair> aux;
+        auto pushAux = [&aux](uint64_t t, uint64_t v) { aux.push_back({t, v}); };
+        constexpr uint64_t AT_NULL_ = 0, AT_PHDR_ = 3, AT_PHENT_ = 4,
+                           AT_PHNUM_ = 5, AT_PAGESZ_ = 6, AT_BASE_ = 7,
+                           AT_FLAGS_ = 8, AT_ENTRY_ = 9, AT_UID_ = 11,
+                           AT_EUID_ = 12, AT_GID_ = 13, AT_EGID_ = 14,
+                           AT_HWCAP_ = 16, AT_CLKTCK_ = 17, AT_SECURE_ = 23,
+                           AT_RANDOM_ = 25, AT_EXECFN_ = 31,
+                           AT_PLATFORM_ = 24, AT_HWCAP2_ = 26;
+        pushAux(AT_UID_,    static_cast<uint64_t>(getuid()));
+        pushAux(AT_EUID_,   static_cast<uint64_t>(geteuid()));
+        pushAux(AT_GID_,    static_cast<uint64_t>(getgid()));
+        pushAux(AT_EGID_,   static_cast<uint64_t>(getegid()));
+        pushAux(AT_CLKTCK_, 100);
+        pushAux(AT_PAGESZ_, static_cast<uint64_t>(pageSize));
+        pushAux(AT_RANDOM_, 0);   // patched below
+        pushAux(AT_SECURE_, 0);
+        pushAux(AT_FLAGS_,  0);
+        pushAux(AT_HWCAP_,  0);   // no x86 feature hints — generic paths
+        pushAux(AT_HWCAP2_, 0);
+        pushAux(AT_PLATFORM_, 0); // patched below
+        pushAux(AT_EXECFN_, 0);   // patched below
+        pushAux(AT_PHENT_,  0x38);
+        pushAux(AT_PHDR_,   0);   // patched below
+        pushAux(AT_PHNUM_,  0);   // patched below
+        pushAux(AT_BASE_,   0);   // no interpreter — PS5 modules are prelinked
+        pushAux(AT_ENTRY_,  m_image.entryPoint);
+        pushAux(AT_NULL_,   0);
+
+        // ELF header facts from the mapped image (e_phoff @0x20, e_phnum
+        // @0x38). AT_PHDR = imageLowVa + e_phoff.
+        uint64_t phoff = 0, phnum = 0;
+        mm.ReadGuestMemory(m_image.imageLowVa + 0x20, &phoff, 8);
+        mm.ReadGuestMemory(m_image.imageLowVa + 0x38, &phnum, 8);
+        for (auto& a : aux) {
+            if (a.type == AT_PHDR_ && phoff)  a.val = m_image.imageLowVa + phoff;
+            if (a.type == AT_PHNUM_ && phnum) a.val = phnum;
+        }
+
+        const char* argv0 = "eboot.bin";
+        const char* platform = "x86_64";
+        const size_t argv0Len  = strlen(argv0) + 1;
+        const size_t platLen   = strlen(platform) + 1;
+
+        size_t ofArgs   = 8;                       // argc
+        size_t ofEnvp   = ofArgs + 8 + 8;          // argv[0] ptr + argv NULL pad
+        size_t ofAux    = ofEnvp + 8;              // envp NULL
+        size_t ofStrA   = ofAux + aux.size() * 16; // argv string
+        size_t ofStrP   = ofStrA + argv0Len;       // platform string
+        size_t total    = ofStrP + platLen;
+        total = (total + 15) & ~size_t{15};
+        size_t ofRandom = total;
+        total += 16;
+
+        // Reserve headroom below the arg block for crt pushes, then build.
+        const uint64_t argBlockVa = (kStackGuestVa - 256 - total) & ~uint64_t{15};
+        void* blockHost = mm.GetHostPointer(argBlockVa);
+        if (!blockHost) {
+            res.error = "guest stack bridge failed for arg block";
+            return res;
+        }
+        auto* base = static_cast<uint8_t*>(blockHost);
+        auto write64 = [base](size_t off, uint64_t v) {
+            memcpy(base + off, &v, 8);
+        };
+        write64(0, 1);                                       // argc = 1
+        write64(ofArgs, argBlockVa + ofStrA);                // argv[0]
+        write64(ofArgs + 8, 0);                              // argv NULL
+        write64(ofEnvp, 0);                                  // envp NULL
+        const uint64_t randomVa = argBlockVa + ofRandom;
+        for (size_t i = 0; i < aux.size(); ++i) {
+            uint64_t val = aux[i].val;
+            if (aux[i].type == AT_RANDOM_)   val = randomVa;
+            if (aux[i].type == AT_PLATFORM_) val = argBlockVa + ofStrP;
+            if (aux[i].type == AT_EXECFN_)   val = argBlockVa + ofStrA;
+            write64(ofAux + i * 16,      aux[i].type);
+            write64(ofAux + i * 16 + 8,  val);
+        }
+        memcpy(base + ofStrA, argv0, argv0Len);
+        memcpy(base + ofStrP, platform, platLen);
+        // AT_RANDOM payload: fixed but non-null (crt treats NULL as fatal).
+        uint64_t rnd[2] = {0x5058352D4F4BULL, 0}; // "PX5-OK" marker + 0
+        memcpy(base + ofRandom, rnd, sizeof rnd);
+
+        spHost = mm.GetHostPointer(argBlockVa);
+        if (!spHost) {
+            res.error = "host bridge failed for initial stack";
+            return res;
+        }
+        PX5_LOGI(LogCategory::CORE,
+                 "Initial guest stack: sp=0x%llx argc=1 auxv=%zu entries "
+                 "AT_ENTRY=0x%llx AT_PHDR=0x%llx phnum=%llu",
+                 (unsigned long long)argBlockVa, aux.size(),
+                 (unsigned long long)m_image.entryPoint,
+                 (unsigned long long)(phoff ? m_image.imageLowVa + phoff : 0),
+                 (unsigned long long)phnum);
+    }
 
     m_running.store(true);
     res = FexCoreIntegration::ExecuteAtHostRip(reinterpret_cast<uint64_t>(ripHost),

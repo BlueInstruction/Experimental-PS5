@@ -1,4 +1,5 @@
 #include "syscalls.h"
+#include "../fexcore_integration.h"
 #include "../memory/memory.h"
 #include "../loader/runtime_linker.h"
 #include "../utils/logger.h"
@@ -206,11 +207,45 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
     case NR_gettid:  { std::lock_guard<std::mutex> lk(g_stateMutex); g_stats.handledCalls++; return 1001; }
     case NR_set_tid_address:
     case NR_rt_sigaction:
-    case NR_rt_sigprocmask:
-    case NR_arch_prctl: {
+    case NR_rt_sigprocmask: {
         std::lock_guard<std::mutex> lk(g_stateMutex);
         g_stats.handledCalls++;
         return 0;
+    }
+
+    case NR_arch_prctl: {
+        // v1.39 — REAL TLS support. The guest crt calls ARCH_SET_FS here
+        // before its first fs:[...] access; the old "return 0" no-op left
+        // fs_cached=0 and every fs-relative address computed 0 (the vc39
+        // session's LDAXR [X11=0] game crash). Also answers ARCH_GET_*.
+        constexpr uint64_t ARCH_SET_GS = 0x1001;
+        constexpr uint64_t ARCH_SET_FS = 0x1002;
+        constexpr uint64_t ARCH_GET_FS = 0x1003;
+        constexpr uint64_t ARCH_GET_GS = 0x1004;
+        uint64_t ret;
+        if (a0 == ARCH_SET_FS || a0 == ARCH_SET_GS) {
+            ret = FexCoreIntegration::SetLiveGuestSegmentBase(
+                      a0 == ARCH_SET_FS, a1) ? 0 : kErrInval;
+        } else if (a0 == ARCH_GET_FS || a0 == ARCH_GET_GS) {
+            void* p = nullptr;
+            uint64_t base = 0;
+            if (!GuestToHost(a1, 8, &p) ||
+                !FexCoreIntegration::GetLiveGuestState(
+                    nullptr, nullptr,
+                    a0 == ARCH_GET_FS ? &base : nullptr,
+                    a0 == ARCH_GET_GS ? &base : nullptr)) {
+                ret = kErrInval;
+            } else {
+                *static_cast<uint64_t*>(p) = base;
+                ret = 0;
+            }
+        } else {
+            // ARCH_CET_STATUS and friends: not provided, honest EINVAL.
+            ret = kErrInval;
+        }
+        std::lock_guard<std::mutex> lk(g_stateMutex);
+        g_stats.handledCalls++;
+        return ret;
     }
 
     case NR_uname: {

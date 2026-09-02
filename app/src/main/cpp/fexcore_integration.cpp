@@ -87,7 +87,9 @@ bool SetConfigKey(const std::string& key, const std::string& value) {
 // The single guest thread currently executing translated code, or null.
 // Foundation embed is one-thread-at-a-time; the fault intercept needs the
 // thread for FEXCore's signal-deferring section guards.
-FEXCore::Core::InternalThreadState* g_execThread = nullptr;
+// v1.39: atomic so the syscall bridge and the crash handler can read it
+// without taking g_mutex (ExecuteAtHostRip holds g_mutex for the whole run).
+std::atomic<FEXCore::Core::InternalThreadState*> g_execThread{nullptr};
 
 // ---------------------------------------------------------------------------
 // SmcManager — the host-layer half of FEXCore's mtrack contract.
@@ -410,7 +412,8 @@ RealSyscallHandler g_syscallHandler;
 // lifetimes (see memory.h contract). The notify arrives WITHOUT the memory
 // mutex held, so taking the invalidation mutex here is safe.
 void OnMemoryCodeInvalidated(uint64_t base, size_t size) {
-    SmcManager::GetInstance().InvalidateGuestCodeRange(g_execThread, base, size);
+    SmcManager::GetInstance().InvalidateGuestCodeRange(
+        g_execThread.load(std::memory_order_acquire), base, size);
 }
 
 // CrashHandler fault intercept — the sharpdroid/FEX question order:
@@ -453,7 +456,7 @@ bool GuestTrapRouter(int sig, void* siginfoVoid, void* uctxVoid) {
     auto* uctx = static_cast<ucontext_t*>(uctxVoid);
     if (!uctx) return false;
 
-    auto* thread = g_execThread;
+    auto* thread = g_execThread.load(std::memory_order_acquire);
     if (!thread || !thread->CurrentFrame) return false;
     auto* frame = thread->CurrentFrame;
 
@@ -654,6 +657,28 @@ void Shutdown() {
 bool IsInitialized() {
     std::lock_guard<std::mutex> lock(g_mutex);
     return g_context != nullptr;
+}
+
+bool GetLiveGuestState(uint64_t* rip, uint64_t* rsp,
+                       uint64_t* fsBase, uint64_t* gsBase) {
+    auto* t = g_execThread.load(std::memory_order_acquire);
+    if (!t || !t->CurrentFrame) return false;
+    const auto& st = t->CurrentFrame->State;
+    if (rip)    *rip    = st.rip;
+    if (rsp)    *rsp    = st.gregs[FEXCore::X86State::REG_RSP];
+    if (fsBase) *fsBase = st.fs_cached;
+    if (gsBase) *gsBase = st.gs_cached;
+    return true;
+}
+
+bool SetLiveGuestSegmentBase(bool isFs, uint64_t base) {
+    auto* t = g_execThread.load(std::memory_order_acquire);
+    if (!t || !t->CurrentFrame) return false;
+    auto& st = t->CurrentFrame->State;
+    if (isFs) st.fs_cached = base; else st.gs_cached = base;
+    PX5_LOGI(LogCategory::FEX, "arch_prctl: guest %s base = 0x%llx",
+             isFs ? "FS" : "GS", (unsigned long long)base);
+    return true;
 }
 
 ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop) {
@@ -897,7 +922,7 @@ std::string GetEngineCounters() {
              (unsigned)g_lastGuestTrap.trapNo,
              (unsigned long long)g_lastGuestTrap.guestRip,
              mm.GetWindowInfoString().c_str(),
-             g_execThread ? "active" : "idle");
+             g_execThread.load(std::memory_order_relaxed) ? "active" : "idle");
     return buf;
 }
 

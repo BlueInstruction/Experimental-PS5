@@ -85,7 +85,7 @@ Steps:
 ```bash
 ./tools/fetch_fexcore.sh                       # materializes $PX5_FEXCORE_ROOT
 export PX5_FEXCORE_ROOT="$PWD/../deps/FEX"     # default location of step 1
-gradle assembleRelease --no-daemon             # produces release APK (both ABIs, debug-keystore signed; v1.38 CI artifact)
+gradle assembleRelease --no-daemon             # produces release APK (both ABIs, debug-keystore signed; v1.39 CI artifact)
 ```
 
 The CMake layer fails fast with an explanatory error if
@@ -149,6 +149,7 @@ CI job).
 | DYN-style eboot loading (PS5 0xFE10 inner ELF) | implemented in-tree (v1.32; v1.34 two-phase load: map RWX → copy → seal to ELF flags, fixing the vc34 write-to-RO-text ACCERR) | vc35 device session: the game's OWN code path (guest crash with RIP inside the game text range or its first real syscall) + foundation 5b/6/10 `[PASS]` |
 | Game boot UX | v1.35: the game's own cover card leads the 0→100 boot pipeline; failure = symbolic title id + one clean centered card, the loader's detailed reason lives only in the Logs screen; Eden-style in-game menu | vc35 device session: cover renders from the library entry, boot overlay completes without a diagnostics wall |
 | PS5 XOM text segments (PF_X, no PF_R) | v1.38: loader/memory seal rule `HostReadableExec` — executable guest pages are never sealed below-read (AArch64 refuses loads from X-only pages; FEXCore's decoder must fetch bytes); W absence honored | vc39 device session: execution probe passes the eboot entry byte fetch (no SIGSEGV si_code=2 at DecodeInstructionsAtEntry) and the guest reports its own crash/exit |
+| Guest process environment (initial stack + TLS) | v1.39: FEXLoader-style initial guest stack (argc/argv/envp/auxv incl. AT_PHDR/AT_ENTRY/AT_RANDOM read from the mapped image); real `arch_prctl` (ARCH_SET_FS/GS into the live CPUState — the old no-op left fs=0 and fs-relative atomics hit address 0, the vc39 LDAXR[0] crash); crash report now carries guest_state (rip/rsp/fs/gs + guest bytes @rip) | vc40 device session: the game's crt proceeds past early init (no null atomic at dispatch; either clean run, guest syscall, or a NEW named guest RIP) |
 | Audio/input | functional wrappers, atomics-honest input | on-device gamepad echo test |
 | Driver switching (Turnip ↔ vendor) | v1.36: slot manager + adrenotools hook; the importer bundles the package's non-public platform DT_NEEDED deps (libhardware.so class) into the slot dir and the driver namespaces search the platform lib dirs as fallback | vc37 device session: the imported Turnip v26.x pack reports `driverVerified=yes` with its soname mapped in /proc/self/maps |
 | UI shell | Steam-Deck-style Compose shell, functional preferences | no dead buttons; each control mutates a real setting |
