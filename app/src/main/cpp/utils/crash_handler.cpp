@@ -487,12 +487,27 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {   // NOLINT(bugpro
                 unsigned char gb[16];
                 memset(gb, 0xCC, sizeof gb);
                 bool gotG = false;
-                const int memFd = open("/proc/self/mem", O_RDONLY);
-                if (memFd >= 0) {
-                    const ssize_t rd = pread(memFd, gb, sizeof gb,
-                                             static_cast<off_t>(grip));
-                    if (rd == static_cast<ssize_t>(sizeof gb)) gotG = true;
-                    close(memFd);
+                // v1.40 — the identity guest window IS this process's own
+                // mapping, so the same pure-syscall read that captured the
+                // JIT code bytes works here. v1.39 used /proc/self/mem
+                // pread only, and API 36 SELinux (untrusted_app) denies
+                // opening that file — both vc40 reports degraded to
+                // "(unreadable)" even though the bytes were one
+                // process_vm_readv away. Keep the mem-file fallback for
+                // environments that allow it.
+                struct iovec lG { gb, sizeof gb };
+                struct iovec rG { reinterpret_cast<void*>(grip), sizeof gb };
+                const long prG = process_vm_readv(getpid(), &lG, 1, &rG, 1, 0);
+                if (prG == static_cast<long>(sizeof gb)) {
+                    gotG = true;
+                } else {
+                    const int memFd = open("/proc/self/mem", O_RDONLY);
+                    if (memFd >= 0) {
+                        const ssize_t rd = pread(memFd, gb, sizeof gb,
+                                                 static_cast<off_t>(grip));
+                        if (rd == static_cast<ssize_t>(sizeof gb)) gotG = true;
+                        close(memFd);
+                    }
                 }
                 if (gotG) {
                     char* p = line;

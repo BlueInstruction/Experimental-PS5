@@ -15,6 +15,10 @@ namespace PX5 {
 struct LoadedElfImage {
     struct Segment {
         uint64_t vaddr;
+        uint64_t fileOffset = 0; // v1.40: p_offset in the parsed buffer
+                                 // (rebuilt-buffer offset for SELF-extracted
+                                 // inner ELFs) — decides where the phdr
+                                 // table bytes actually live in VA terms
         size_t   filesz;
         size_t   memsz;
         uint32_t flags;         // MemoryFlags bits
@@ -29,6 +33,26 @@ struct LoadedElfImage {
                                               // container (extracted inner
                                               // ELF) or was detected as SELF
     std::string          error;
+
+    // v1.40 — parse-truth header facts. The vc40 device session proved the
+    // mapped image is segment CONTENT only: for SELF-extracted inner ELFs
+    // the header/phdr table never enters guest VA, so re-reading them from
+    // the map returned text bytes (AT_PHDR=0x4c1e... garbage). Anything
+    // that needs ELF facts reads them from HERE now.
+    uint64_t             phoff = 0;
+    uint32_t             phnum = 0;
+    uint32_t             phentsize = 0;
+    uint64_t             auxPhdrVa = 0;      // guest VA where the phdr table
+                                             // is readable (copy page or
+                                             // imageLowVa when covered)
+
+    // v1.40 — PT_TLS as parsed (ORBIS kernel contract: FSBASE is set
+    // before entry from this; the guest crt never issues arch_prctl).
+    bool                 hasTls = false;
+    uint64_t             tlsVa = 0;          // guest VA of the TLS init image
+    size_t               tlsFilesz = 0;
+    size_t               tlsMemsz = 0;
+    uint64_t             tlsAlign = 0;
 
     size_t TotalMemSize() const { return imageHighVa - imageLowVa; }
 };

@@ -48,7 +48,13 @@ void ResetForChild();
 
 // Execute guest code that is ALREADY mapped inside the PX5 memory window.
 // Both pointers are HOST-side values bridged through MemoryManager.
-ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop);
+// v1.40: initialFsBase pre-sets the guest FSBASE before dispatch — the
+// ORBIS kernel contract. PS5 crt code never issues arch_prctl (Linux is
+// the only guest family that sets TLS that way); its very first block
+// dereferences fs:[...] and expects the kernel to have pointed FS at the
+// thread's TCB already. 0 = leave FSBASE unset (fixture guests).
+ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
+                            uint64_t initialFsBase = 0);
 
 // Classic arithmetic conformance blob (kept for the existing UI button).
 bool RunConformanceTest();

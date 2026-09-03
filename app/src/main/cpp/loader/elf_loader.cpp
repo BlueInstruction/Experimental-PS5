@@ -218,6 +218,14 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
              (unsigned long long)ehdr.entry, ehdr.phnum);
     Breadcrumb::Set("elf: parse ok phnum=%u", (unsigned)ehdr.phnum);
 
+    // v1.40 — parse-truth facts ride on the image struct. Consumers (auxv
+    // builder, TLS setup) must never re-derive them from mapped memory:
+    // for SELF-extracted images the header/phdr table is NOT part of any
+    // PT_LOAD mapping (the vc40 session's AT_PHDR garbage proved it).
+    out.phoff     = ehdr.phoff;
+    out.phnum     = ehdr.phnum;
+    out.phentsize = ehdr.phentsize;
+
     // v1.32 — THE GAME-LOAD BLOCKER FIX (vc32 device evidence: six boot
     // attempts, all identical). Real PS5 eboot.bin inner ELFs are SONY
     // DYN-style: e_type 0xFE10 (65040) with RELATIVE p_vaddr values — the
@@ -254,6 +262,49 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
         Elf64PhdrRaw ph{};
         memcpy(&ph, data + off, sizeof(ph));
 
+        // v1.40 — full phdr table evidence. 14 phdrs but only PT_LOADs
+        // were ever named in the log; PT_TLS/PT_DYNAMIC (the TLS and the
+        // dynamic sections a real crt needs) stayed invisible. One INFO
+        // line per phdr — the next session reads the image anatomy
+        // directly instead of inferring it from crash addresses.
+        PX5_LOGI(LogCategory::LOADER,
+                 "  phdr[%2u] type=0x%-6X flags=0x%X off=0x%-6llx va=0x%-6llx "
+                 "filesz=%-7llu memsz=%-7llu align=0x%llx",
+                 (unsigned)i, ph.type, ph.flags,
+                 (unsigned long long)ph.offset,
+                 (unsigned long long)ph.vaddr,
+                 (unsigned long long)ph.filesz,
+                 (unsigned long long)ph.memsz,
+                 (unsigned long long)ph.align);
+
+        // v1.40 — ORBIS kernel contract inputs: the TLS init image and
+        // the dynamic table, parsed from the same phdr loop. FSBASE is
+        // pre-set from PT_TLS before dispatch (the guest crt never calls
+        // arch_prctl — vc40 logged zero arch_prctl lines with fs_base=0).
+        constexpr uint32_t PT_DYNAMIC_ = 2;
+        constexpr uint32_t PT_TLS_     = 7;
+        if (ph.type == PT_TLS_) {
+            out.hasTls    = true;
+            out.tlsVa     = loadBase + ph.vaddr;
+            out.tlsFilesz = static_cast<size_t>(ph.filesz);
+            out.tlsMemsz  = static_cast<size_t>(ph.memsz);
+            out.tlsAlign  = ph.align ? ph.align : 16;
+            PX5_LOGI(LogCategory::LOADER,
+                     "  PT_TLS: va=0x%llx filesz=%zu memsz=%zu align=0x%llx "
+                     "(FSBASE will be pre-set for dispatch)",
+                     (unsigned long long)out.tlsVa, out.tlsFilesz,
+                     out.tlsMemsz, (unsigned long long)out.tlsAlign);
+            continue;
+        }
+        if (ph.type == PT_DYNAMIC_) {
+            PX5_LOGI(LogCategory::LOADER,
+                     "  PT_DYNAMIC: va=0x%llx filesz=%llu (parsed, not yet "
+                     "processed)",
+                     (unsigned long long)(loadBase + ph.vaddr),
+                     (unsigned long long)ph.filesz);
+            continue;
+        }
+
         if (ph.type != PT_LOAD) continue;
         if (ph.memsz == 0)      continue;
 
@@ -262,6 +313,9 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
                         (unsigned long long)ph.memsz);
         LoadedElfImage::Segment seg{};
         seg.vaddr  = loadBase + ph.vaddr;
+        seg.fileOffset = ph.offset;   // v1.40 — where this payload sits in
+                                      // the parsed buffer (rebuilt-buffer
+                                      // offset for SELF-extracted images)
         seg.filesz = static_cast<size_t>(ph.filesz);
         seg.memsz  = static_cast<size_t>(ph.memsz);
         seg.flags  = ProtFromFlags(ph.flags);
@@ -398,7 +452,113 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
                  origin.c_str(), out.error.c_str());
         return false;
     }
-    mem.SetProgramBreak(out.imageHighVa);
+
+    // v1.40 — the phdr table must be readable in GUEST VA (the AT_PHDR
+    // auxv contract; a crt that honors AT_PHDR iterates it for TLS and
+    // module facts). SELF-extracted inner ELFs carry the table only in
+    // the host-side rebuild buffer — mapped PT_LOADs start at segment
+    // payloads — so when no segment maps the header's file range, map a
+    // one-page copy just above the image (the brk area) and point AT_PHDR
+    // there. Plain real-ELF layouts keep the header inside PT_LOAD#0
+    // (p_offset=0) and need no copy.
+    uint64_t brkStart = (out.imageHighVa + 4095) & ~uint64_t{4095};
+    {
+        const uint64_t hdrBytes = out.phoff +
+            static_cast<uint64_t>(out.phnum) * out.phentsize;
+        // v1.40 fix-on-fix: coverage must be decided in FILE-OFFSET space,
+        // not VA space. The vc40 game image's PT_LOAD#0 spans
+        // [0x140000000..0x1402e8000) and a naive VA check would claim
+        // loadBase+phoff=0x140000040 is "covered" — while the bytes at
+        // that VA are text (the segment maps file offset dataPos>0, the
+        // header lives at rebuilt-buffer offset 0x40 and is mapped
+        // NOWHERE). The header bytes are guest-readable iff some segment
+        // maps the file range [phoff, phoff+hdrBytes); the VA follows
+        // from that segment's (fileOffset -> vaddr) translation.
+        bool covered = false;
+        uint64_t coveredVa = 0;
+        for (const auto& s : out.segments) {
+            if (out.phoff >= s.fileOffset &&
+                hdrBytes > 0 &&
+                out.phoff + hdrBytes <= s.fileOffset + s.filesz) {
+                covered = true;
+                coveredVa = s.vaddr + (out.phoff - s.fileOffset);
+                break;
+            }
+        }
+        if (covered) {
+            out.auxPhdrVa = coveredVa;
+            PX5_LOGI(LogCategory::LOADER,
+                     "  phdr table readable inside mapped segment — "
+                     "AT_PHDR=0x%llx",
+                     (unsigned long long)out.auxPhdrVa);
+        } else {
+            constexpr uint64_t kPageSize_ = 4096;
+            const uint64_t hdrPageVa =
+                (out.imageHighVa + kPageSize_ - 1) & ~(kPageSize_ - 1);
+            bool copyPlaced = false;
+            if (hdrBytes > kPageSize_) {
+                PX5_LOGW(LogCategory::LOADER,
+                         "  phdr table (%llu bytes) exceeds one page — "
+                         "AT_PHDR copy skipped (crt auxv consumers may "
+                         "fail; image stays honest)",
+                         (unsigned long long)hdrBytes);
+            } else if (!mem.MapMemory(hdrPageVa, kPageSize_,
+                                      MemoryFlags::PAGE_READ,
+                                      "phdr_table_copy")) {
+                PX5_LOGW(LogCategory::LOADER,
+                         "  phdr copy map FAILED at 0x%llx — AT_PHDR left 0 "
+                         "rather than naming unmapped memory",
+                         (unsigned long long)hdrPageVa);
+            } else {
+                void* h = mem.GetHostPointer(hdrPageVa);
+                if (h) memcpy(h, data, static_cast<size_t>(hdrBytes));
+                // brk starts ABOVE the copy page — a later brk allocation
+                // must never overwrite the table the auxv points at.
+                brkStart = hdrPageVa + kPageSize_;
+                copyPlaced = true;
+                PX5_LOGI(LogCategory::LOADER,
+                         "  phdr table copy mapped at 0x%llx (%llu bytes, "
+                         "R) — AT_PHDR=0x%llx",
+                         (unsigned long long)hdrPageVa,
+                         (unsigned long long)hdrBytes,
+                         (unsigned long long)(hdrPageVa + out.phoff));
+            }
+            // v1.40 honesty rule: a copy that could not be placed leaves
+            // AT_PHDR at 0 (an auxv entry the crt can test) instead of a
+            // pointer into unmapped memory it would silently dereference.
+            out.auxPhdrVa = copyPlaced ? hdrPageVa + out.phoff : 0;
+        }
+    }
+
+    // v1.40 — entry-bytes evidence BEFORE dispatch. The vc40 crash chain
+    // (LDAR w3,[x11] x11=0) was interpreted blind: nobody ever saw the
+    // first guest instruction. 32 bytes at entry, read through the
+    // already-mapped image — if this line shows sane x86-64 code the
+    // mapping is right; garbage bytes indict the extraction instead.
+    {
+        uint8_t entryBytes[32] {};
+        if (mem.ReadGuestMemory(out.entryPoint, entryBytes,
+                                sizeof entryBytes)) {
+            char hex[3 * 32 + 1];
+            size_t o = 0;
+            for (size_t b = 0; b < sizeof entryBytes; ++b)
+                o += static_cast<size_t>(snprintf(hex + o, sizeof(hex) - o,
+                                                  "%s%02X", b ? " " : "",
+                                                  entryBytes[b]));
+            PX5_LOGI(LogCategory::LOADER,
+                     "  entry bytes @0x%llx: %s",
+                     (unsigned long long)out.entryPoint, hex);
+        } else {
+            PX5_LOGW(LogCategory::LOADER,
+                     "  entry bytes @0x%llx: UNREADABLE through the memory "
+                     "manager (mapping table and host bridge disagree?)",
+                     (unsigned long long)out.entryPoint);
+        }
+    }
+
+    // v1.40 — brk starts above the phdr copy page (brkStart was raised
+    // by the copy branch above; covered images keep the classic value).
+    mem.SetProgramBreak(brkStart);
 
     PX5_LOGI(LogCategory::LOADER,
              "ELF loaded honestly: image=[0x%llx..0x%llx] entry=0x%llx",

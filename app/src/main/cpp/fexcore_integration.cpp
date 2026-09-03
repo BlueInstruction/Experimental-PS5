@@ -681,7 +681,8 @@ bool SetLiveGuestSegmentBase(bool isFs, uint64_t base) {
     return true;
 }
 
-ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop) {
+ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
+                            uint64_t initialFsBase) {
     std::lock_guard<std::mutex> lock(g_mutex);
     ExecResult res{};
     if (!g_context) {
@@ -749,6 +750,23 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop) {
              "(v1.24 CPU-gate fix — DecodeInstructionsAtEntry null-segment "
              "crash eliminated)",
              frame->State.cs_idx);
+
+    // v1.40 — ORBIS kernel contract: FSBASE is pre-set before entry.
+    // The vc40 session ran the REAL PS5 eboot and its first guest block
+    // died on LDAR w3,[x11] with x11=0 (SIGSEGV si_addr=0x0) while the
+    // guest_state section showed fs_base=0x0 gs_base=0x0 and the log
+    // carried ZERO arch_prctl lines — PS5 crt code never sets TLS via
+    // Linux arch_prctl; on the console SceModuleMgr points FS at the
+    // thread's TCB before the entry instruction ever runs. FEX's own
+    // loader cannot be copied here: Linux guests (FEXLoader) do this in
+    // their ld.so instead. The TCB itself is built by ExecuteLoadedGuest.
+    if (initialFsBase) {
+        frame->State.fs_cached = initialFsBase;
+        PX5_LOGI(LogCategory::FEX,
+                 "Guest FSBASE pre-set: 0x%llx (ORBIS kernel contract, "
+                 "v1.40 TLS fix)",
+                 (unsigned long long)initialFsBase);
+    }
 
     g_execThread = thread;
     SmcManager::GetInstance().SetExecThread(thread);

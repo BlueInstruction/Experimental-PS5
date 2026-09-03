@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <algorithm>
 
 namespace PX5 {
 
@@ -159,14 +160,19 @@ FexCoreIntegration::ExecResult Emulator::ExecuteLoadedGuest() {
         pushAux(AT_ENTRY_,  m_image.entryPoint);
         pushAux(AT_NULL_,   0);
 
-        // ELF header facts from the mapped image (e_phoff @0x20, e_phnum
-        // @0x38). AT_PHDR = imageLowVa + e_phoff.
-        uint64_t phoff = 0, phnum = 0;
-        mm.ReadGuestMemory(m_image.imageLowVa + 0x20, &phoff, 8);
-        mm.ReadGuestMemory(m_image.imageLowVa + 0x38, &phnum, 8);
+        // v1.40 — ELF facts from PARSE TRUTH (the loader stores them in
+        // the image struct). The v1.39 approach re-read the mapped header
+        // at imageLowVa+0x20/+0x38 — but SELF-extracted images map
+        // segment CONTENT only, so those reads returned TEXT BYTES and
+        // the vc40 log showed the lie in plain sight:
+        //   AT_PHDR=0x4c1e73018942ab1d phnum=8412870648271685644
+        // AT_PHDR points at the loader's phdr-table copy in guest VA
+        // (auxPhdrVa) — a real mapping the crt can actually iterate.
+        const uint64_t atPhdr = m_image.auxPhdrVa;
+        const uint64_t atPhnum = m_image.phnum;
         for (auto& a : aux) {
-            if (a.type == AT_PHDR_ && phoff)  a.val = m_image.imageLowVa + phoff;
-            if (a.type == AT_PHNUM_ && phnum) a.val = phnum;
+            if (a.type == AT_PHDR_ && atPhdr)  a.val = atPhdr;
+            if (a.type == AT_PHNUM_ && atPhnum) a.val = atPhnum;
         }
 
         const char* argv0 = "eboot.bin";
@@ -224,13 +230,76 @@ FexCoreIntegration::ExecResult Emulator::ExecuteLoadedGuest() {
                  "AT_ENTRY=0x%llx AT_PHDR=0x%llx phnum=%llu",
                  (unsigned long long)argBlockVa, aux.size(),
                  (unsigned long long)m_image.entryPoint,
-                 (unsigned long long)(phoff ? m_image.imageLowVa + phoff : 0),
-                 (unsigned long long)phnum);
+                 (unsigned long long)atPhdr,
+                 (unsigned long long)atPhnum);
+    }
+
+    // v1.40 — kernel-side TLS/TCB setup, the ORBIS entry contract. The
+    // vc40 session proved the real eboot's first guest block reads
+    // through FS with the base still zero (LDAR w3,[x11], x11=0,
+    // fs_base=0x0, zero arch_prctl calls): PS5 binaries expect the
+    // "kernel" to have built the TCB and pointed FS at it BEFORE the
+    // entry instruction. FreeBSD/ORBIS amd64 layout (variant II):
+    //   [TLS init image (PT_TLS, filesz copied / memsz zeroed)]
+    //   [pad to 16]
+    //   [TCB: tp+0 = tp (tcb_self), tp+8 = dtv, tp+16 = pthread (null)]
+    //   [dtv: [0]=1 count/gen, [1]=static block, [2]=0 terminator]
+    // tp (the TCB address) becomes the guest FSBASE.
+    uint64_t guestFsBase = 0;
+    {
+        constexpr uint64_t kTlsGuestVa = 0x147fe0000ULL; // below the stack
+        const size_t tlsRegionSize = 0x10000;
+        if (!mm.MapMemory(kTlsGuestVa, tlsRegionSize,
+                          MemoryFlags::PAGE_READ | MemoryFlags::PAGE_WRITE,
+                          "guest_tls")) {
+            res.error = "guest TLS block map failed at 0x147fe0000";
+            return res;
+        }
+
+        const size_t imageBytes = m_image.hasTls
+            ? std::min(m_image.tlsMemsz, size_t{0xF000}) : 0;
+        const size_t imageAligned = imageBytes ? (imageBytes + 15) & ~size_t{15} : 0;
+        const uint64_t tcbVa = kTlsGuestVa + imageAligned;
+        const uint64_t dtvVa = tcbVa + 32;
+
+        auto* tlsHost = static_cast<uint8_t*>(mm.GetHostPointer(kTlsGuestVa));
+        if (!tlsHost) {
+            res.error = "host bridge failed for guest TLS block";
+            return res;
+        }
+        if (m_image.hasTls && imageBytes) {
+            if (!mm.ReadGuestMemory(m_image.tlsVa, tlsHost, m_image.tlsFilesz)) {
+                PX5_LOGW(LogCategory::CORE,
+                         "Guest TLS init image read FAILED at 0x%llx — TCB "
+                         "still built, PT_TLS content left zeroed",
+                         (unsigned long long)m_image.tlsVa);
+            }
+            // memsz > filesz tail stays zeroed (anonymous mapping).
+        }
+        auto write64At = [tlsHost](uint64_t off, uint64_t v) {
+            memcpy(tlsHost + off, &v, 8);
+        };
+        write64At(imageAligned + 0,  tcbVa);        // tcb_self = tp
+        write64At(imageAligned + 8,  dtvVa);        // tcb_dtv
+        write64At(imageAligned + 16, 0);            // tcb_pthread (null)
+        write64At(imageAligned + 32, 1);            // dtv[0] = count/gen
+        write64At(imageAligned + 40, kTlsGuestVa);  // dtv[1] = static block
+        write64At(imageAligned + 48, 0);            // dtv[2] = terminator
+        guestFsBase = tcbVa;
+        PX5_LOGI(LogCategory::CORE,
+                 "Guest TLS: fs_base=0x%llx tcb=0x%llx dtv=0x%llx "
+                 "(PT_TLS %s: va=0x%llx filesz=%zu memsz=%zu)",
+                 (unsigned long long)guestFsBase,
+                 (unsigned long long)tcbVa, (unsigned long long)dtvVa,
+                 m_image.hasTls ? "present" : "absent — bare TCB",
+                 (unsigned long long)m_image.tlsVa,
+                 m_image.tlsFilesz, m_image.tlsMemsz);
     }
 
     m_running.store(true);
     res = FexCoreIntegration::ExecuteAtHostRip(reinterpret_cast<uint64_t>(ripHost),
-                                               reinterpret_cast<uint64_t>(spHost));
+                                               reinterpret_cast<uint64_t>(spHost),
+                                               guestFsBase);
     m_running.store(false);
 
     // Release the stack region again for reproducibility across runs.
