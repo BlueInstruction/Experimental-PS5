@@ -14,6 +14,7 @@
 #include "utils/logger.h"
 #include "utils/breadcrumbs.h"
 #include "utils/crash_handler.h"
+#include "utils/evidence.h"
 
 #include <unistd.h>
 #include <cstdio>
@@ -64,6 +65,13 @@ bool Emulator::LoadExecutable(const std::string& path, bool isSelf) {
     // Stage breadcrumbs: a crash anywhere below now names the exact stage
     // in the dump (the 2026-08-30 eboot.bin death left the stage unknown).
     Breadcrumb::Set("load: enter isSelf=%d", isSelf ? 1 : 0);
+    // v1.41 — this is the REAL-GUEST entry point (the UI only calls it for
+    // a user-selected game executable). From here every loader line is
+    // tagged [GUEST] and the evidence ledger records the chain. The
+    // foundation suite flips the flag back to SYNTH at its own entry.
+    Evidence::SetSessionRealGuest(true);
+    if (!CrashHandler::LogsDir().empty())
+        Evidence::SetLedgerPath(CrashHandler::LogsDir() + "/px5_evidence.log");
     // Lazy memory init keeps legacy JNI callers working without UI flow.
     if (!MemoryManager::GetInstance().Initialize()) {
         Breadcrumb::Set("load: memmgr init FAILED");
@@ -84,8 +92,16 @@ bool Emulator::LoadExecutable(const std::string& path, bool isSelf) {
     const bool ok = isSelf ? ElfLoader::LoadSelf(path, m_image)
                            : ElfLoader::LoadElfFile(path, m_image);
     Breadcrumb::Set("load: done ok=%d", ok ? 1 : 0);
-    PX5_LOGI(LogCategory::CORE, "%s load: %s",
+    PX5_LOGI(LogCategory::CORE, "[GUEST] %s load: %s",
              isSelf ? "SELF" : "ELF", ok ? "OK" : m_image.error.c_str());
+    if (ok) {
+        // v1.41 — ledger: the load event references the hash the loader
+        // just bound, so every later ledger line chains to the file.
+        Evidence::AppendLedger("load ok path=%s entry=0x%llx segs=%zu",
+                               path.c_str(),
+                               (unsigned long long)m_image.entryPoint,
+                               m_image.segments.size());
+    }
     return ok;
 }
 
@@ -226,7 +242,7 @@ FexCoreIntegration::ExecResult Emulator::ExecuteLoadedGuest() {
             return res;
         }
         PX5_LOGI(LogCategory::CORE,
-                 "Initial guest stack: sp=0x%llx argc=1 auxv=%zu entries "
+                 "[GUEST] Initial guest stack: sp=0x%llx argc=1 auxv=%zu entries "
                  "AT_ENTRY=0x%llx AT_PHDR=0x%llx phnum=%llu",
                  (unsigned long long)argBlockVa, aux.size(),
                  (unsigned long long)m_image.entryPoint,
@@ -287,7 +303,7 @@ FexCoreIntegration::ExecResult Emulator::ExecuteLoadedGuest() {
         write64At(imageAligned + 48, 0);            // dtv[2] = terminator
         guestFsBase = tcbVa;
         PX5_LOGI(LogCategory::CORE,
-                 "Guest TLS: fs_base=0x%llx tcb=0x%llx dtv=0x%llx "
+                 "[GUEST] Guest TLS: fs_base=0x%llx tcb=0x%llx dtv=0x%llx "
                  "(PT_TLS %s: va=0x%llx filesz=%zu memsz=%zu)",
                  (unsigned long long)guestFsBase,
                  (unsigned long long)tcbVa, (unsigned long long)dtvVa,
@@ -297,10 +313,29 @@ FexCoreIntegration::ExecResult Emulator::ExecuteLoadedGuest() {
     }
 
     m_running.store(true);
+    // v1.41 — the dispatch is on the record before it happens: RIP/SP/FS
+    // land in the ledger chained to the bound image hash.
+    Evidence::AppendLedger(
+        "dispatch enter rip=0x%llx sp=0x%llx fs_base=0x%llx",
+        (unsigned long long)m_image.entryPoint,
+        (unsigned long long)kStackGuestVa - 256,
+        (unsigned long long)guestFsBase);
     res = FexCoreIntegration::ExecuteAtHostRip(reinterpret_cast<uint64_t>(ripHost),
                                                reinterpret_cast<uint64_t>(spHost),
                                                guestFsBase);
     m_running.store(false);
+    // v1.41 — the result (clean exit, guest trap or host crash escape) is
+    // a ledger event too: the reviewer reads the whole session from one
+    // file without trusting the verbose log's interpretation.
+    Evidence::AppendLedger(
+        "dispatch result started=%d exit=%llu clean=%d error=%s",
+        res.started ? 1 : 0, (unsigned long long)res.exitCode,
+        res.error.empty() ? 1 : 0,
+        res.error.empty() ? "none" : res.error.c_str());
+    PX5_LOGI(LogCategory::CORE,
+             "[GUEST] dispatch result: started=%d exitCode=%llu %s",
+             res.started ? 1 : 0, (unsigned long long)res.exitCode,
+             res.error.empty() ? "(no error text)" : res.error.c_str());
 
     // Release the stack region again for reproducibility across runs.
     mm.UnmapMemory(stackLo, pageSize * 16);
@@ -341,8 +376,17 @@ std::string Emulator::SelfTestFoundation() {
     std::vector<std::string> lines;
     const char* verdict = "FAIL";
 
+    // v1.41 — the trust review demanded the log itself separate synthetic
+    // test activity from real-guest activity. This suite is SYNTHETIC by
+    // definition: fixtures built into the app, never game code. Every line
+    // it logs carries [SYNTH]; the real-guest path (LoadExecutable) flips
+    // the shared flag to [GUEST].
+    Evidence::SetSessionRealGuest(false);
+    if (!CrashHandler::LogsDir().empty())
+        Evidence::SetLedgerPath(CrashHandler::LogsDir() + "/px5_evidence.log");
+
     auto push = [&](const std::string& s){ lines.push_back(s);
-        PX5_LOGI(LogCategory::CORE, "%s", s.c_str()); };
+        PX5_LOGI(LogCategory::CORE, "[SYNTH] %s", s.c_str()); };
 
     bool ok = true, fatal = false;
 
@@ -740,6 +784,21 @@ std::string Emulator::SelfTestFoundation() {
                  (unsigned long long)gst.resolvedHle);
         push(gline);
         if (!gateOk) goto done;
+    }
+
+    // --- Step 11: the evidence primitive itself (v1.41). The foundation
+    // suite's SHA-256 must be proven on-device BEFORE any image hash can
+    // be trusted: FIPS 180-4 known-answer vectors, including the 55-byte
+    // padding boundary and a full second block.
+    {
+        const bool shaOk = Evidence::SelfTest();
+        char sline[128];
+        snprintf(sline, sizeof(sline),
+                 "%s 11. SHA-256 evidence primitive | FIPS 180-4 KAT "
+                 "(empty/abc/55B/64B)",
+                 shaOk ? "[PASS]" : "[FAIL]");
+        push(sline);
+        if (!shaOk) { ok = false; goto done; }
     }
 
     verdict = "PASS";

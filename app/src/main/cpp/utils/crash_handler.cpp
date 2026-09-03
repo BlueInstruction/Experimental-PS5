@@ -1,6 +1,7 @@
 #include "crash_handler.h"
 #include "logger.h"
 #include "utils/breadcrumbs.h"
+#include "utils/evidence.h"
 #include "../fexcore_integration.h"
 
 #include <android/log.h>
@@ -521,6 +522,69 @@ void WriteCrashReport(int sig, siginfo_t* info, void* uctx) {   // NOLINT(bugpro
                     append(line);
                 } else {
                     append("guest bytes @rip: (unreadable)\n");
+                }
+
+                // ---- v1.41: guest RIP ATTRIBUTION + off-device verify
+                // pointer. The trust review ruled that a crash inside the
+                // guest means nothing by itself — it must name WHERE in the
+                // game the fault fired, in terms the user can check against
+                // their own file without any agent in the loop. If the
+                // RIP falls inside the bound image, this names the PT_LOAD
+                // (same index the loader logged), the offset within it, and
+                // the FILE offset of the faulting bytes in the hashed byte
+                // stream; the "verify:" line is the exact procedure:
+                // open the file at file_off and compare the guest bytes.
+                // (Static BSS, not stack: the handler frame stays small and
+                // the handler is serialized by g_inHandler.)
+                static Evidence::ImageIdentity s_img;
+                if (Evidence::GetImage(s_img)) {
+                    const char* streamName =
+                        s_img.stream == Evidence::Stream::InnerElf
+                            ? "inner_elf" : "file";
+                    bool inSeg = false;
+                    for (int si = 0; si < s_img.segCount; ++si) {
+                        const auto& sg = s_img.segs[si];
+                        if (grip >= sg.va && grip < sg.va + sg.memsz) {
+                            const uint64_t offInSeg = grip - sg.va;
+                            const uint64_t fileOff = sg.fileOff + offInSeg;
+                            snprintf(line, sizeof(line),
+                                     "guest rip attribution: PT_LOAD#%u "
+                                     "va=[0x%llx..0x%llx) off_in_seg=0x%llx "
+                                     "file_off=0x%llx prot=R%sW%sX%s\n",
+                                     (unsigned)sg.phdrIndex,
+                                     (unsigned long long)sg.va,
+                                     (unsigned long long)(sg.va + sg.memsz),
+                                     (unsigned long long)offInSeg,
+                                     (unsigned long long)fileOff,
+                                     (sg.prot & 4) ? "+" : "-",
+                                     (sg.prot & 2) ? "+" : "-",
+                                     (sg.prot & 1) ? "+" : "-");
+                            append(line);
+                            snprintf(line, sizeof(line),
+                                     "verify: img_sha256=%s (%s stream) — "
+                                     "open YOUR file at file_off=0x%llx and "
+                                     "compare with the guest bytes @rip "
+                                     "above; match => execution was really "
+                                     "in the game's code\n",
+                                     s_img.sha256, streamName,
+                                     (unsigned long long)fileOff);
+                            append(line);
+                            inSeg = true;
+                            break;
+                        }
+                    }
+                    if (!inSeg) {
+                        snprintf(line, sizeof(line),
+                                 "guest rip attribution: rip NOT inside the "
+                                 "bound image [img_sha256=%s entry=0x%llx] "
+                                 "— JIT region, stack, or unmapped target\n",
+                                 s_img.sha256,
+                                 (unsigned long long)s_img.entry);
+                        append(line);
+                    }
+                } else {
+                    append("guest rip attribution: (no image bound this "
+                           "session — foundation/synthetic context)\n");
                 }
             }
             sync();

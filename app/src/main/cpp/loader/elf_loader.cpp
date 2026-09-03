@@ -2,6 +2,7 @@
 #include "self_extract.h"
 #include "../utils/logger.h"
 #include "../utils/breadcrumbs.h"
+#include "../utils/evidence.h"
 #include "../memory/memory.h"
 
 #include <algorithm>
@@ -80,6 +81,18 @@ std::string ReadWholeFile(const std::string& path, std::vector<uint8_t>& data) {
     return {};
 }
 
+// v1.41 — the trust-review session (2026-09-04) ruled that a log alone
+// cannot carry the load: every claim needs evidence a third party can
+// verify WITHOUT the agent. The loader therefore computes SHA-256 over the
+// parsed stream and logs it; Emulator::LoadExecutable binds it into the
+// evidence layer and ledger (px5_evidence.log). The user hashes their own
+// file on a PC and compares. The loader stays caller-agnostic: it labels
+// its lines [GUEST]/[SYNTH] from the evidence session flag, defaulting to
+// SYNTH so an unlabeled context never masquerades as game execution.
+const char* SessionTag() {
+    return Evidence::SessionIsRealGuest() ? "[GUEST]" : "[SYNTH]";
+}
+
 } // namespace
 
 bool ElfLoader::LoadSelf(const std::string& filePath, LoadedElfImage& out) {
@@ -116,6 +129,14 @@ bool ElfLoader::LoadSelf(const std::string& filePath, LoadedElfImage& out) {
     Breadcrumb::Set("self: extract done ok=%d segs=%u",
                     ex.ok ? 1 : 0, ex.segmentCount);
 
+    // v1.41 — bind the CONTAINER first: this is the hash the user can
+    // reproduce directly (sha256sum their .self/eboot file on a PC).
+    char containerSha[65] = {};
+    Evidence::Sha256Hex(data.data(), data.size(), containerSha);
+    PX5_LOGI(LogCategory::LOADER,
+             "%s SELF container sha256=%s size=%zu",
+             SessionTag(), containerSha, data.size());
+
     // Log the container facts either way — a dump that disagrees with the
     // parser must leave named evidence in the log, not a bare false.
     PX5_LOGI(LogCategory::LOADER,
@@ -145,7 +166,8 @@ bool ElfLoader::LoadSelf(const std::string& filePath, LoadedElfImage& out) {
     // where no reset happened.
     Breadcrumb::Set("self: map inner elf (%zu bytes)", elfSize);
     const bool ok = LoadElfFromMemory(elf, elfSize,
-                                      filePath + " [SELF-extracted]", out);
+                                      filePath + " [SELF-extracted]", out,
+                                      containerSha);
     if (ok) {
         out.isSelf = true;
         PX5_LOGI(LogCategory::LOADER,
@@ -169,12 +191,19 @@ bool ElfLoader::LoadElfFile(const std::string& filePath, LoadedElfImage& out) {
         out.error = err;
         return false;
     }
-    return LoadElfFromMemory(buffer.data(), buffer.size(), filePath, out);
+    // v1.41 — for a plain ELF the parsed stream IS the file, so container
+    // hash and stream hash coincide; computed here and passed through so
+    // the evidence ledger names one byte stream everywhere.
+    char containerSha[65] = {};
+    Evidence::Sha256Hex(buffer.data(), buffer.size(), containerSha);
+    return LoadElfFromMemory(buffer.data(), buffer.size(), filePath, out,
+                             containerSha);
 }
 
 bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
                                   const std::string& origin,
-                                  LoadedElfImage& out) {
+                                  LoadedElfImage& out,
+                                  const char* containerSha256Hex) {
     out = LoadedElfImage{};
     out.path = origin;
     if (!data || size < sizeof(Elf64HeaderRaw)) {
@@ -211,6 +240,19 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
     }
 
     auto& mem = MemoryManager::GetInstance();
+
+    // v1.41 — stream identity. Hash FIRST (before any mapping work), log
+    // with the session tag, and store on the image struct. For a plain ELF
+    // the user compares against `sha256sum <file>`; for a SELF they compare
+    // the container hash logged by LoadSelf and read the inner hash as the
+    // extraction fingerprint.
+    Evidence::Sha256Hex(data, size, out.sha256Hex);
+    out.streamSize = size;
+    snprintf(out.containerSha256Hex, sizeof(out.containerSha256Hex), "%s",
+             containerSha256Hex ? containerSha256Hex : out.sha256Hex);
+    PX5_LOGI(LogCategory::LOADER,
+             "%s image stream sha256=%s size=%zu (container %s)",
+             SessionTag(), out.sha256Hex, size, out.containerSha256Hex);
 
     PX5_LOGI(LogCategory::LOADER,
              "ELF %s: type=%u entry=0x%llx phnum=%u",
@@ -319,6 +361,8 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
         seg.filesz = static_cast<size_t>(ph.filesz);
         seg.memsz  = static_cast<size_t>(ph.memsz);
         seg.flags  = ProtFromFlags(ph.flags);
+        seg.phdrIndex = i;            // v1.41 — attribution names segments
+                                      // exactly as the log lines do
 
         // v1.34 — TWO-PHASE LOAD (the vc34 lesson, Dreaming Sarah
         // PPSA02929). The real eboot's first PT_LOAD is R-only
@@ -360,6 +404,11 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
                 return false;
             }
             memcpy(hostVa, data + ph.offset, seg.filesz);
+            // v1.41 — segment file-content hash (reproducible with
+            // `dd if=<file> skip=<p_offset> count=<filesz> | sha256sum`
+            // for plain ELFs).
+            Evidence::Sha256Hex(data + ph.offset, seg.filesz,
+                                seg.sha256Hex);
         }
         // memsz > filesz region stays zeroed (anonymous reservation).
 
@@ -407,11 +456,13 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
         mappedAny = true;
 
         PX5_LOGI(LogCategory::LOADER,
-                 "  PT_LOAD[%u] va=0x%llx filesz=%zu memsz=%zu flags=R%sW%sX%s",
+                 "  PT_LOAD[%u] va=0x%llx filesz=%zu memsz=%zu flags=R%sW%sX%s "
+                 "sha256=%.16s%s",
                  i, (unsigned long long)seg.vaddr, seg.filesz, seg.memsz,
                  (seg.flags & MemoryFlags::PAGE_READ) ? "+" : "-",
                  (seg.flags & MemoryFlags::PAGE_WRITE) ? "+" : "-",
-                 (seg.flags & MemoryFlags::PAGE_EXEC) ? "+" : "-");
+                 (seg.flags & MemoryFlags::PAGE_EXEC) ? "+" : "-",
+                 seg.sha256Hex, seg.filesz ? "…" : " (no file bytes)");
     }
 
     if (!mappedAny || out.segments.empty()) {
@@ -535,6 +586,12 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
     // first guest instruction. 32 bytes at entry, read through the
     // already-mapped image — if this line shows sane x86-64 code the
     // mapping is right; garbage bytes indict the extraction instead.
+    //
+    // v1.41 — the bytes are no longer just displayed, they are BOUND: the
+    // memory bytes are hashed AND the same 32 bytes are hashed from the
+    // source stream at the matching file offset. match=1 pins the dispatch
+    // target to the game file itself — the user can open their own file at
+    // entry_file_off in a hex editor and compare with the logged hex.
     {
         uint8_t entryBytes[32] {};
         if (mem.ReadGuestMemory(out.entryPoint, entryBytes,
@@ -548,6 +605,39 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
             PX5_LOGI(LogCategory::LOADER,
                      "  entry bytes @0x%llx: %s",
                      (unsigned long long)out.entryPoint, hex);
+
+            // v1.41 — entry proof. The entry lives in some PT_LOAD (the
+            // entryMapped gate above refused anything else); translate the
+            // VA back to the source stream offset via that segment.
+            for (const auto& s : out.segments) {
+                if (out.entryPoint >= s.vaddr &&
+                    out.entryPoint <  s.vaddr + s.memsz) {
+                    const uint64_t off = s.fileOffset +
+                        (out.entryPoint - s.vaddr);
+                    out.entryFileOff = off;
+                    char memSha[65] = {}, fileSha[65] = {};
+                    Evidence::Sha256Hex(entryBytes, sizeof entryBytes,
+                                        memSha);
+                    bool haveFile = off + sizeof entryBytes <= size;
+                    if (haveFile) {
+                        Evidence::Sha256Hex(data + off, sizeof entryBytes,
+                                            fileSha);
+                    }
+                    out.entryProofMatch =
+                        haveFile && memcmp(memSha, fileSha, 65) == 0;
+                    memcpy(out.entryBytesSha256, memSha,
+                           sizeof out.entryBytesSha256);
+                    PX5_LOGI(LogCategory::LOADER,
+                             "  entry proof: file_off=0x%llx "
+                             "mem_sha256=%s file_sha256=%s match=%d "
+                             "(verify: open YOUR file at file_off and "
+                             "compare the hex above)",
+                             (unsigned long long)off, memSha,
+                             haveFile ? fileSha : "(out of stream)",
+                             out.entryProofMatch ? 1 : 0);
+                    break;
+                }
+            }
         } else {
             PX5_LOGW(LogCategory::LOADER,
                      "  entry bytes @0x%llx: UNREADABLE through the memory "
@@ -561,10 +651,49 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
     mem.SetProgramBreak(brkStart);
 
     PX5_LOGI(LogCategory::LOADER,
-             "ELF loaded honestly: image=[0x%llx..0x%llx] entry=0x%llx",
+             "%s ELF loaded honestly: image=[0x%llx..0x%llx] entry=0x%llx "
+             "sha256=%.16s…",
+             SessionTag(),
              (unsigned long long)out.imageLowVa,
              (unsigned long long)out.imageHighVa,
-             (unsigned long long)out.entryPoint);
+             (unsigned long long)out.entryPoint,
+             out.sha256Hex);
+
+    // v1.41 — evidence binding happens ONLY on the real-guest path. The
+    // foundation suite (fixtures) loads through this same function but
+    // never binds: GetImage() stays invalid, the ledger's img column stays
+    // "-", and no fixture can ever impersonate a bound game image.
+    if (Evidence::SessionIsRealGuest()) {
+        Evidence::ImageIdentity id{};
+        id.valid = true;
+        id.stream = out.isSelf ? Evidence::Stream::InnerElf
+                               : Evidence::Stream::File;
+        memcpy(id.sha256, out.sha256Hex, sizeof id.sha256);
+        memcpy(id.containerSha256, out.containerSha256Hex,
+               sizeof id.containerSha256);
+        id.streamSize = out.streamSize;
+        snprintf(id.path, sizeof(id.path), "%s", out.path.c_str());
+        id.entry = out.entryPoint;
+        id.isSelf = out.isSelf;
+        id.segCount = 0;
+        for (const auto& s : out.segments) {
+            if (id.segCount >= Evidence::kMaxSegments) break;
+            auto& d = id.segs[id.segCount];
+            d.va = s.vaddr;
+            d.memsz = s.memsz;
+            d.fileOff = s.fileOffset;
+            d.filesz = s.filesz;
+            d.prot = s.flags;
+            d.phdrIndex = s.phdrIndex;
+            memcpy(d.sha256, s.sha256Hex, sizeof d.sha256);
+            ++id.segCount;
+        }
+        id.entryProven = out.entryFileOff != 0 || out.entryProofMatch;
+        id.entryMatch = out.entryProofMatch;
+        id.entryFileOff = out.entryFileOff;
+        memcpy(id.entrySha256, out.entryBytesSha256, sizeof id.entrySha256);
+        Evidence::BindImage(id);
+    }
     return true;
 }
 

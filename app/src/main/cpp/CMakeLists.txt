@@ -68,6 +68,7 @@ if(ANDROID_ABI STREQUAL "x86_64")
             loader/runtime_linker_selftest.cpp
             utils/breadcrumbs.cpp
             utils/crash_handler.cpp
+            utils/evidence.cpp
             utils/heartbeat.cpp
             utils/logger.cpp
             utils/diag_bridge.cpp
@@ -185,6 +186,7 @@ add_library(
         utils/logger.cpp
         utils/breadcrumbs.cpp
         utils/crash_handler.cpp
+        utils/evidence.cpp
         utils/heartbeat.cpp
         utils/diag_bridge.cpp
         utils/linker_ns_bypass.cpp

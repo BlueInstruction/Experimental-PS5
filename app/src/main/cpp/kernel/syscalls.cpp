@@ -3,6 +3,7 @@
 #include "../memory/memory.h"
 #include "../loader/runtime_linker.h"
 #include "../utils/logger.h"
+#include "../utils/evidence.h"
 
 #include <cerrno>
 #include <cstring>
@@ -91,6 +92,16 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
         if (g_hasExitCode && nr != NR_exit && nr != NR_exit_group) {
             return 0;
         }
+    }
+
+    // v1.41 — REAL-guest syscall evidence. The trust review demanded a
+    // distinguishable record that the GAME's code path reached the syscall
+    // bridge (not a fixture's): the first 16 syscalls of a bound-image
+    // session go to the ledger chained to the image hash. Synthetic
+    // sessions (foundation suite) are skipped — their activity is already
+    // fully covered by the [SYNTH] suite lines and the stats string.
+    if (Evidence::SessionIsRealGuest()) {
+        Evidence::NoteGuestSyscall(nr, a0, a1);
     }
 
     switch (nr) {

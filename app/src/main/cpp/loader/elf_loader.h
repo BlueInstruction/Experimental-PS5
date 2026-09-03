@@ -22,6 +22,13 @@ struct LoadedElfImage {
         size_t   filesz;
         size_t   memsz;
         uint32_t flags;         // MemoryFlags bits
+        uint32_t phdrIndex = 0; // v1.41: the phdr index this PT_LOAD had in
+                                // the parse loop — crash attribution names
+                                // segments exactly as the loader log did
+        // v1.41 — evidence: SHA-256 of this segment's file bytes
+        // ([fileOffset, fileOffset+filesz) in the hashed stream). The user
+        // can reproduce it with dd + sha256sum against their own file.
+        char     sha256Hex[65] = {};
     };
 
     std::string          path;
@@ -33,6 +40,21 @@ struct LoadedElfImage {
                                               // container (extracted inner
                                               // ELF) or was detected as SELF
     std::string          error;
+
+    // v1.41 — evidence identity. sha256Hex hashes the byte stream this
+    // struct was parsed from (the file for plain ELFs, the extracted inner
+    // ELF buffer for SELF images); containerSha256Hex hashes the on-disk
+    // file (equals sha256Hex for plain ELFs, the SELF container otherwise).
+    // A user hashes their own file with sha256sum and compares — no agent
+    // in the loop.
+    char                 sha256Hex[65] = {};
+    char                 containerSha256Hex[65] = {};
+    uint64_t             streamSize = 0;
+    uint64_t             entryFileOff = 0;   // file offset of the entry
+                                             // bytes in the hashed stream
+    bool                 entryProofMatch = false; // mem bytes == file bytes
+    char                 entryBytesSha256[65] = {}; // hash of the 32 bytes
+                                                    // at entry (memory side)
 
     // v1.40 — parse-truth header facts. The vc40 device session proved the
     // mapped image is segment CONTENT only: for SELF-extracted inner ELFs
@@ -64,10 +86,13 @@ public:
 
     // Same parse/map work for an ELF image already held in memory — the
     // path the SELF extractor feeds (its inner ELF never touches disk).
-    // `origin` is only used for logs/errors.
+    // `origin` is only used for logs/errors. `containerSha256Hex` (v1.41)
+    // is the hash of the on-disk file the stream came from when the caller
+    // knows it (SELF path); it is stored verbatim for the evidence layer.
     static bool LoadElfFromMemory(const uint8_t* data, size_t size,
                                   const std::string& origin,
-                                  LoadedElfImage& out);
+                                  LoadedElfImage& out,
+                                  const char* containerSha256Hex = nullptr);
 
     // SELF containers: parsed by the real extractor (loader/self_extract.cpp).
     // Unencrypted/fake-signed dumps load their inner ELF for real; segments
