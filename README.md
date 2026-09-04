@@ -1,7 +1,6 @@
 # Experimental-PS5 (PSX5)
 
-An experimental **PS5 compatibility layer for Android ARM64**, built around
-real engine technology rather than mockups:
+An experimental **PS5 compatibility layer for Android ARM64**:
 
 * **CPU:** [FEXCore](https://github.com/FEX-Emu/FEX) x86-64 → ARM64 JIT,
   built from a pinned upstream release and statically linked into the app.
@@ -17,23 +16,23 @@ real engine technology rather than mockups:
 PSX5 is an independent implementation; external projects are engineering
 references only (see Credits).
 
-> ⚠️ This is early engineering research. It does not run commercial games.
+> This is early engineering research. It does not run commercial games.
 > The status table below reflects runtime evidence only.
 
 ## Current status
 
-| Area | Today |
-|------|-------|
-| FEXCore bring-up | ✅ static build for arm64-v8a; guest instructions execute and results are observed at runtime |
-| Memory / syscalls / loader | 🟡 real implementations with self-tests; hardening ongoing |
-| Vulkan device layer | 🟡 instance/device/submission loop proven in smoke tests |
-| GNM → Vulkan graphics translation | ❌ not started |
-| Audio · input · UI shell | 🟡 functional wrappers + Compose shell with real preferences |
-| Driver switching | 🟡 slot manager present; on-device `vulkaninfo` verification next |
+| Area | Status |
+|------|--------|
+| FEXCore bring-up | working: static build for arm64-v8a; guest instructions execute and results are observed at runtime |
+| Memory / syscalls / loader | partial: real implementations with self-tests; hardening ongoing |
+| Vulkan device layer | partial: instance/device/submission loop proven in smoke tests |
+| GNM → Vulkan graphics translation | not started |
+| Audio / input / UI shell | partial: functional wrappers + Compose shell with real preferences |
+| Driver switching | partial: slot manager present; on-device `vulkaninfo` verification next |
 
 ## Build
 
-Requirements: JDK 17 · Gradle 8.9 · SDK API 35 · NDK 27.3.13750724 · CMake 3.22.1
+Requirements: JDK 17, Gradle 8.9, SDK API 35, NDK 27.3.13750724, CMake 3.22.1
 
 ```bash
 ./tools/fetch_fexcore.sh          # materializes pinned upstream FEX sources

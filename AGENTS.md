@@ -1,59 +1,62 @@
 # AGENTS.md
 
-Guidance for AI coding agents and contributors working in this
-repository. Read the relevant section before changing code.
+Notes for contributors and coding agents working on PSX5.
 
 ## Project Overview
 
 PSX5 is a research PS5 compatibility layer for Android ARM64, targeting
-Qualcomm Snapdragon devices. x86-64 guest code is translated by
-[FEXCore](https://github.com/FEX-Emu/FEX), built from a pinned upstream
-release; the SELF/ELF loader, guest memory manager, syscall surface, and
-subsystem seams are original code in this repository.
+Qualcomm Snapdragon devices. Guest x86-64 code runs on FEXCore
+(https://github.com/FEX-Emu/FEX), built from a pinned upstream release.
+The PS5 side (SELF/ELF loader, guest memory, syscalls, kernel HLE) is
+original code in this repository.
 
-It is an early research platform. It runs no commercial titles today,
-and no status claim is made beyond what runtime evidence supports.
+Early research: no commercial game runs, and nothing is claimed to work
+without runtime evidence behind it.
 
 ## Rules
 
-1. **No placeholder implementations.** Every function does what its name
-   claims. No stubs that return success, no invented addresses, no dead
-   code paths, no UI that simulates functionality.
-2. **Runtime evidence.** Compilation is not execution. A behavior claim
-   must cite a runtime probe — a logcat marker, an exit code, or a
-   round-trip data check — referenced in the commit body.
-3. **Observed truth only.** Device capabilities come from measurements
-   (`vulkaninfo`, driver logs), never from marketing names or inference.
-4. **Dependency contract.** Fetched upstream trees are never committed
-   and never hand-edited; integration changes land as numbered patches
-   under `tools/patches/`.
+1. Every function does what its name says. No stubs that return success,
+   no invented addresses, no dead code, no UI that pretends to work.
+2. Compiling is not running. When a commit claims a behavior change, the
+   body cites how it was checked: a log line, an exit code, or a data
+   round-trip.
+3. Device capabilities come from measurements (vulkaninfo, driver logs),
+   not from chip names or guesswork.
+4. Fetched upstream trees are never committed and never edited by hand.
+   Engine changes go in as numbered patches under `tools/patches/`.
 
 ## Repository Layout
 
 ```text
 app/src/main/cpp/
-├── core/                   # emulator orchestration state machine
+├── core/                   # emulator state machine
 ├── memory/                 # guest address space manager
-├── kernel/                 # syscall dispatch + HLE surface
+├── kernel/                 # syscall dispatch + kernel HLE
 ├── loader/                 # ELF64 loader + SELF container handling
-├── fexcore_wrapper.cpp     # FEXCore context lifecycle glue
-├── fexcore_integration.cpp # JIT compile/run path + guest dispatch bridge
-├── gpu/                    # Vulkan device, driver slots, GNM/PM4 research
-├── audio/  input/  filesystem/  media/   # subsystem seams
+├── fexcore_wrapper.cpp     # FEXCore context lifecycle
+├── fexcore_integration.cpp # JIT compile/run path, guest dispatch
+├── gpu/                    # Vulkan device, driver slots, GNM/PM4
+├── audio/ input/ filesystem/ media/    # subsystem wrappers
 ├── stub/ui_smoke_stub.cpp  # x86_64 symbol-compatible stub (CI only)
 └── tests/                  # host-side self-tests
 
 tools/
-├── fetch_fexcore.sh        # pinned engine bootstrap
-├── verify_evidence.py      # offline recomputation of the evidence ledger
-└── patches/fex-*.patch     # managed deltas onto the pristine FEX tree
+├── fetch_fexcore.sh        # fetches the pinned FEX tree, patches it
+├── verify_evidence.py      # rechecks the load-evidence ledger offline
+└── patches/fex-*.patch     # patches applied onto the FEX tree
 
 .github/workflows/          # APK build (arm64-v8a), lint, cppcheck, clang-tidy
 ```
 
 ## Build
 
-JDK 17 · Gradle 8.9 · Android SDK API 35 · NDK 27.3.13750724 · CMake 3.22.1
+| Tool | Version |
+|------|---------|
+| JDK | 17 |
+| Gradle | 8.9 |
+| Android SDK | API 35 |
+| NDK | 27.3.13750724 |
+| CMake | 3.22.1 |
 
 ```bash
 ./tools/fetch_fexcore.sh
@@ -61,32 +64,27 @@ export PX5_FEXCORE_ROOT="$PWD/../deps/FEX"
 gradle assembleRelease --no-daemon
 ```
 
-CMake fails fast if `PX5_FEXCORE_ROOT` is unset or is not a valid patched
-FEX tree. Verify that changes compile (locally or via CI) before pushing;
-never leave unverified diffs on `main`.
+CMake stops with an error if `PX5_FEXCORE_ROOT` is unset or is not a
+patched FEX tree. Compile before pushing (local or CI).
 
 ## Engine Dependency
 
-Upstream FEX is pinned (`FEX-2608`, commit `e869aa64`), fetched and
-verified by `tools/fetch_fexcore.sh`, and patched only through numbered
-files in `tools/patches/` that apply cleanly against the pin. Hand edits
-to the fetched tree are discarded on refetch.
+FEX is pinned (`FEX-2608`, commit `e869aa64`). `tools/fetch_fexcore.sh`
+fetches and verifies the pin; engine changes are made as numbered patches
+in `tools/patches/` that apply cleanly against it. Anything edited
+directly in the fetched tree is lost on refetch.
 
-## Commit Conventions
+## Commit Messages
 
-Commit history is engineering documentation: `git log --oneline` must
-read as the project's technical evolution, with no reference to any
-development conversation.
+Subjects follow `area: summary`: short, imperative, lowercase area
+prefix. Areas in use: loader, runtime, cpu, gpu, kernel, diag, crash, ui,
+exec, probe, test, build, ci, docs, fix, revert, chore.
 
-* **Subject:** `area: summary` — imperative, ≤ 72 chars. Areas: `loader`,
-  `runtime`, `cpu`, `gpu`, `kernel`, `diag`, `crash`, `ui`, `exec`,
-  `probe`, `test`, `build`, `ci`, `docs`, `fix`, `revert`, `chore`.
-* **No version numbers in subjects.** Releases are git tags; versionName
-  and versionCode go in the commit body.
-* **Body:** the observable behavior change, the root cause, and the
-  verification evidence, in neutral technical prose.
-* **Never:** conversation references, narration, first-person anecdotes,
-  or rhetorical framing.
+Version numbers stay out of subjects. Releases are git tags; the release
+commit records versionName/versionCode in its body.
+
+The body is optional. A non-trivial change states what changed, why, and
+how it was verified, in plain prose. Small fixes need only a subject.
 
 Example:
 
@@ -102,7 +100,6 @@ Build: versionName 1.43 (versionCode 44).
 
 ## Legal
 
-This project must never distribute Sony firmware, proprietary keys, or
-copyrighted game assets. It exists to run legally obtained software on
-hardware its owner controls. External projects used as references are
-acknowledged in the README Credits section.
+No Sony firmware, keys, or game assets here. The project runs legally
+obtained software on hardware the owner controls. Reference projects are
+credited in README.
