@@ -18,8 +18,7 @@ PSX5 is an independent implementation; external projects are engineering
 references only (see Credits).
 
 > ⚠️ This is early engineering research. It does not run commercial games.
-> Subsystem status is tracked with runtime evidence — see the status table
-> in [CONTRIBUTING.md §5](CONTRIBUTING.md#5-subsystem-status).
+> The status table below reflects runtime evidence only.
 
 ## Current status
 
@@ -47,9 +46,8 @@ CI (`PX5 Build APK`) performs exactly this sequence on every push to
 
 ## Documentation
 
-[CONTRIBUTING.md](CONTRIBUTING.md) covers the repository layout, the
-pinned FEXCore dependency contract, the testing ladder, commit message
-conventions, and the subsystem status table.
+[AGENTS.md](AGENTS.md) covers the repository layout, the pinned FEXCore
+dependency contract, and commit message conventions.
 
 ## Legal
 
