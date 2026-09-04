@@ -4,8 +4,10 @@
 
 #include "runtime_linker.h"
 
+#include "../utils/evidence.h"
 #include "../utils/logger.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -19,6 +21,12 @@ namespace {
 // Bounded dynamic walk: a corrupt/unbounded table stops after this many
 // entries and is reported as malformed, never swept to infinity.
 constexpr size_t kMaxDynEntries = 8192;
+// Missing-NID accounting bounds (Vita3K pattern, modules/module_parent.cpp:
+// 152-177): the unique set never grows past kMaxTrackedMissingNids, and
+// the evidence ledger only records the first kMaxMissingLedger events —
+// a game calling an unimplemented import 100k times must not flood either.
+constexpr size_t kMaxTrackedMissingNids = 4096;
+constexpr int     kMaxMissingLedger     = 64;
 // SCE reserves the 0x61000000-0x610000FF OS-specific dynamic-tag range
 // (Kyty src/loader/elf.h: DT_OS_EXPORT_LIB = 0x61000013 et al.; shadPS4
 // uses the same range as DT_SCE_*). Values are enumerated verbatim.
@@ -83,6 +91,7 @@ void RuntimeLinker::Reset() {
     std::lock_guard<std::mutex> lk(m_mutex);
     m_modules.clear();
     m_exports.clear();
+    m_missingNids.clear();
     m_stats = {};
 }
 
@@ -147,7 +156,28 @@ GateResult RuntimeLinker::DispatchNid(uint64_t nid, const uint64_t* args,
                                  (unsigned long long)nid);
                         return std::string(b); }() +
                       " not registered";
-            PX5_LOGW(LogCategory::LOADER, "RuntimeLinker: %s", r.error.c_str());
+            // v1.42 — Vita3K missing-NID accounting: log and ledger the
+            // FIRST hit per distinct NID only; repeat hits are counted,
+            // not spammed (modules/module_parent.cpp:171-175).
+            auto miss = m_missingNids.find(nid);
+            if (miss == m_missingNids.end()) {
+                if (m_missingNids.size() < kMaxTrackedMissingNids) {
+                    m_missingNids[nid] = 1;
+                    ++m_stats.unresolvedUnique;
+                    if (m_stats.unresolvedUnique <= kMaxMissingLedger) {
+                        Evidence::AppendLedger(
+                            "nid miss nid=0x%08llx unique=%llu",
+                            (unsigned long long)nid,
+                            (unsigned long long)m_stats.unresolvedUnique);
+                    }
+                    PX5_LOGW(LogCategory::LOADER,
+                             "RuntimeLinker: %s (missing-NID %llu unique)",
+                             r.error.c_str(),
+                             (unsigned long long)m_stats.unresolvedUnique);
+                }
+            } else {
+                ++miss->second;
+            }
             return r;
         }
         if (!it->second.isHle) {
@@ -178,13 +208,43 @@ std::string RuntimeLinker::GetSummaryString() {
     char b[160];
     snprintf(b, sizeof(b),
              "modules=%zu exports=%zu gateCalls=%llu hle=%llu guest=%llu "
-             "unresolved=%llu",
+             "unresolved=%llu (unique=%llu)",
              m_modules.size(), m_exports.size(),
              (unsigned long long)m_stats.gateCalls,
              (unsigned long long)m_stats.resolvedHle,
              (unsigned long long)m_stats.guestRouted,
-             (unsigned long long)m_stats.unresolved);
+             (unsigned long long)m_stats.unresolved,
+             (unsigned long long)m_stats.unresolvedUnique);
     return std::string(b);
+}
+
+// v1.42 — bounded top-N missing-NID list, hottest first. This names the
+// next HLE work item from the device session itself (Vita3K's
+// missing_nids, but rendered as evidence instead of a private set).
+std::string RuntimeLinker::GetMissingNidsSummary() {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    if (m_missingNids.empty()) return "missing NIDs: none";
+    // Collect (nid, hits) and take the top 8 by hits.
+    std::vector<std::pair<uint64_t, uint32_t>> items(m_missingNids.begin(),
+                                                     m_missingNids.end());
+    std::sort(items.begin(), items.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    if (items.size() > 8) items.resize(8);
+    std::string out = "missing NIDs (top " + std::to_string(items.size()) +
+                      " of " + std::to_string(m_stats.unresolvedUnique) +
+                      "):";
+    char one[64];
+    for (const auto& [nid, hits] : items) {
+        snprintf(one, sizeof(one), " 0x%08llx(x%u)",
+                 (unsigned long long)nid, hits);
+        out += one;
+    }
+    return out;
+}
+
+size_t RuntimeLinker::MissingNidCount() {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    return m_missingNids.size();
 }
 
 size_t RuntimeLinker::ModuleCount() {

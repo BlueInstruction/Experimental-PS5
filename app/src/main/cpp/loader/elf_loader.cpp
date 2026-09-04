@@ -1,5 +1,6 @@
 #include "elf_loader.h"
 #include "self_extract.h"
+#include "../utils/crash_handler.h"
 #include "../utils/logger.h"
 #include "../utils/breadcrumbs.h"
 #include "../utils/evidence.h"
@@ -10,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <sys/stat.h>
 
 namespace PX5 {
 
@@ -161,13 +163,54 @@ bool ElfLoader::LoadSelf(const std::string& filePath, LoadedElfImage& out) {
 
     const uint8_t* elf = ex.elfBytes.data() + ex.elfOffset;
     const size_t   elfSize = ex.elfBytes.size() - ex.elfOffset;
-    // NOTE: LoadElfFromMemory resets `out`, so isSelf is set on the loaded
-    // image only after that call — and on the failed-extract path above,
-    // where no reset happened.
+
+    // v1.42 — inner-ELF dump on the real-guest path (Vita3K's
+    // `dump_elfs` debugging pattern, kernel/src/load_self.cpp:659-694:
+    // the emulator writes the executed stream to disk so loader failures
+    // are diagnosable OFFLINE). For a SELF container the user's own file
+    // is the CONTAINER — the verifier needs the extracted stream to
+    // recompute segment/entry hashes. Written BEFORE dispatch; a dump
+    // that cannot be written is a named warning, never a load failure.
+    if (Evidence::SessionIsRealGuest()) {
+        const std::string dumpDir =
+            CrashHandler::LogsDir() + "/elfdumps";
+        ::mkdir(dumpDir.c_str(), 0770);   // EEXIST tolerated
+        const size_t slash = filePath.find_last_of('/');
+        const std::string base = slash == std::string::npos
+                                     ? filePath
+                                     : filePath.substr(slash + 1);
+        const std::string dumpPath =
+            dumpDir + "/" + base + ".inner.elf";
+        std::ofstream df(dumpPath, std::ios::binary | std::ios::trunc);
+        if (df.is_open() && df.write(reinterpret_cast<const char*>(elf),
+                                     static_cast<std::streamsize>(elfSize)) &&
+            df.good()) {
+            df.close();
+            char dumpSha[65] = {};
+            Evidence::Sha256Hex(elf, elfSize, dumpSha);
+            Evidence::AppendLedger("inner_elf_dump path=%s sha256=%s size=%zu",
+                                   dumpPath.c_str(), dumpSha, elfSize);
+            PX5_LOGI(LogCategory::LOADER,
+                     "inner ELF dumped for offline verification: %s "
+                     "(%zu bytes, sha256=%s)",
+                     dumpPath.c_str(), elfSize, dumpSha);
+        } else {
+            PX5_LOGW(LogCategory::LOADER,
+                     "inner ELF dump FAILED at %s — segment/entry ledger "
+                     "hashes stay verifiable against px5_main.log only",
+                     dumpPath.c_str());
+        }
+    }
+
+    // NOTE (v1.42): SELF provenance is carried INTO LoadElfFromMemory via
+    // fromSelfContainer — the evidence binding inside it sees isSelf=true
+    // and binds stream=inner_elf with the container hash.
     Breadcrumb::Set("self: map inner elf (%zu bytes)", elfSize);
     const bool ok = LoadElfFromMemory(elf, elfSize,
                                       filePath + " [SELF-extracted]", out,
-                                      containerSha);
+                                      containerSha,
+                                      /*fromSelfContainer=*/true,
+                                      data.size());
     if (ok) {
         out.isSelf = true;
         PX5_LOGI(LogCategory::LOADER,
@@ -197,15 +240,27 @@ bool ElfLoader::LoadElfFile(const std::string& filePath, LoadedElfImage& out) {
     char containerSha[65] = {};
     Evidence::Sha256Hex(buffer.data(), buffer.size(), containerSha);
     return LoadElfFromMemory(buffer.data(), buffer.size(), filePath, out,
-                             containerSha);
+                             containerSha, /*fromSelfContainer=*/false,
+                             buffer.size());
 }
 
 bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
                                   const std::string& origin,
                                   LoadedElfImage& out,
-                                  const char* containerSha256Hex) {
+                                  const char* containerSha256Hex,
+                                  bool fromSelfContainer,
+                                  uint64_t containerSizeBytes) {
     out = LoadedElfImage{};
     out.path = origin;
+    out.containerSize = containerSizeBytes;
+    // v1.42 FIX: the caller's SELF provenance must survive the reset —
+    // the BindImage block at the end reads out.isSelf, and the old flow
+    // (caller sets isSelf only AFTER this returns) bound SELF-extracted
+    // streams as stream=file self=0, which made the offline verifier
+    // compare the inner-ELF hash against the CONTAINER file (found by
+    // the v1.42 host evidence demo — it could never verify a real SELF
+    // dump on device).
+    out.isSelf = fromSelfContainer;
     if (!data || size < sizeof(Elf64HeaderRaw)) {
         out.error = "image smaller than ELF header";
         return false;
@@ -554,8 +609,16 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
                          "fail; image stays honest)",
                          (unsigned long long)hdrBytes);
             } else if (!mem.MapMemory(hdrPageVa, kPageSize_,
-                                      MemoryFlags::PAGE_READ,
+                                      MemoryFlags::PAGE_READ |
+                                          MemoryFlags::PAGE_WRITE,
                                       "phdr_table_copy")) {
+                // v1.42 FIX: the copy page needs WRITE at load time — the
+                // v1.40 version mapped it READ-ONLY and the memcpy below
+                // segfaulted (found by the v1.42 host evidence demo; on
+                // device this branch never ran because real dumps map
+                // their headers inside PT_LOAD#0, but dumps with headers
+                // outside every PT_LOAD are exactly what v1.40 built
+                // this branch for).
                 PX5_LOGW(LogCategory::LOADER,
                          "  phdr copy map FAILED at 0x%llx — AT_PHDR left 0 "
                          "rather than naming unmapped memory",
@@ -672,6 +735,7 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
         memcpy(id.containerSha256, out.containerSha256Hex,
                sizeof id.containerSha256);
         id.streamSize = out.streamSize;
+        id.containerSize = out.containerSize;
         snprintf(id.path, sizeof(id.path), "%s", out.path.c_str());
         id.entry = out.entryPoint;
         id.isSelf = out.isSelf;

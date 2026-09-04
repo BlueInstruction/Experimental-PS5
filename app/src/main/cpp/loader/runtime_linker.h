@@ -63,7 +63,10 @@ struct DispatchStats {
     uint64_t gateCalls   = 0;  // gate syscalls seen
     uint64_t resolvedHle = 0;  // dispatched into a bionic HLE function
     uint64_t guestRouted = 0;  // NID exists but is a guest export (not gate-callable)
-    uint64_t unresolved  = 0;  // NID not registered at all
+    uint64_t unresolved  = 0;  // NID not registered at all (repeat hits included)
+    uint64_t unresolvedUnique = 0;  // DISTINCT missing NIDs (Vita3K's
+                                    // missing_nids set metric — the
+                                    // per-game HLE gap size)
 };
 
 struct ModuleRecord {
@@ -102,6 +105,13 @@ public:
 
     const DispatchStats& Stats();
     std::string GetSummaryString();      // evidence line for reports
+    // v1.42 — the distinct missing-NID list with per-NID hit counts
+    // (bounded). This is the REAL per-game compatibility gap: what the
+    // guest actually asked for that no HLE provides. Counted like
+    // Vita3K's EmuEnvState::missing_nids (modules/module_parent.cpp),
+    // exposed so a device session names the next work item.
+    std::string GetMissingNidsSummary();
+    size_t MissingNidCount();
     size_t ModuleCount();
     size_t ExportCount();
 
@@ -117,6 +127,8 @@ private:
     std::mutex m_mutex;
     std::vector<ModuleRecord> m_modules;
     std::unordered_map<uint64_t, NidEntry> m_exports;  // need <unordered_map>
+    std::unordered_map<uint64_t, uint32_t> m_missingNids;  // nid -> hits
+                                                           // (bounded)
     DispatchStats m_stats;
 };
 

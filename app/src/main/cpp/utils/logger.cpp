@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
-// PX5 — Enhanced Logger implementation
+// PX5 — Logger v2 implementation (Eden-format structured log).
+// See logger.h for the format contract and provenance.
 
 #include "logger.h"
 #include "diag_bridge.h"
@@ -18,9 +19,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#ifndef PR_SET_NAME
-#define PR_SET_NAME 15
-#endif
 #ifndef PR_GET_NAME
 #define PR_GET_NAME 16
 #endif
@@ -29,17 +27,20 @@ namespace PX5 {
 
 namespace {
 constexpr size_t kMaxFileSize   = 1 * 1024 * 1024;  // 1 MB per file
-constexpr int     kMaxRotations = 5;                 // px5_main.log + .1..4 = 5 files
+constexpr int     kMaxRotations = 5;                 // px5_main.log + .1..4
 constexpr size_t kLineBufSize   = 4096;
+constexpr size_t kNumCategories = 16;
 
 struct LoggerState {
     std::mutex          mtx;
-    std::string         log_dir;          // e.g. /storage/emulated/0/Android/data/com.px5.emulator/files/logs
+    std::string         log_dir;
     std::string         log_path;         // log_dir + "/px5_main.log"
-    int                 fd{-1};           // raw fd; using write() for crash-safety
+    int                 fd{-1};           // raw fd; write() for crash-safety
     LogLevel            min_level{LogLevel::INFO};
+    LogLevel            class_level[kNumCategories];  // per-class filter
     bool                initialized{false};
     size_t              bytes_written{0};
+    std::chrono::steady_clock::time_point epoch{};    // uptime epoch
 };
 
 LoggerState& State() {
@@ -47,7 +48,6 @@ LoggerState& State() {
     return s;
 }
 
-// Get current thread name via prctl (Bionic-safe; returns up to 16 bytes).
 std::string CurrentThreadName() {
     char buf[16] = {0};
     if (prctl(PR_GET_NAME, buf) != 0) {
@@ -56,22 +56,36 @@ std::string CurrentThreadName() {
     return std::string(buf);
 }
 
-// Format timestamp as "YYYY-MM-DD HH:MM:SS.mmm"
-std::string FormatTimestamp() {
-    using namespace std::chrono;
-    auto now = system_clock::now();
-    auto t  = system_clock::to_time_t(now);
-    auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
+// Monotonic uptime as "   12.345678" — Eden's FormatLogMessage shape
+// ([%4d.%06d], seconds.microseconds since logger epoch). Lines sort
+// naturally and correlate with probe time budgets.
+void FormatUptime(char out[24]) {
+    const auto& s = State();
+    if (!s.initialized) {
+        snprintf(out, 24, "%4u.%06llu", 0u, 0ull);
+        return;
+    }
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - s.epoch).count();
+    const unsigned long long total = us > 0 ? (unsigned long long)us : 0ull;
+    snprintf(out, 24, "%4llu.%06llu", total / 1000000ull, total % 1000000ull);
+}
 
-    struct tm tm_buf;
-    localtime_r(&t, &tm_buf);
-
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d.%03d",
-                  tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
-                  tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec,
-                  static_cast<int>(ms.count()));
-    return std::string(buf);
+// Trim __FILE__ to a repo-relative path. Build trees emit absolute paths
+// like .../app/src/main/cpp/loader/elf_loader.cpp — keep everything from
+// the last "cpp/" (our source root) so lines read like Eden's
+// "core/loader/loader.cpp". Fallback: basename.
+std::string TrimSourcePath(const char* file) {
+    if (!file || !*file) return "?";
+    const char* p = file;
+    const char* found = nullptr;
+    while ((p = strstr(p, "cpp/")) != nullptr) {
+        found = p + 4;      // keep the suffix AFTER "cpp/"
+        p += 4;
+    }
+    if (found && *found) return std::string(found);
+    const char* base = strrchr(file, '/');
+    return std::string(base ? base + 1 : file);
 }
 
 // Ensure the log directory exists. Returns true on success.
@@ -80,7 +94,6 @@ bool EnsureDirExists(const std::string& path) {
     if (stat(path.c_str(), &st) == 0) {
         return S_ISDIR(st.st_mode);
     }
-    // mkdir -p style: walk components
     std::string acc;
     acc.reserve(path.size());
     size_t i = 0;
@@ -90,7 +103,6 @@ bool EnsureDirExists(const std::string& path) {
         acc.push_back(c);
         if (c == '/' || i == path.size() - 1) {
             if (!acc.empty() && acc.back() == '/') {
-                // skip trailing slash for mkdir
                 std::string p = acc.substr(0, acc.size() - 1);
                 if (!p.empty()) {
                     if (stat(p.c_str(), &st) != 0) {
@@ -115,13 +127,10 @@ bool EnsureDirExists(const std::string& path) {
 bool OpenLogFile() {
     auto& s = State();
     if (s.log_path.empty()) return false;
-    s.fd = ::open(s.log_path.c_str(),
-                  O_WRONLY | O_CREAT | O_APPEND,
-                  0660);
+    s.fd = ::open(s.log_path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0660);
     if (s.fd < 0) {
         return false;
     }
-    // Determine current file size so we know when to rotate.
     struct stat st{};
     if (::fstat(s.fd, &st) == 0) {
         s.bytes_written = static_cast<size_t>(st.st_size);
@@ -137,14 +146,12 @@ void RotateFiles() {
         ::close(s.fd);
         s.fd = -1;
     }
-    // px5_main.log.(N-1) -> px5_main.log.N
     for (int i = kMaxRotations - 1; i >= 1; --i) {
         std::string src = s.log_path + "." + std::to_string(i);
         std::string dst = s.log_path + "." + std::to_string(i + 1);
-        ::unlink(dst.c_str());  // ignore error
+        ::unlink(dst.c_str());
         ::rename(src.c_str(), dst.c_str());
     }
-    // px5_main.log -> px5_main.log.1
     std::string dst = s.log_path + ".1";
     ::unlink(dst.c_str());
     ::rename(s.log_path.c_str(), dst.c_str());
@@ -164,6 +171,12 @@ bool Logger::Initialize(std::string_view log_dir) noexcept {
     std::lock_guard<std::mutex> lock(s.mtx);
     if (s.initialized) return true;
 
+    for (size_t i = 0; i < kNumCategories; ++i) {
+        s.class_level[i] = LogLevel::TRACE;   // per-class filter open by
+                                              // default; the floor governs
+    }
+    s.epoch = std::chrono::steady_clock::now();
+
     s.log_dir.assign(log_dir);
     if (!EnsureDirExists(s.log_dir)) {
         __android_log_print(ANDROID_LOG_ERROR, "PX5_Logger",
@@ -180,9 +193,18 @@ bool Logger::Initialize(std::string_view log_dir) noexcept {
     __android_log_print(ANDROID_LOG_INFO, "PX5_Logger",
                         "File logging initialized at %s", s.log_path.c_str());
 
-    // Write a session-start marker so it's easy to find boot boundaries.
-    const char* banner =
-        "==================== PX5 SESSION START ====================\n";
+    // Session banner: wall-clock anchor for the monotonic uptime stamps.
+    char ts[64];
+    {
+        auto now = std::chrono::system_clock::now();
+        auto t   = std::chrono::system_clock::to_time_t(now);
+        struct tm tm_buf;
+        localtime_r(&t, &tm_buf);
+        strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm_buf);
+    }
+    char banner[160];
+    snprintf(banner, sizeof(banner),
+             "==== PX5 SESSION START %s (uptime=0.000000) ====\n", ts);
     ::write(s.fd, banner, std::strlen(banner));
     s.bytes_written += std::strlen(banner);
     return true;
@@ -194,6 +216,42 @@ void Logger::SetMinLevel(LogLevel level) noexcept {
 
 LogLevel Logger::GetMinLevel() noexcept {
     return State().min_level;
+}
+
+void Logger::SetClassFilterString(const std::string& rules) noexcept {
+    auto& s = State();
+    // Tokenize on whitespace: "<Class>:<Level>" tokens, "*" wildcard.
+    size_t pos = 0;
+    while (pos < rules.size()) {
+        while (pos < rules.size() && isspace((unsigned char)rules[pos])) ++pos;
+        size_t end = pos;
+        while (end < rules.size() && !isspace((unsigned char)rules[end])) ++end;
+        std::string tok = rules.substr(pos, end - pos);
+        pos = end;
+        if (tok.empty()) continue;
+        const size_t colon = tok.rfind(':');
+        if (colon == std::string::npos) continue;
+        const std::string cls = tok.substr(0, colon);
+        const std::string lvl = tok.substr(colon + 1);
+        LogLevel lv;
+        if (lvl == "Trace" || lvl == "trace")      lv = LogLevel::TRACE;
+        else if (lvl == "Debug" || lvl == "debug") lv = LogLevel::DEBUG;
+        else if (lvl == "Info" || lvl == "info")   lv = LogLevel::INFO;
+        else if (lvl == "Warning" || lvl == "warn") lv = LogLevel::WARNING;
+        else if (lvl == "Error" || lvl == "error") lv = LogLevel::ERROR;
+        else if (lvl == "Critical" || lvl == "fatal") lv = LogLevel::FATAL;
+        else continue;
+        if (cls == "*") {
+            for (size_t i = 0; i < kNumCategories; ++i) s.class_level[i] = lv;
+        } else {
+            for (size_t i = 0; i < kNumCategories; ++i) {
+                if (cls == CategoryToString(static_cast<LogCategory>(i))) {
+                    s.class_level[i] = lv;
+                    break;
+                }
+            }
+        }
+    }
 }
 
 void Logger::Flush() noexcept {
@@ -220,34 +278,34 @@ void Logger::Shutdown() noexcept {
 
 const char* Logger::LevelToString(LogLevel level) noexcept {
     switch (level) {
-        case LogLevel::TRACE:   return "TRACE";
-        case LogLevel::DEBUG:   return "DEBUG";
-        case LogLevel::INFO:    return "INFO";
-        case LogLevel::WARNING: return "WARN";
-        case LogLevel::ERROR:   return "ERROR";
-        case LogLevel::FATAL:   return "FATAL";
+        case LogLevel::TRACE:   return "Trace";
+        case LogLevel::DEBUG:   return "Debug";
+        case LogLevel::INFO:    return "Info";
+        case LogLevel::WARNING: return "Warning";
+        case LogLevel::ERROR:   return "Error";
+        case LogLevel::FATAL:   return "Critical";
     }
     return "?";
 }
 
 const char* Logger::CategoryToString(LogCategory category) noexcept {
     switch (category) {
-        case LogCategory::CORE:       return "PX5_Core";
-        case LogCategory::CPU:        return "PX5_CPU";
-        case LogCategory::GPU:        return "PX5_GPU";
-        case LogCategory::LOADER:     return "PX5_Loader";
-        case LogCategory::FILESYSTEM: return "PX5_VFS";
-        case LogCategory::KERNEL:     return "PX5_Kernel";
-        case LogCategory::MEMORY:     return "PX5_Mem";
-        case LogCategory::JNI:        return "PX5_JNI";
-        case LogCategory::FEX:        return "PX5_FEXCore";
-        case LogCategory::AUDIO:      return "PX5_Audio";
-        case LogCategory::INPUT:      return "PX5_Input";
-        case LogCategory::MEDIA:      return "PX5_Media";
-        case LogCategory::VULKAN:     return "PX5_Vulkan";
-        case LogCategory::NETWORK:    return "PX5_Net";
-        case LogCategory::SETTINGS:   return "PX5_Settings";
-        case LogCategory::SYSTEM:     return "PX5_System";
+        case LogCategory::CORE:       return "Core";
+        case LogCategory::CPU:        return "Cpu";
+        case LogCategory::GPU:        return "Gnm";
+        case LogCategory::LOADER:     return "Loader";
+        case LogCategory::FILESYSTEM: return "VFS";
+        case LogCategory::KERNEL:     return "Kernel";
+        case LogCategory::MEMORY:     return "Memory";
+        case LogCategory::JNI:        return "Frontend";
+        case LogCategory::FEX:        return "Cpu.Fex";
+        case LogCategory::AUDIO:      return "Audio";
+        case LogCategory::INPUT:      return "Input";
+        case LogCategory::MEDIA:      return "Media";
+        case LogCategory::VULKAN:     return "Render.Vulkan";
+        case LogCategory::NETWORK:    return "Net";
+        case LogCategory::SETTINGS:   return "Config";
+        case LogCategory::SYSTEM:     return "System";
     }
     return "PX5";
 }
@@ -270,8 +328,7 @@ std::string Logger::GetCurrentLogFilePath() noexcept {
     return s.log_path;
 }
 
-// Lock-free read for the signal handler: the path is written once at
-// Initialize before any thread that could crash exists (see header note).
+// Lock-free read for the signal handler (see header note).
 const char* Logger::PeekLogFilePathUnsafe() noexcept {
     auto& s = State();
     return s.log_path.empty() ? "" : s.log_path.c_str();
@@ -294,7 +351,6 @@ void Logger::WriteToFile(std::string_view formatted_line, LogLevel level) noexce
 
     MaybeRotate();
 
-    // Append a trailing newline if the line doesn't have one.
     std::string line(formatted_line);
     if (line.empty() || line.back() != '\n') {
         line.push_back('\n');
@@ -310,65 +366,74 @@ void Logger::WriteToFile(std::string_view formatted_line, LogLevel level) noexce
 }
 
 void Logger::LogV(LogLevel level, LogCategory category,
-                  const char* file, int line,
+                  const char* file, int line, const char* func,
                   const char* format, va_list args) noexcept {
     auto& s = State();
+
+    // Filter: per-class gate first (Eden's Filter::CheckMessage shape),
+    // then the global floor.
+    if (static_cast<uint8_t>(level) <
+        static_cast<uint8_t>(s.class_level[static_cast<size_t>(category)])) {
+        return;
+    }
     if (static_cast<uint8_t>(level) < static_cast<uint8_t>(s.min_level)) {
         return;
     }
 
-    // 1. Always emit to Android logcat.
+    const char* class_name = CategoryToString(category);
+    const char* level_name = LevelToString(level);
+
+    // 1. Always emit to Android logcat (tag "PX5.<Class>").
     {
+        char tag[48];
+        snprintf(tag, sizeof(tag), "PX5.%s", class_name);
         va_list args_copy;
         va_copy(args_copy, args);
-        __android_log_vprint(LevelToAndroidPriority(level),
-                             CategoryToString(category),
+        __android_log_vprint(LevelToAndroidPriority(level), tag,
                              format, args_copy);
         va_end(args_copy);
     }
 
-    // 2. Format the full line: [TS] [LEVEL] [TID:threadname] [CATEGORY] [file:line] msg
+    // 2. Format the message body once.
     char msg_buf[kLineBufSize];
     vsnprintf(msg_buf, kLineBufSize, format, args);
 
-    // Strip directories from __FILE__ so lines stay readable on-device.
-    const char* base = file ? strrchr(file, '/') : nullptr;
-    base = base ? base + 1 : (file ? file : "?");
+    // 3. Eden-format full line:
+    //    [   0.001979] Kernel <Info> kernel/sce_kernel_hle.cpp:294:InvokeByName: msg
+    char up[24];
+    FormatUptime(up);
+    const std::string src = TrimSourcePath(file);
+    char prelude[224];
+    snprintf(prelude, sizeof(prelude), "[%s] %s <%s> %s:%d:%s: ",
+             up, class_name, level_name, src.c_str(), line,
+             func ? func : "?");
 
-    char line_buf[kLineBufSize + 160];
-    auto ts = FormatTimestamp();
-    auto tid = static_cast<unsigned long>(gettid());
-    auto tname = CurrentThreadName();
+    // Thread identity rides at the END of the line (off Eden's format but
+    // load-bearing for our fork-isolated probes: correlating a child's
+    // lines with its report needs the tid; Eden has no fork probes).
+    char line_buf[kLineBufSize + 288];
+    const auto tid = static_cast<unsigned long>(gettid());
+    const std::string tname = CurrentThreadName();
+    snprintf(line_buf, sizeof(line_buf), "%s%s |%lu:%s",
+             prelude, msg_buf, tid, tname.c_str());
 
-    std::snprintf(line_buf, sizeof(line_buf),
-                  "[%s] [%-5s] [%lu:%s] [%s] [%s:%d] %s",
-                  ts.c_str(),
-                  LevelToString(level),
-                  tid, tname.c_str(),
-                  CategoryToString(category),
-                  base, line,
-                  msg_buf);
-
-    // 3. Write to file under the lock.
+    // 4. Write to file under the lock.
     {
         std::lock_guard<std::mutex> lock(s.mtx);
         WriteToFile(line_buf, level);
     }
 
-    // 4. Mirror the filtered subset into the Kotlin diagnostic stream
-    //    (px5_diagnostic.log) so pasted event logs carry native evidence —
-    //    driver loader outcomes, verification failures, engine errors.
+    // 5. Mirror the filtered subset into the Kotlin diagnostic stream.
     DiagBridge::Forward(level, category, msg_buf);
 }
 
 void Logger::Log(LogLevel level, LogCategory category,
-                 const char* file, int line,
+                 const char* file, int line, const char* func,
                  const char* format, ...) noexcept {
     va_list args;
     va_start(args, format);
-    LogV(level, category, file, line, format, args);
+    LogV(level, category, file, line, func, format, args);
     va_end(args);
 }
 
 } // namespace PX5
-

@@ -61,6 +61,8 @@ struct ImageIdentity {
     char     containerSha256[65];        // hash of the on-disk file (SELF);
                                          // equals sha256 for plain ELFs
     uint64_t streamSize = 0;
+    uint64_t containerSize = 0;   // v1.42: on-disk container size (differs
+                                  // from streamSize for SELF containers)
     char     path[256];
     uint64_t entry = 0;
     bool     isSelf = false;

@@ -50,6 +50,9 @@ struct LoadedElfImage {
     char                 sha256Hex[65] = {};
     char                 containerSha256Hex[65] = {};
     uint64_t             streamSize = 0;
+    // v1.42 — on-disk container size (== streamSize for plain ELFs; the
+    // SELF container's size otherwise). Ledger fact for offline verifier.
+    uint64_t             containerSize = 0;
     uint64_t             entryFileOff = 0;   // file offset of the entry
                                              // bytes in the hashed stream
     bool                 entryProofMatch = false; // mem bytes == file bytes
@@ -92,7 +95,9 @@ public:
     static bool LoadElfFromMemory(const uint8_t* data, size_t size,
                                   const std::string& origin,
                                   LoadedElfImage& out,
-                                  const char* containerSha256Hex = nullptr);
+                                  const char* containerSha256Hex = nullptr,
+                                  bool fromSelfContainer = false,
+                                  uint64_t containerSizeBytes = 0);
 
     // SELF containers: parsed by the real extractor (loader/self_extract.cpp).
     // Unencrypted/fake-signed dumps load their inner ELF for real; segments

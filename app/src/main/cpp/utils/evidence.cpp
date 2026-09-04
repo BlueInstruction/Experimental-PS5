@@ -151,12 +151,32 @@ void BindImage(const ImageIdentity& img) {
     g_syscallNotes = 0;   // fresh ledger budget per bound image
     // The ledger line is the anchor event every later line refers back to.
     AppendLedger("image bound stream=%s sha256=%s container_sha256=%s "
-                 "size=%llu entry=0x%llx self=%d segs=%d path=%s",
+                 "size=%llu container_size=%llu entry=0x%llx self=%d "
+                 "segs=%d path=%s",
                  img.stream == Stream::InnerElf ? "inner_elf" : "file",
                  img.sha256, img.containerSha256,
                  (unsigned long long)img.streamSize,
+                 (unsigned long long)img.containerSize,
                  (unsigned long long)img.entry, img.isSelf ? 1 : 0,
                  img.segCount, img.path);
+    // v1.42 — full-fidelity ledger: every hash claim the loader computed
+    // is ALSO a ledger line, so px5_evidence.log alone (plus the user's
+    // own file / dumped inner ELF) is sufficient for offline
+    // verification — nothing has to be cross-referenced from the main
+    // log where v1.41 truncated segment hashes to 16 chars.
+    for (int i = 0; i < img.segCount; ++i) {
+        const auto& s = img.segs[i];
+        AppendLedger("segment phdr=%u va=0x%llx file_off=0x%llx filesz=%llu "
+                     "sha256=%s",
+                     s.phdrIndex, (unsigned long long)s.va,
+                     (unsigned long long)s.fileOff,
+                     (unsigned long long)s.filesz, s.sha256);
+    }
+    if (img.entryProven) {
+        AppendLedger("entry_proof file_off=0x%llx match=%d sha256=%s",
+                     (unsigned long long)img.entryFileOff,
+                     img.entryMatch ? 1 : 0, img.entrySha256);
+    }
 }
 
 bool GetImage(ImageIdentity& out) {
