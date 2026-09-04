@@ -9,6 +9,7 @@
 #include <cstring>
 #include <ctime>
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 #include <sys/mman.h>
 #include <sys/uio.h>
@@ -52,6 +53,17 @@ bool       g_hasExitCode = false;
 uint64_t   g_exitCode    = 0;
 GuestSyscallStats g_stats;
 
+// v1.43 — guest RIP checkpoint ring. Single writer (the guest exec thread
+// entering the bridge), readers tolerate benign races exactly like Stats().
+// No allocation, no locks beyond a short atomic seq — the crash path calls
+// Format() from signal context.
+constexpr size_t kPcRingSize = GuestPcRing::kSize;
+uint64_t g_pcRing[kPcRingSize] = {};
+std::atomic<uint64_t> g_pcRingSeq{0};
+std::atomic<uint64_t> g_pcRingLast{0};
+
+} // namespace
+
 // Convert a guest pointer argument to a host pointer through the window.
 inline bool GuestToHost(uint64_t ga, uint64_t len, void** out) {
     // MemoryManager lock is recursive-free; GetHostPointer does raw math but
@@ -77,7 +89,38 @@ void LogUnimplemented(uint32_t nr, const char* name,
              (unsigned long long)a2);
 }
 
-} // namespace
+void GuestPcRing::Note(uint64_t rip) {
+    const uint64_t seq = g_pcRingSeq.fetch_add(1, std::memory_order_relaxed);
+    g_pcRing[seq % kPcRingSize] = rip;
+    g_pcRingLast.store(rip, std::memory_order_relaxed);
+}
+
+uint64_t GuestPcRing::Last() {
+    return g_pcRingLast.load(std::memory_order_relaxed);
+}
+
+uint64_t GuestPcRing::Seq() {
+    return g_pcRingSeq.load(std::memory_order_relaxed);
+}
+
+void GuestPcRing::Format(char* out, size_t outCap) {
+    const uint64_t seq = g_pcRingSeq.load(std::memory_order_relaxed);
+    const uint64_t last = g_pcRingLast.load(std::memory_order_relaxed);
+    size_t o = static_cast<size_t>(
+        snprintf(out, outCap, "seq=%llu last=0x%llx recent=[",
+                 (unsigned long long)seq, (unsigned long long)last));
+    const size_t n = seq < kPcRingSize ? static_cast<size_t>(seq) : kPcRingSize;
+    const size_t show = n < 8 ? n : 8;
+    for (size_t i = 0; i < show && o < outCap; ++i) {
+        const uint64_t rip = seq >= (show - i)
+            ? g_pcRing[(seq - show + i) % kPcRingSize]
+            : 0;
+        o += static_cast<size_t>(snprintf(out + o, outCap - o,
+                                          "%s0x%llx", i ? "," : "",
+                                          (unsigned long long)rip));
+    }
+    if (o < outCap) snprintf(out + o, outCap - o, "]");
+}
 
 uint64_t GuestSyscalls::Dispatch(uint32_t nr,
                                  uint64_t a0, uint64_t a1, uint64_t a2,
@@ -348,6 +391,11 @@ void GuestSyscalls::ResetRun() {
     g_hasExitCode = false;
     g_exitCode = 0;
     g_stats = {};
+    // v1.43 — each run's checkpoint evidence is its own: the ring is
+    // per-run state exactly like the stats and the output capture.
+    g_pcRingSeq.store(0, std::memory_order_relaxed);
+    g_pcRingLast.store(0, std::memory_order_relaxed);
+    memset(g_pcRing, 0, sizeof g_pcRing);
 }
 
 const GuestSyscallStats& GuestSyscalls::Stats() {

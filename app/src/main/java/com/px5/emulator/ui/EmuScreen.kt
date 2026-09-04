@@ -426,28 +426,34 @@ fun EmuScreen(
             return@LaunchedEffect
         }
 
-        // -- stage 6: execution probe (contained, once per process/path) --
-        if (EmuScreenBoot.execProbedPath != target) {
-            EmuScreenBoot.execProbedPath = target
-            setStage(0.85f, "Starting game")
-            val exec = withContext(Dispatchers.Default) {
-                try {
-                    wrapper.nativeRunExecutionProbe(target, 8000)
-                } catch (t: Throwable) { "EXEC FAILED: ${t.message}" }
-            }
-            com.px5.emulator.core.PX5EventLog.event("gameBoot",
-                    "exec_probe_run",
-                    "target=${target.substringAfterLast('/')}",
-                    result = exec.lineSequence().firstOrNull()?.take(120) ?: "?")
+        // -- stage 6: execution probe (contained, EVERY boot attempt) -----
+        // v1.43 — the v1.42 gate ran this once per process/path; the vc42
+        // session then showed load OK with exec_probe_run never attempted
+        // again on re-entry. The probe executes in a fork-isolated child
+        // (a crash costs the child, never the app), so a previous CRASHED
+        // result is a reason to re-run and re-collect evidence, not to go
+        // silent. Attempt counter rides the event for session correlation.
+        EmuScreenBoot.execProbeAttempts += 1
+        setStage(0.85f, "Starting game")
+        val exec = withContext(Dispatchers.Default) {
             try {
-                wrapper.nativeLogEvent("gameBoot",
-                        "exec_probe_run ${exec.lineSequence().firstOrNull()?.take(160) ?: exec.take(160)}")
-            } catch (_: Throwable) {}
-            if (exec.contains("CRASHED") || exec.startsWith("EXEC FAILED")) {
-                // Contained by design: the app survives, evidence is on
-                // disk. Surface a chip, not a wall of red text.
-                sessionReport = (exec.lineSequence().firstOrNull() ?: exec).take(120)
-            }
+                wrapper.nativeRunExecutionProbe(target, 8000)
+            } catch (t: Throwable) { "EXEC FAILED: ${t.message}" }
+        }
+        com.px5.emulator.core.PX5EventLog.event("gameBoot",
+                "exec_probe_run",
+                "target=${target.substringAfterLast('/')} " +
+                        "attempt=${EmuScreenBoot.execProbeAttempts}",
+                result = exec.lineSequence().firstOrNull()?.take(120) ?: "?")
+        try {
+            wrapper.nativeLogEvent("gameBoot",
+                    "exec_probe_run attempt=${EmuScreenBoot.execProbeAttempts} " +
+                    (exec.lineSequence().firstOrNull()?.take(160) ?: exec.take(160)))
+        } catch (_: Throwable) {}
+        if (exec.contains("CRASHED") || exec.startsWith("EXEC FAILED")) {
+            // Contained by design: the app survives, evidence is on
+            // disk. Surface a chip, not a wall of red text.
+            sessionReport = (exec.lineSequence().firstOrNull() ?: exec).take(120)
         }
 
         setStage(1f, "Running")
@@ -1072,12 +1078,11 @@ private object EmuScreenBoot {
     @Volatile var bootDiagnosticsDone: Boolean = false
 
     /**
-     * v1.32: per-process guard for the contained execution probe. Holds
-     * the eboot target already probed this process — re-entering the
-     * same game skips the 8 s probe (evidence already on disk) and goes
-     * straight to the mapped image.
+     * v1.43: execution-probe attempt counter. Every boot attempt re-runs
+     * the probe (fork-isolated child — containment unchanged); the count
+     * correlates exec_probe_run events across re-entries of the same game.
      */
-    @Volatile var execProbedPath: String? = null
+    @Volatile var execProbeAttempts: Int = 0
 
     /**
      * v1.23: per-process guard for the auto conformance decision. Holds the

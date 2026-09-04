@@ -365,9 +365,15 @@ public:
         OSABI = FEXCore::HLE::SyscallOSABI::OS_LINUX64;
     }
 
-    uint64_t HandleSyscall(FEXCore::Core::CpuStateFrame* /*Frame*/,
+    uint64_t HandleSyscall(FEXCore::Core::CpuStateFrame* Frame,
                            FEXCore::HLE::SyscallArguments* Args) override {
         // Convention: Argument[0]=syscall NR, [1..6]=rdi,rsi,rdx,r10,r8,r9.
+        // v1.43 — the guest RIP at bridge entry is a REAL execution
+        // checkpoint: record it (fixed ring) so every probe answers "how
+        // far did the guest actually get" with evidence, not narration.
+        if (Frame) {
+            GuestSyscalls::NoteGuestRip(Frame->State.rip);
+        }
         return GuestSyscalls::Dispatch(
             static_cast<uint32_t>(Args->Argument[0]),
             Args->Argument[1], Args->Argument[2], Args->Argument[3],
@@ -518,6 +524,22 @@ bool FaultInterceptRouterWithTraps(int sig, void* siginfo, void* uctx) {
         if (GuestTrapRouter(sig, siginfo, uctx)) {
             return true;
         }
+    }
+    // v1.43 — UNCLAIMED fault = the crash report that follows will be the
+    // only record of this run. Attach the execution-checkpoint evidence to
+    // the log BEFORE the report: syscall bridge counters + the guest RIP
+    // ring. seq=0 means the guest never reached the bridge — that absence
+    // is itself the decisive fact (dispatch died before any syscall).
+    {
+        char ring[256];
+        GuestPcRing::Format(ring, sizeof ring);
+        const auto& st = GuestSyscalls::Stats();
+        PX5_LOGE(LogCategory::FEX,
+                 "exec evidence @unclaimed-fault: sig=%d syscallRipRing: %s | "
+                 "syscalls total=%llu handled=%llu",
+                 sig, ring,
+                 (unsigned long long)st.totalCalls,
+                 (unsigned long long)st.handledCalls);
     }
     return false;   // unclaimed: genuine crash, full report follows
 }
@@ -818,6 +840,21 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
                  ? " | guestTrap=fired (see trap-routed line above)"
                  : "");
 
+    // v1.43 — per-run execution-checkpoint epilogue. Same numbers the crash
+    // path would print, on every completed run: the guest RIP ring (real
+    // bridge-entry checkpoints) + syscall counters. Zeroes are reported,
+    // not hidden.
+    {
+        char ring[256];
+        GuestPcRing::Format(ring, sizeof ring);
+        const auto& st = GuestSyscalls::Stats();
+        PX5_LOGI(LogCategory::FEX,
+                 "exec: syscallRipRing %s | syscalls total=%llu handled=%llu",
+                 ring,
+                 (unsigned long long)st.totalCalls,
+                 (unsigned long long)st.handledCalls);
+    }
+
     g_context->DestroyThread(thread);
     return res;
 }
@@ -941,7 +978,14 @@ std::string GetEngineCounters() {
              (unsigned long long)g_lastGuestTrap.guestRip,
              mm.GetWindowInfoString().c_str(),
              g_execThread.load(std::memory_order_relaxed) ? "active" : "idle");
-    return buf;
+
+    // v1.43 — execution checkpoints ride the same honest-counters panel.
+    std::string out(buf);
+    char ring[256];
+    GuestPcRing::Format(ring, sizeof ring);
+    out += "\nsyscallRipRing: ";
+    out += ring;
+    return out;
 }
 
 bool ApplyEngineConfigOverride(const std::string& key, const std::string& value) {

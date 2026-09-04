@@ -56,6 +56,285 @@ uint32_t ProtFromFlags(uint32_t pFlags) {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// v1.43 — PT_DYNAMIC relocation processing (the "parsed, not yet processed"
+// era ends here).
+//
+// Scope decided from the vc42 device image itself (Dreaming Sarah
+// PPSA02929, inner ELF 0e95ecd2…), decoded offline from the extracted
+// stream the user verified: DT_RELA holds 120,333 entries —
+//   119,961 × R_X86_64_RELATIVE (== DT_RELACOUNT, no symbols needed)
+//     341 × R_X86_64_64 + 31 × R_X86_64_GLOB_DAT, ALL 372 referencing
+//           UNDEFINED symbols (imports from PS5 system modules)
+// plus a separate DT_JMPREL PLT table (443 JUMP_SLOT entries, also imports).
+//
+// What is APPLIED here:
+//   * R_X86_64_RELATIVE:  *(base + r_offset) = base + r_addend  — plain
+//     8-byte stores through the memory manager, target validated to sit
+//     inside a WRITABLE mapped segment first (refused and counted
+//     otherwise — never a blind store).
+//   * R_X86_64_64 / GLOB_DAT / JUMP_SLOT whose symbol is DEFINED in this
+//     image's own dynsym: *(base + r_offset) = base + st_value + addend.
+// What is COUNTED, never faked:
+//   * symbol-based relocs against UNDEF symbols (the HLE/NID gate
+//     worklist — writing anything there would invent addresses),
+//   * IRELATIVE (needs a guest resolver call — not yet supported),
+//   * any other type (bounded histogram in the log).
+// Every number logged is produced by the real loop over the real table.
+// ---------------------------------------------------------------------------
+#pragma pack(push, 1)
+struct Elf64DynRaw  { int64_t tag; uint64_t val; };
+struct Elf64RelaRaw { uint64_t offset; uint64_t info; int64_t  addend; };
+struct Elf64SymRaw  { uint32_t name; uint8_t info; uint8_t other;
+                      uint16_t shndx; uint64_t value; uint64_t size; };
+#pragma pack(pop)
+
+constexpr int64_t  DT_NULL_      = 0;
+constexpr int64_t  DT_RELA_      = 7;
+constexpr int64_t  DT_RELASZ_    = 8;
+constexpr int64_t  DT_RELAENT_   = 9;
+constexpr int64_t  DT_SYMTAB_    = 6;
+constexpr int64_t  DT_JMPREL_    = 23;
+constexpr int64_t  DT_PLTRELSZ_  = 2;
+constexpr int64_t  DT_RELACOUNT_ = 0x6ffffff9;
+
+constexpr uint32_t R_X86_64_64_        = 1;
+constexpr uint32_t R_X86_64_GLOB_DAT_  = 6;
+constexpr uint32_t R_X86_64_JUMP_SLOT_ = 7;
+constexpr uint32_t R_X86_64_RELATIVE_  = 8;
+constexpr uint32_t R_X86_64_IRELATIVE_ = 37;
+
+void ApplyDynamicRelocations(const uint8_t* data, size_t size,
+                             uint64_t loadBase,
+                             LoadedElfImage& out) {
+    auto& mem = MemoryManager::GetInstance();
+
+    if (out.dynFilesz == 0 ||
+        out.dynStreamOff == 0 ||
+        out.dynStreamOff + out.dynFilesz > size) {
+        PX5_LOGW(LogCategory::LOADER,
+                 "REL: no usable PT_DYNAMIC in stream (off=0x%llx filesz=%zu)"
+                 " — zero relocations applied, image stays as linked",
+                 (unsigned long long)out.dynStreamOff, out.dynFilesz);
+        return;
+    }
+
+    // ---- pass 1: the dynamic table's own facts --------------------------
+    uint64_t relaVa = 0, relaSz = 0, relaEnt = 0, relaCountHint = 0;
+    uint64_t symTabVa = 0, jmpRelVa = 0, pltRelSz = 0;
+    const size_t maxDynEntries = out.dynFilesz / sizeof(Elf64DynRaw);
+    for (size_t i = 0; i < maxDynEntries; ++i) {
+        Elf64DynRaw d{};
+        memcpy(&d, data + out.dynStreamOff + i * sizeof(Elf64DynRaw),
+               sizeof d);
+        if (d.tag == DT_NULL_) break;
+        switch (d.tag) {
+            case DT_RELA_:      relaVa = d.val; break;
+            case DT_RELASZ_:    relaSz = d.val; break;
+            case DT_RELAENT_:   relaEnt = d.val; break;
+            case DT_RELACOUNT_: relaCountHint = d.val; break;
+            case DT_SYMTAB_:    symTabVa = d.val; break;
+            case DT_JMPREL_:    jmpRelVa = d.val; break;
+            case DT_PLTRELSZ_:  pltRelSz = d.val; break;
+            default: break;
+        }
+    }
+    if (relaVa == 0 || relaSz == 0) {
+        PX5_LOGI(LogCategory::LOADER,
+                 "REL: DT_RELA absent — nothing to relocate");
+        out.dynProcessed = true;
+        return;
+    }
+    if (relaEnt == 0) relaEnt = sizeof(Elf64RelaRaw);
+    const size_t relaCount = relaSz / relaEnt;
+    out.relaVa = loadBase + relaVa;
+    out.relaEntries = relaCount;
+
+    // VA -> stream offset for the RELOCATION TABLE itself. For DYN-style
+    // images the table VA is link-time; find the segment whose VA window
+    // covers it and step through that segment's file offset. Segment
+    // vaddr = loadBase + p_vaddr, so link-time coverage uses
+    // (relaVa - loadBase) against p_vaddr ranges — recovered here from
+    // (seg.vaddr - loadBase).
+    auto streamOffForLinkVa = [&](uint64_t linkVa, uint64_t& outOff) -> bool {
+        for (const auto& s : out.segments) {
+            if (s.filesz == 0) continue;
+            const uint64_t segLinkVa = s.vaddr - loadBase;
+            if (linkVa >= segLinkVa &&
+                linkVa < segLinkVa + s.filesz) {
+                outOff = s.fileOffset + (linkVa - segLinkVa);
+                return true;
+            }
+        }
+        return false;
+    };
+    auto vaWritableSeg = [&](uint64_t absVa) -> const LoadedElfImage::Segment* {
+        for (const auto& s : out.segments) {
+            if (absVa >= s.vaddr && absVa < s.vaddr + s.memsz &&
+                (s.flags & MemoryFlags::PAGE_WRITE)) {
+                return &s;
+            }
+        }
+        return nullptr;
+    };
+
+    uint64_t relaStreamOff = 0;
+    const bool haveRela = streamOffForLinkVa(relaVa, relaStreamOff);
+    out.relaStreamOff = relaStreamOff;
+    if (!haveRela || relaStreamOff + relaSz > size) {
+        PX5_LOGE(LogCategory::LOADER,
+                 "REL: DT_RELA va=0x%llx does not map into the parsed stream"
+                 " (covered=%d) — applied=0, refusing to guess",
+                 (unsigned long long)relaVa, haveRela ? 1 : 0);
+        out.dynProcessed = true;
+        return;
+    }
+
+    // dynsym stream offset (for the defined/undefined verdict on
+    // symbol-based relocs).
+    uint64_t symStreamOff = 0;
+    const bool haveSym = symTabVa ? streamOffForLinkVa(symTabVa, symStreamOff)
+                                  : false;
+
+    // ---- pass 2: apply / count, one real loop over real entries ---------
+    uint64_t applied = 0, unresolved = 0, skippedOther = 0, refused = 0;
+    uint32_t unresolvedByType[4] = {}; // index 0..3 -> type 1,6,7,other-sym
+    // Bounded evidence samples (first 3 of each class).
+    struct RelSample { uint64_t off, addend, oldVal, newVal, streamOff; };
+    RelSample samples[3] = {};
+    size_t sampleCount = 0;
+
+    auto processRelaTable = [&](uint64_t tableStreamOff, size_t count,
+                                bool isPlt) {
+        for (size_t i = 0; i < count; ++i) {
+            const size_t entOff = tableStreamOff + i * relaEnt;
+            if (entOff + sizeof(Elf64RelaRaw) > size) break;
+            Elf64RelaRaw r{};
+            memcpy(&r, data + entOff, sizeof r);
+            const uint32_t type = static_cast<uint32_t>(r.info & 0xffffffffu);
+            const uint32_t sym  = static_cast<uint32_t>(r.info >> 32);
+
+            if (type == R_X86_64_RELATIVE_) {
+                const uint64_t targetVa = loadBase + r.offset;
+                const auto* seg = vaWritableSeg(targetVa);
+                if (!seg) { ++refused; continue; }
+                void* host = mem.GetHostPointer(targetVa);
+                if (!host) { ++refused; continue; }
+                uint64_t oldVal = 0;
+                memcpy(&oldVal, host, sizeof oldVal);
+                const uint64_t newVal = loadBase + r.addend;
+                memcpy(host, &newVal, sizeof newVal);
+                if (sampleCount < 3) {
+                    samples[sampleCount] = {r.offset,
+                                            static_cast<uint64_t>(r.addend),
+                                            oldVal, newVal,
+                                            seg->fileOffset +
+                                                (targetVa - seg->vaddr)};
+                    ++sampleCount;
+                }
+                ++applied;
+                continue;
+            }
+
+            if (type == R_X86_64_64_ || type == R_X86_64_GLOB_DAT_ ||
+                type == R_X86_64_JUMP_SLOT_) {
+                // Symbol-based. Only a symbol DEFINED in this image is
+                // resolvable here; UNDEF = import = the HLE/NID worklist.
+                bool defined = false;
+                uint64_t stValue = 0;
+                if (haveSym) {
+                    Elf64SymRaw s{};
+                    const size_t symOff = symStreamOff +
+                        static_cast<size_t>(sym) * sizeof(Elf64SymRaw);
+                    if (symOff + sizeof s <= size) {
+                        memcpy(&s, data + symOff, sizeof s);
+                        defined = s.shndx != 0;
+                        stValue = s.value;
+                    }
+                }
+                if (defined) {
+                    const uint64_t targetVa = loadBase + r.offset;
+                    if (!vaWritableSeg(targetVa)) { ++refused; continue; }
+                    void* host = mem.GetHostPointer(targetVa);
+                    if (!host) { ++refused; continue; }
+                    const uint64_t newVal = loadBase + stValue +
+                                            static_cast<uint64_t>(r.addend);
+                    memcpy(host, &newVal, sizeof newVal);
+                    ++applied;
+                } else {
+                    ++unresolved;
+                    if (type == R_X86_64_64_)        ++unresolvedByType[0];
+                    else if (type == R_X86_64_GLOB_DAT_) ++unresolvedByType[1];
+                    else if (type == R_X86_64_JUMP_SLOT_) ++unresolvedByType[2];
+                    else                             ++unresolvedByType[3];
+                }
+                continue;
+            }
+
+            ++skippedOther;
+            if (type == R_X86_64_IRELATIVE_) {
+                PX5_LOGW(LogCategory::LOADER,
+                         "REL: IRELATIVE at r_offset=0x%llx NOT applied "
+                         "(needs a guest ifunc resolver — counted, not faked)",
+                         (unsigned long long)(loadBase + r.offset));
+            }
+        }
+        (void)isPlt;
+    };
+
+    processRelaTable(relaStreamOff, relaCount, false);
+
+    // PLT relocations (DT_JMPREL) — same contract, own table.
+    uint64_t jmpStreamOff = 0;
+    size_t pltCount = 0;
+    if (jmpRelVa && pltRelSz && (pltRelSz % relaEnt) == 0 &&
+        streamOffForLinkVa(jmpRelVa, jmpStreamOff) &&
+        jmpStreamOff + pltRelSz <= size) {
+        pltCount = pltRelSz / relaEnt;
+        processRelaTable(jmpStreamOff, pltCount, true);
+    }
+
+    out.dynProcessed = true;
+    out.relocApplied = applied;
+    out.relocUnresolvedImports = unresolved;
+    out.relocSkippedOther = skippedOther;
+    out.relocWriteRefused = refused;
+
+    PX5_LOGI(LogCategory::LOADER,
+             "REL: dynamic stream_off=0x%llx filesz=%zu — RELA va=0x%llx "
+             "stream_off=0x%llx entries=%zu (RELACOUNT hint=%llu)"
+             "%s",
+             (unsigned long long)out.dynStreamOff, out.dynFilesz,
+             (unsigned long long)relaVa,
+             (unsigned long long)relaStreamOff, relaCount,
+             (unsigned long long)relaCountHint,
+             pltCount ? "" : " — no usable DT_JMPREL");
+    PX5_LOGI(LogCategory::LOADER,
+             "REL: applied=%llu unresolvedImports=%llu "
+             "(R_64=%u GLOB_DAT=%u JUMP_SLOT=%u other=%u) skippedOther=%llu "
+             "writeRefused=%llu — unresolved = HLE/NID gate worklist",
+             (unsigned long long)applied,
+             (unsigned long long)unresolved,
+             unresolvedByType[0], unresolvedByType[1],
+             unresolvedByType[2], unresolvedByType[3],
+             (unsigned long long)skippedOther,
+             (unsigned long long)refused);
+    for (size_t i = 0; i < sampleCount; ++i) {
+        PX5_LOGI(LogCategory::LOADER,
+                 "REL[%zu] r_offset=0x%llx addend=0x%llx old=0x%016llx "
+                 "new=0x%016llx (target stream_off=0x%llx — dd|sha256 "
+                 "verifiable against your file)",
+                 i, (unsigned long long)samples[i].off,
+                 (unsigned long long)samples[i].addend,
+                 (unsigned long long)samples[i].oldVal,
+                 (unsigned long long)samples[i].newVal,
+                 (unsigned long long)samples[i].streamOff);
+    }
+    Breadcrumb::Set("dyn: REL applied=%llu unresolved=%llu",
+                    (unsigned long long)applied,
+                    (unsigned long long)unresolved);
+}
+
 // v1.29: first-16-bytes evidence. The vc29 session ended on "bad ELF
 // magic" for a 7.7 MB eboot.bin with zero bytes named — the single most
 // expensive missing clue we have produced. Any format verdict now names
@@ -394,11 +673,19 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
             continue;
         }
         if (ph.type == PT_DYNAMIC_) {
+            // v1.43 — captured and PROCESSED (see ApplyDynamicRelocations
+            // below). The vc42 device session executed the game's entry with
+            // every absolute data pointer still at its link-time value; the
+            // first block died on a lock-ed RMW through one of them.
+            out.dynVa        = loadBase + ph.vaddr;
+            out.dynStreamOff = ph.offset;
+            out.dynFilesz    = static_cast<size_t>(ph.filesz);
             PX5_LOGI(LogCategory::LOADER,
-                     "  PT_DYNAMIC: va=0x%llx filesz=%llu (parsed, not yet "
-                     "processed)",
-                     (unsigned long long)(loadBase + ph.vaddr),
-                     (unsigned long long)ph.filesz);
+                     "  PT_DYNAMIC: va=0x%llx stream_off=0x%llx filesz=%zu "
+                     "(captured — relocations applied after mapping)",
+                     (unsigned long long)out.dynVa,
+                     (unsigned long long)out.dynStreamOff,
+                     out.dynFilesz);
             continue;
         }
 
@@ -524,6 +811,13 @@ bool ElfLoader::LoadElfFromMemory(const uint8_t* data, size_t size,
         out.error = "no PT_LOAD segments found";
         return false;
     }
+
+    // v1.43 — relocations, applied while every fact (loadBase, segment
+    // file mapping, writable seal state) is live. Runs AFTER all segments
+    // are copied and sealed: R_X86_64_RELATIVE targets are by definition
+    // writable-section objects (.got/.data/.data.rel.ro), and PT_GNU_RELRO
+    // is deliberately not enforced here, so sealed pages still hold W.
+    ApplyDynamicRelocations(data, size, loadBase, out);
 
     // v1.32: entry is an IMAGE-OFFSET for DYN-style images (the vc32
     // eboot carried entry=0x70) — the executable address is base+entry.

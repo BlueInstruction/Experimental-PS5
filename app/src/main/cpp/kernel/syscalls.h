@@ -27,6 +27,23 @@ struct GuestSyscallStats {
     uint64_t bytesWritten    = 0;
 };
 
+// v1.43 — guest RIP checkpoints. Every guest syscall records the guest RIP
+// the CPU state carried when the bridge was entered. These are real
+// execution checkpoints written by the dispatch path itself — the "how far
+// did the game actually get" answer the vc42 session lacked (its crash
+// report showed only the stale initial rip). Fixed-size BSS ring, dumped
+// on crash and on every exec epilogue.
+class GuestPcRing {
+public:
+    static constexpr size_t kSize = 64;
+    static void Note(uint64_t rip);                    // one per syscall
+    static uint64_t Last();                            // 0 when empty
+    static uint64_t Seq();                             // total pushes ever
+    // "seq=%llu last=0x… recent=[0x…,0x…,…]" — last 8, into a caller
+    // buffer. Async-signal-safe shape: snprintf only, no allocation.
+    static void Format(char* out, size_t outCap);
+};
+
 class GuestSyscalls {
 public:
     // Dispatch one syscall from guest context.
@@ -35,6 +52,10 @@ public:
                              uint64_t a0 = 0, uint64_t a1 = 0,
                              uint64_t a2 = 0, uint64_t a3 = 0,
                              uint64_t a4 = 0, uint64_t a5 = 0);
+
+    // v1.43 — forwarder used by the FEXCore syscall handler so the bridge
+    // translation unit keeps owning the checkpoint plumbing.
+    static void NoteGuestRip(uint64_t rip) { GuestPcRing::Note(rip); }
 
     // Captured guest stdout (fd 1) / stderr (fd 2) — surfaced to UI evidence.
     static std::string TakeOutput();

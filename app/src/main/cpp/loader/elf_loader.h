@@ -79,6 +79,32 @@ struct LoadedElfImage {
     size_t               tlsMemsz = 0;
     uint64_t             tlsAlign = 0;
 
+    // v1.43 — PT_DYNAMIC relocation processing. The vc42 device session
+    // died INSIDE the game's first compiled block (SIGSEGV si_addr=0x0,
+    // LDAXR [x27=0] in a JIT block — a lock-ed RMW through a null guest
+    // pointer) while the loader log honestly said "PT_DYNAMIC: parsed,
+    // not yet processed". A DYN-style (e_type 0xFE10) ORBIS image keeps
+    // every absolute data pointer unrelocated until DT_RELA is applied —
+    // 119,961 R_X86_64_RELATIVE entries on the vc42 image alone. These
+    // fields carry what was processed and what was refused, each count
+    // produced by a real loop over real table bytes.
+    bool                 dynProcessed = false;
+    uint64_t             dynVa = 0;          // guest VA of the dynamic table
+    uint64_t             dynStreamOff = 0;   // its offset in the hashed stream
+    size_t               dynFilesz = 0;
+    uint64_t             relaVa = 0;         // DT_RELA (link-time VA)
+    uint64_t             relaStreamOff = 0;  // translated stream offset
+    size_t               relaEntries = 0;    // DT_RELASZ / DT_RELAENT
+    uint64_t             relocApplied = 0;   // R_X86_64_RELATIVE writes done
+    uint64_t             relocUnresolvedImports = 0; // sym-based relocs whose
+                              // symbol is UNDEF in this image (DT_RELA and
+                              // DT_JMPREL both count) — the HLE/NID gate
+                              // worklist (vc42 image: 815 = 341 R_64 +
+                              // 31 GLOB_DAT + 443 JUMP_SLOT)
+    uint64_t             relocSkippedOther = 0;      // named-otherwise types
+    uint64_t             relocWriteRefused = 0;      // target not in a
+                              // writable mapped segment — refused, not done
+
     size_t TotalMemSize() const { return imageHighVa - imageLowVa; }
 };
 
