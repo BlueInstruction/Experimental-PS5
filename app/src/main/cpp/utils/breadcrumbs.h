@@ -21,19 +21,35 @@
 #include <cstdarg>
 #include <cstddef>
 
+/**
+ * Breadcrumb trail for pinning execution steps before process death.
+ * Records last known native steps in a fixed-size ring for crash forensics.
+ */
 namespace PX5::Breadcrumb {
 
-// Record a step marker (printf-style). Never allocates beyond a fixed
-// 128-byte slot; silently truncates. Safe from any normal thread.
+/**
+ * Records a step marker (printf-style) in the breadcrumb ring.
+ * Never allocates beyond a fixed 128-byte slot; silently truncates.
+ * Safe from any normal thread (not signal handlers).
+ * @param fmt Printf-style format string
+ * @param ... Format arguments
+ */
 void Set(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
-// Async-signal-safe drain into `fd` (one line per slot, oldest first).
-// Returns the number of bytes written.
+/**
+ * Dumps breadcrumb ring to file descriptor (async-signal-safe).
+ * One line per slot, oldest first.
+ * @param fd File descriptor to write to
+ * @return Number of bytes written
+ */
 long DumpToFd(int fd);
 
-// Copies the most recent crumb (or an empty string if none yet) into `out`.
-// Normal-context only (takes the ring mutex) — used by the heartbeat
-// thread so a silent process death still names its last live stage.
+/**
+ * Copies most recent breadcrumb to output buffer (normal-context only).
+ * Takes ring mutex; used by heartbeat thread for silent death attribution.
+ * @param out Output buffer
+ * @param n Buffer size
+ */
 void Last(char* out, size_t n);
 
 } // namespace PX5::Breadcrumb

@@ -28,33 +28,44 @@ namespace PX5 {
 // order. A false return falls through to the full crash report, so a
 // fault nobody claims is still a crash with forensics — never silence.
 // ---------------------------------------------------------------------------
+
+/**
+ * Signal-level crash handler with full register dumps and symbolized backtraces.
+ */
 class CrashHandler {
 public:
-    // Arms the signal handlers (ONCE, from JNI_OnLoad with an empty dir —
-    // no Android context exists yet) and sets the report directory (EVERY
-    // call with a non-empty dir wins; MainActivity supplies the real app
-    // logs dir via nativeInitRuntimeContext afterwards). The old
-    // first-call-wins rule froze the dir empty, sending every report to
-    // /data/local/tmp — unwritable for app processes — so real crashes
-    // left NO file and the UI claimed otherwise (fixed 2026-08-30).
+    /**
+     * Installs signal handlers and sets crash report directory.
+     * First call from JNI_OnLoad arms handlers; subsequent calls with non-empty dir
+     * update the logs directory (MainActivity supplies real app logs path later).
+     * @param logsDir Directory where px5_crash_latest.log will be written
+     */
     static void Install(const std::string& logsDir);
 
-    // Directory where px5_crash_latest.log is written (must be app-writable).
+    /**
+     * Returns directory where crash logs are written (must be app-writable).
+     * @return Logs directory path
+     */
     static const std::string& LogsDir();
 
-    // Return true from the intercept when the fault was consumed (SMC write
-    // invalidated, unaligned access repaired, context adjusted for retry).
-    // Runs in signal context: async-signal-safe work only.
+    /**
+     * Fault intercept callback type for FEXCore SMC/unaligned-atomic handling.
+     * Must be async-signal-safe. Return true if fault consumed, false to report crash.
+     */
     using FaultIntercept = bool (*)(int sig, void* siginfo, void* ucontext);
+
+    /**
+     * Registers fault intercept for engine-level fault routing.
+     * Called before crash reporting; true return consumes fault, false reports crash.
+     * @param fn Intercept function (async-signal-safe)
+     */
     static void SetFaultIntercept(FaultIntercept fn);
 
-    // v1.21 — give the CALLING thread its own 256KB alternate signal stack.
-    // sigaltstack is per-thread; Install() only covers the main thread, so
-    // engine probes running on Kotlin/DefaultDispatch workers fault with no
-    // reserve — and when the fault fires while the thread is on the GUEST
-    // stack, SA_ONSTACK has nothing healthy to switch to and the report
-    // dies mid-write. Arm at the entry of every engine/probe path; cheap
-    // (one pthread_getspecific check) after the first call per thread.
+    /**
+     * Arms calling thread's 256KB alternate signal stack.
+     * Per-thread operation; must be called at entry of every engine/probe path.
+     * Cheap after first call per thread (pthread_getspecific check).
+     */
     static void ArmThreadAltStack();
 };
 

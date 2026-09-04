@@ -26,58 +26,164 @@ namespace PX5::SceKernelHle {
 
 constexpr int64_t SCE_OK = 0;
 
+/**
+ * HLE symbol table entry with invocation counter.
+ */
 struct SymbolEntry {
-    const char* name;
-    uint64_t    calls;      // invocation counter (atomic-ish, benign races)
+    const char* name;   ///< Symbol name (e.g., "sceKernelOpen")
+    uint64_t    calls;  ///< Invocation counter (atomic-ish, benign races)
 };
 
+/**
+ * High-level emulation layer for PS5 libkernel.sprx functions.
+ */
 class KernelHle {
 public:
+    /**
+     * Returns the singleton KernelHle instance.
+     * @return Reference to singleton
+     */
     static KernelHle& GetInstance();
 
-    // Registers the full symbol table. Idempotent.
+    /**
+     * Registers the full symbol table (idempotent).
+     */
     void RegisterAll();
 
+    /**
+     * Returns the complete symbol table.
+     * @return Reference to symbol table vector
+     */
     const std::vector<SymbolEntry>& Table() const { return m_table; }
+
+    /**
+     * Returns the number of registered symbols.
+     * @return Symbol count
+     */
     size_t SymbolCount() const;
 
-    // Dispatch by symbol name with up to 6 args — used by the evidence
-    // self-test to exercise wrappers without guest imports wired yet.
+    /**
+     * Dispatches by symbol name with up to 6 arguments.
+     * Used by self-tests to exercise wrappers without guest imports wired.
+     * @param symbol Symbol name to invoke
+     * @param a0 First argument
+     * @param a1 Second argument
+     * @param a2 Third argument
+     * @param a3 Fourth argument
+     * @param a4 Fifth argument
+     * @param a5 Sixth argument
+     * @return Function result (SCE_OK or errno-style negative)
+     */
     uint64_t InvokeByName(const std::string& symbol,
                           uint64_t a0 = 0, uint64_t a1 = 0,
                           uint64_t a2 = 0, uint64_t a3 = 0,
                           uint64_t a4 = 0, uint64_t a5 = 0);
 
+    /**
+     * Returns human-readable summary of HLE state.
+     * @return Summary string with symbol count and stats
+     */
     std::string GetSummaryString() const;
 
     // --- direct entry points ------------------------------------------
-    // int  sceKernelOpen(const char* path, int flags, mode_t mode)
+
+    /**
+     * HLE for sceKernelOpen: opens a file descriptor.
+     * @param pathGuestOrHostPtr Guest pointer to path string
+     * @param flags Open flags (O_RDONLY, O_WRONLY, etc.)
+     * @param mode File mode
+     * @return File descriptor on success, negative errno on failure
+     */
     uint64_t Open(uint64_t pathGuestOrHostPtr, uint64_t flags, uint64_t mode);
-    // ssize sceKernelWrite(int fd, void* buf, size_t count)
+
+    /**
+     * HLE for sceKernelWrite: writes to a file descriptor.
+     * @param fd File descriptor
+     * @param buf Guest pointer to buffer
+     * @param count Bytes to write
+     * @return Bytes written on success, negative errno on failure
+     */
     uint64_t Write(uint64_t fd, uint64_t buf, uint64_t count);
-    // int  sceKernelClose(int fd)
+
+    /**
+     * HLE for sceKernelClose: closes a file descriptor.
+     * @param fd File descriptor
+     * @return 0 on success, negative errno on failure
+     */
     uint64_t Close(uint64_t fd);
-    // int  sceKernelAllocateDirectMemory(off_t searchStart, off_t searchEnd,
-    //                                    size_t len, size_t alignment,
-    //                                    off_t* physAddrOut)
+
+    /**
+     * HLE for sceKernelAllocateDirectMemory: allocates physical memory pages.
+     * Two-phase allocation: Allocate returns physical offset, Map backs it.
+     * @param searchStart Physical search start offset
+     * @param searchEnd Physical search end offset
+     * @param len Allocation size in bytes
+     * @param alignment Alignment requirement
+     * @param physAddrOut Guest pointer to receive physical address
+     * @return SCE_OK on success, negative errno on failure
+     */
     uint64_t AllocateDirectMemory(uint64_t searchStart, uint64_t searchEnd,
                                   uint64_t len, uint64_t alignment,
                                   uint64_t physAddrOut);
-    // void* sceKernelMapDirectMemory(void* addr, size_t len, int prot,
-    //                                int flags, off_t physical, size_t maxPgOff)
+
+    /**
+     * HLE for sceKernelMapDirectMemory: maps physical pages to virtual address.
+     * @param addrRequested Requested virtual address (0 for any)
+     * @param len Mapping size in bytes
+     * @param prot Protection flags (PROT_READ | PROT_WRITE | PROT_EXEC)
+     * @param flagsM Mapping flags
+     * @param physical Physical offset from AllocateDirectMemory
+     * @param maxPgOff Maximum page offset
+     * @return Virtual address on success, 0 on failure
+     */
     uint64_t MapDirectMemory(uint64_t addrRequested, uint64_t len,
                              uint64_t prot, uint64_t flagsM,
                              uint64_t physical, uint64_t maxPgOff);
-    uint64_t UnmapDirectMemory(uint64_t addr, uint64_t len);
-    uint64_t Mprotect(uint64_t addr, uint64_t len, uint64_t prot);
-    uint64_t SleepSeconds(uint64_t seconds);          // capped at 60 s
-    uint64_t IsNeoMode();                              // always 0 (base)
-    uint64_t GetCompiledSdkVersion();                  // 0 until a real value
 
-    // int64 sceGnmSubmitCommandBuffers(uint32 count, void* descArray,
-    //                                  void* userData)
-    // Phase C milestone 2b: routes to GnmSubmit -> Pm4Decoder -> GnmState.
-    // SCE-style 0 on success, negative errno-style on failure.
+    /**
+     * HLE for sceKernelUnmapDirectMemory: unmaps virtual address range.
+     * @param addr Virtual address
+     * @param len Size in bytes
+     * @return SCE_OK on success, negative errno on failure
+     */
+    uint64_t UnmapDirectMemory(uint64_t addr, uint64_t len);
+
+    /**
+     * HLE for sceKernelMprotect: changes memory protection.
+     * @param addr Virtual address
+     * @param len Size in bytes
+     * @param prot New protection flags
+     * @return SCE_OK on success, negative errno on failure
+     */
+    uint64_t Mprotect(uint64_t addr, uint64_t len, uint64_t prot);
+
+    /**
+     * HLE for sceKernelSleep: sleeps for specified seconds (capped at 60s).
+     * @param seconds Sleep duration in seconds
+     * @return SCE_OK
+     */
+    uint64_t SleepSeconds(uint64_t seconds);
+
+    /**
+     * HLE for sceKernelIsNeoMode: queries Neo/Pro mode (always returns 0 = base).
+     * @return 0 (base console mode)
+     */
+    uint64_t IsNeoMode();
+
+    /**
+     * HLE for sceKernelGetCompiledSdkVersion: returns SDK version (0 until real value).
+     * @return SDK version
+     */
+    uint64_t GetCompiledSdkVersion();
+
+    /**
+     * HLE for sceGnmSubmitCommandBuffers: submits GNM command buffers to GPU.
+     * Routes to GnmSubmit -> Pm4Decoder -> GnmState.
+     * @param count Number of command buffer descriptors
+     * @param descriptorsPtr Guest pointer to descriptor array
+     * @param userDataPtr Guest pointer to user data
+     * @return SCE_OK on success, negative errno on failure
+     */
     uint64_t GnmSubmitCommandBuffers(uint64_t count, uint64_t descriptorsPtr,
                                      uint64_t userDataPtr);
 

@@ -23,58 +23,85 @@ namespace PX5 {
 //     chosen driver against /proc/self/maps after the ICD is bound.
 //   * No fabricated "driver installed" state ever leaves this class.
 // ---------------------------------------------------------------------------
+
+/**
+ * GPU driver manager for Vulkan ICD selection (system vs. imported drivers).
+ */
 class GpuDriverManager {
 public:
+    /**
+     * Returns the singleton GpuDriverManager instance.
+     * @return Reference to singleton
+     */
     static GpuDriverManager& GetInstance();
 
-    // Returns the assigned slot id (>=1), or 0 on rejection.
-    // soname = the exact file name inside dir the loader must open —
-    // normally meta.json's "libraryName" (vulkan.ad0863.so,
-    // libvulkan_freedreno.so, ...), or the normalized libvulkan_adreno.so
-    // when a package carries no meta.json. The loader never guesses.
+    /**
+     * Registers a driver slot for a user-imported Turnip/Mesa driver.
+     * @param label Human-readable label (e.g., "Turnip v26.3.0")
+     * @param soAbsolutePath Absolute path to driver .so file
+     * @param soname Exact file name the loader must open (from meta.json libraryName)
+     * @return Assigned slot ID (>=1), or 0 on rejection
+     */
     uint32_t RegisterSlot(const std::string& label,
                           const std::string& soAbsolutePath,
                           const std::string& soname);
 
-    // Drops every registered slot and falls back to the system ICD.
-    // Used by the UI when the user removes an imported driver: slots are
-    // then re-registered from the persisted store so ids stay consistent.
+    /**
+     * Drops every registered slot and falls back to system ICD.
+     * Used when user removes imported drivers; slots are re-registered from store.
+     */
     void   ClearSlots();
 
-    void   SetActiveMode(uint32_t mode);        // 0 = system
+    /**
+     * Sets the active driver mode (0 = system, 1..N = slot).
+     * @param mode Driver mode/slot ID
+     */
+    void   SetActiveMode(uint32_t mode);
+
+    /**
+     * Returns the current active driver mode.
+     * @return Active mode (0 = system, 1..N = slot ID)
+     */
     uint32_t ActiveMode() const { return m_active; }
 
-    // Runtime directories supplied once from JNI (Kotlin context paths):
-    //   hookLibDir  = ApplicationInfo.nativeLibraryDir (required by the hook)
-    //   tmpLibDir   = context.cacheDir for patched libs (api<29 path)
-    //   driverRoot  = app files dir where driver slots live
+    /**
+     * Sets runtime directories from JNI (Kotlin context paths).
+     * @param hookLibDir ApplicationInfo.nativeLibraryDir (required by adrenotools hook)
+     * @param tmpLibDir context.cacheDir for patched libs (API<29)
+     * @param driverRootDir App files dir where driver slots live
+     */
     void   SetRuntimeDirs(const std::string& hookLibDir,
                           const std::string& tmpLibDir,
                           const std::string& driverRootDir);
 
-    // Central loader used by vulkan_device.cpp instead of a raw dlopen.
-    // Returns a dlopen-style handle, or nullptr with the failure logged.
+    /**
+     * Opens Vulkan library (system or custom driver via adrenotools).
+     * Central loader used by vulkan_device.cpp instead of raw dlopen.
+     * @param dlopenMode dlopen mode flags (RTLD_NOW, etc.)
+     * @return dlopen-style handle, or nullptr on failure (logged)
+     */
     void*  OpenHostVulkanLibrary(int dlopenMode);
 
-    // Post-binding proof that the chosen custom driver is really in use.
-    // A non-null handle from adrenotools is NOT that proof: the hook can
-    // silently fall back to the system driver and still return a perfectly
-    // good loader handle. Call once AFTER the first instance-level Vulkan
-    // call (vkCreateInstance) — the Android loader binds an ICD on its first
-    // entry point, not at dlopen, so checking earlier would condemn every
-    // driver ever loaded.
-    // Answers: true when the driver is confirmed mapped in /proc/self/maps,
-    // false on definite absence. An unreadable map or an unresolvable path
-    // answers "unknown" (true): the expensive mistake is condemning a
-    // driver that did load. Result is computed once and cached.
+    /**
+     * Verifies chosen custom driver is actually mapped (post-binding proof).
+     * Must be called AFTER first Vulkan instance-level call (vkCreateInstance).
+     * adrenotools can silently fall back to system driver while returning valid handle.
+     * @return true if driver confirmed in /proc/self/maps or verification inconclusive,
+     *         false if driver definitively absent
+     */
     bool VerifyActiveDriverMapped();
 
-    // v1.16 — eager verification: dlopen the active slot's driver file
-    // directly (no instance needed, no GPU context started) so the maps
-    // check is meaningful the moment a driver is imported/selected instead
-    // of staying "not-run" until a render happens.
+    /**
+     * Eagerly verifies active driver by directly preloading the .so file.
+     * No GPU context needed; makes verification meaningful at import time.
+     * @return true if preload succeeded, false otherwise
+     */
     bool PreloadActiveDriverForVerification();
 
+    /**
+     * Returns human-readable summary of driver state.
+     * @return Summary string with active mode, slots, verification status
+     */
     std::string SummaryString() const;
 
 private:

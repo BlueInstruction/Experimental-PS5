@@ -15,21 +15,45 @@ public class FexCoreWrapper {
         System.loadLibrary("px5");
     }
 
+    /**
+     * Returns JNI layer description string.
+     * @return Description of PX5 core components
+     */
     public native String stringFromJNI();
 
-    // FEXCore runtime (kept behind UI buttons; known to crash on some
-    // devices inside InitCore — tracked in issue notes)
+    /**
+     * Initializes FEXCore runtime (x86-64 -> ARM64 JIT).
+     * Known to crash on some devices inside InitCore.
+     * @return true if initialization succeeded, false otherwise
+     */
     public native boolean initializeFexCore();
+
+    /**
+     * Shuts down the emulator core.
+     */
     public native void nativeShutdown();
 
-    // Real file copy install (std::filesystem backed)
+    /**
+     * Installs PKG file by copying to destination (std::filesystem backed).
+     * @param pkgPath Source PKG file path
+     * @param destPath Destination path
+     * @return true if installation succeeded, false otherwise
+     */
     public native boolean nativeInstallPkg(String pkgPath, String destPath);
 
-    // Real ELF64 parse + map into guest window; SELF containers go through
-    // the real extractor — unencrypted/fake-signed dumps load their inner
-    // ELF, encrypted segments are counted and refused by name (no keys,
-    // no pretending).
+    /**
+     * Loads plain ELF64 file into guest memory window.
+     * @param elfPath Path to ELF file
+     * @return true if load succeeded, false otherwise
+     */
     public native boolean nativeLoadElf(String elfPath);
+
+    /**
+     * Loads SELF container file (extracts inner ELF).
+     * Unencrypted/fake-signed dumps load; encrypted segments refused by name.
+     * @param selfPath Path to SELF file
+     * @return true if load succeeded, false otherwise
+     */
     public native boolean nativeLoadSelf(String selfPath);
 
     /**
@@ -118,11 +142,27 @@ public class FexCoreWrapper {
      */
     public native void nativeLogEvent(String category, String message);
 
-    // Memory window tests (validated against canonical window now)
+    /**
+     * Maps memory in guest window (validated against canonical window).
+     * @param addr Guest virtual address
+     * @param size Region size in bytes
+     * @param flags Protection flags
+     * @return Guest address on success, 0 on failure
+     */
     public native long nativeMapMemory(long addr, long size, int flags);
+
+    /**
+     * Unmaps memory from guest window.
+     * @param addr Guest virtual address
+     * @param size Region size in bytes
+     * @return true if unmap succeeded, false otherwise
+     */
     public native boolean nativeUnmapMemory(long addr, long size);
 
-    // Architecture status strings
+    /**
+     * Returns architecture summary (FEXCore version, x86-64 -> ARM64).
+     * @return Architecture summary string
+     */
     public native String nativeGetArchitectureSummary();
 
     /** Live engine counters (syscalls, SMC, memory window, thread state). */
@@ -214,11 +254,27 @@ public class FexCoreWrapper {
      */
     public native String nativeRunLoaderSelfTest();
 
-    /** Attach an android.view.Surface; creates the Vulkan swapchain lazily. */
+    /**
+     * Attaches an android.view.Surface (creates Vulkan swapchain lazily).
+     * @param surface Android Surface for rendering
+     * @return true if attachment succeeded, false otherwise
+     */
     public native boolean nativeAttachRenderSurface(Surface surface);
 
+    /**
+     * Detaches the current render surface.
+     */
     public native void   nativeDetachRenderSurface();
+
+    /**
+     * Starts the render loop thread.
+     * @return true if render loop started, false otherwise
+     */
     public native boolean nativeStartRenderer();
+
+    /**
+     * Stops the render loop thread.
+     */
     public native void   nativeStopRenderer();
 
     /** Live render loop stats string ("GPU device | frames | present mode"). */
@@ -241,16 +297,49 @@ public class FexCoreWrapper {
     public native String nativeGetKernelHleSummary();
 
     // ---- Input bridge ------------------------------------------------------
-    /** One of PadButtons bit constants from NativeInput class below. */
+    /**
+     * Sets button state (press or release).
+     * @param buttonBit One of PAD_* bit constants
+     * @param pressed true for press, false for release
+     * @return true if state was set, false otherwise
+     */
     public native boolean nativeSetButtonState(int buttonBit, boolean pressed);
-    /** Analog left stick, normalized [-1..1]. Real atomics, real readback. */
+
+    /**
+     * Sets left analog stick position, normalized [-1..1].
+     * @param lx X axis value
+     * @param ly Y axis value
+     * @return true if state was set, false otherwise
+     */
     public native boolean nativeSetLeftStick(float lx, float ly);
-    /** Analog right stick, normalized [-1..1]. */
+
+    /**
+     * Sets right analog stick position, normalized [-1..1].
+     * @param rx X axis value
+     * @param ry Y axis value
+     * @return true if state was set, false otherwise
+     */
     public native boolean nativeSetRightStick(float rx, float ry);
-    /** Analog triggers L2/R2, normalized [0..1]. */
+
+    /**
+     * Sets trigger values, normalized [0..1].
+     * @param l2 L2 trigger value
+     * @param r2 R2 trigger value
+     * @return true if state was set, false otherwise
+     */
     public native boolean nativeSetTriggers(float l2, float r2);
-    /** Clickable touchpad button state. */
+
+    /**
+     * Sets touchpad button state.
+     * @param pressed true if pressed, false otherwise
+     * @return true if state was set, false otherwise
+     */
     public native boolean nativeSetTouchpad(boolean pressed);
+
+    /**
+     * Returns input summary string with current button/axis state.
+     * @return Input summary
+     */
     public native String  nativeGetInputSummary();
 
     // ---- Driver slots -------------------------------------------------------

@@ -73,70 +73,121 @@ enum class LogCategory : uint8_t {
     SYSTEM,
 };
 
+/**
+ * Structured logger with Eden-format output (subsystem taxonomy, file/line/func tracking).
+ */
 class Logger {
 public:
-    // ---- One-time initialization ----
-    // Called from JNI_OnLoad. Sets the on-disk log directory (typically
-    // <externalFilesDir>/logs/). The monotonic uptime epoch starts here.
-    // Safe to call multiple times; only the first call wins.
+    /**
+     * Initializes the logger with on-disk log directory.
+     * Sets monotonic uptime epoch. Safe to call multiple times; first call wins.
+     * @param log_dir Log directory path (typically externalFilesDir/logs)
+     * @return true if initialization succeeded, false otherwise
+     */
     static bool Initialize(std::string_view log_dir) noexcept;
 
-    // ---- Runtime level filter ----
-    // Global floor: messages below this level are dropped for every class.
-    // Default: INFO in release, TRACE in debug.
+    /**
+     * Sets global minimum log level (messages below this are dropped).
+     * @param level Minimum level (TRACE/DEBUG/INFO/WARNING/ERROR/FATAL)
+     */
     static void SetMinLevel(LogLevel level) noexcept;
+
+    /**
+     * Returns current global minimum log level.
+     * @return Current minimum level
+     */
     static LogLevel GetMinLevel() noexcept;
 
-    // ---- Per-class filter (Eden-style) ----
-    // Parses a space-separated rule string applied left to right:
-    //   "*:Warning Loader:Info Cpu.Fex:Trace"
-    // Unknown class or level names are ignored (reported once).
-    // The global floor above still applies on top.
+    /**
+     * Sets per-class log filter from space-separated rule string (Eden-style).
+     * Example: "*:Warning Loader:Info Cpu.Fex:Trace"
+     * @param rules Filter rule string
+     */
     static void SetClassFilterString(const std::string& rules) noexcept;
 
-    // ---- Core log function ----
-    // Routes the message to:
-    //   1. Android logcat (tag "PX5.<Class>")
-    //   2. The rotating file (if Initialize() was called), Eden format
-    // `func` is injected by the macros — call sites never pass it.
+    /**
+     * Core log function routing to logcat and rotating file (Eden format).
+     * @param level Log level
+     * @param category Subsystem category
+     * @param file Source file path (injected by macro)
+     * @param line Source line number (injected by macro)
+     * @param func Function name (injected by macro)
+     * @param format Printf-style format string
+     * @param ... Format arguments
+     */
     static void Log(LogLevel level, LogCategory category,
                     const char* file, int line, const char* func,
                     const char* format, ...) noexcept;
 
-    // ---- Variadic helper (for forwarding from other code) ----
+    /**
+     * Variadic log helper for forwarding from other code.
+     * @param level Log level
+     * @param category Subsystem category
+     * @param file Source file path
+     * @param line Source line number
+     * @param func Function name
+     * @param format Printf-style format string
+     * @param args va_list of format arguments
+     */
     static void LogV(LogLevel level, LogCategory category,
                      const char* file, int line, const char* func,
                      const char* format, va_list args) noexcept;
 
-    // ---- Flush ----
-    // Forces an fsync of the underlying file. Called automatically on
-    // ERROR/FATAL. Exposed so the crash handler can call it before
-    // writing its own report.
+    /**
+     * Forces fsync of the underlying file (called automatically on ERROR/FATAL).
+     */
     static void Flush() noexcept;
 
-    // ---- Shutdown ----
-    // Closes the file. Safe to call multiple times.
+    /**
+     * Closes the log file. Safe to call multiple times.
+     */
     static void Shutdown() noexcept;
 
-    // ---- Helpers ----
-    static const char* LevelToString(LogLevel level) noexcept;      // "Info"
-    static const char* CategoryToString(LogCategory category) noexcept; // "Kernel"
+    /**
+     * Converts log level enum to string.
+     * @param level Log level
+     * @return String representation (e.g., "Info")
+     */
+    static const char* LevelToString(LogLevel level) noexcept;
+
+    /**
+     * Converts log category enum to Eden-style class name.
+     * @param category Log category
+     * @return Class name string (e.g., "Kernel", "Cpu.Fex")
+     */
+    static const char* CategoryToString(LogCategory category) noexcept;
+
+    /**
+     * Converts log level to Android logcat priority.
+     * @param level Log level
+     * @return Android log priority constant
+     */
     static android_LogPriority LevelToAndroidPriority(LogLevel level) noexcept;
 
-    // ---- File-path getter (for the Kotlin side to read/share) ----
+    /**
+     * Returns current log file path (for Kotlin side to read/share).
+     * @return Absolute path to current log file
+     */
     static std::string GetCurrentLogFilePath() noexcept;
 
-    // v1.16 — crash-handler-only accessor. Takes NO lock: the log path is
-    // set once at Initialize (single-threaded startup) and never changes
-    // (rotation renames FILES, not the path).
+    /**
+     * Returns log file path without locking (crash-handler-only accessor).
+     * @return Pointer to log file path string
+     */
     static const char* PeekLogFilePathUnsafe() noexcept;
 
 private:
-    // Internal: appends one formatted line to the rotating file.
+    /**
+     * Appends one formatted line to the rotating file (internal).
+     * @param formatted_line Line to append
+     * @param level Log level (for fsync decision)
+     */
     static void WriteToFile(std::string_view formatted_line,
                             LogLevel level) noexcept;
 
-    // Internal: rotates files when current file exceeds max size.
+    /**
+     * Rotates log files when current file exceeds max size (internal).
+     */
     static void MaybeRotate() noexcept;
 };
 

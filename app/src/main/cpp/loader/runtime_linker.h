@@ -48,71 +48,145 @@ namespace PX5 {
 // Reserved guest syscall number for the NID gate (see header comment).
 constexpr uint32_t kPx5NidGateSyscall = 0x5C500001u;
 
-// Bionic-native HLE export: receives the guest arguments passed through
-// the gate (a1..a5 land at args[0..4]; argc <= 5 for now — the gate ABI
-// carries five HLE arguments beside the NID) and returns the guest rax.
+/**
+ * Bionic-native HLE export function type.
+ * Receives guest arguments passed through the NID gate (args[0..4] = a1..a5).
+ * @param args Array of guest arguments
+ * @param argc Argument count (currently <= 5)
+ * @return Value to place in guest RAX
+ */
 using HleHostFn = std::function<int64_t(const uint64_t* args, size_t argc)>;
 
+/**
+ * Result of a NID gate dispatch.
+ */
 struct GateResult {
-    bool        ok = false;
-    int64_t     value = 0;   // guest-visible return when ok
-    std::string error;       // named reason when !ok
+    bool        ok = false;      ///< Whether dispatch succeeded
+    int64_t     value = 0;       ///< Guest-visible return when ok
+    std::string error;           ///< Named reason when !ok
 };
 
+/**
+ * NID gate dispatch statistics.
+ */
 struct DispatchStats {
-    uint64_t gateCalls   = 0;  // gate syscalls seen
-    uint64_t resolvedHle = 0;  // dispatched into a bionic HLE function
-    uint64_t guestRouted = 0;  // NID exists but is a guest export (not gate-callable)
-    uint64_t unresolved  = 0;  // NID not registered at all (repeat hits included)
-    uint64_t unresolvedUnique = 0;  // DISTINCT missing NIDs (Vita3K's
-                                    // missing_nids set metric — the
-                                    // per-game HLE gap size)
+    uint64_t gateCalls   = 0;         ///< Gate syscalls seen
+    uint64_t resolvedHle = 0;         ///< Dispatched into bionic HLE function
+    uint64_t guestRouted = 0;         ///< NID exists but is guest export (not gate-callable)
+    uint64_t unresolved  = 0;         ///< NID not registered (repeat hits included)
+    uint64_t unresolvedUnique = 0;    ///< DISTINCT missing NIDs (per-game HLE gap size)
 };
 
+/**
+ * Loaded module record for addressing and evidence.
+ */
 struct ModuleRecord {
-    std::string name;
-    uint64_t    base    = 0;
-    uint64_t    highVa  = 0;
-    uint64_t    entry   = 0;
-    bool        isSelf  = false;
-    size_t      segmentCount = 0;
+    std::string name;                 ///< Module name (e.g., "eboot.bin")
+    uint64_t    base    = 0;          ///< Base virtual address
+    uint64_t    highVa  = 0;          ///< High virtual address (exclusive)
+    uint64_t    entry   = 0;          ///< Entry point address
+    bool        isSelf  = false;      ///< Whether module came from SELF container
+    size_t      segmentCount = 0;     ///< Number of loaded segments
 };
 
+/**
+ * Runtime linker and NID gate for PS5-style imports bridging to bionic HLE.
+ */
 class RuntimeLinker {
 public:
+    /**
+     * Returns the singleton RuntimeLinker instance.
+     * @return Reference to singleton
+     */
     static RuntimeLinker& GetInstance();
 
-    // Clears modules/exports/stats (per-run teardown, like ResetRun).
+    /**
+     * Clears modules/exports/stats (per-run teardown).
+     */
     void Reset();
 
-    // Records a loaded image in the module registry (evidence + addressing).
+    /**
+     * Records a loaded image in the module registry (evidence + addressing).
+     * @param name Module name
+     * @param base Base virtual address
+     * @param highVa High virtual address (exclusive)
+     * @param entry Entry point address
+     * @param isSelf Whether module came from SELF container
+     * @param segmentCount Number of loaded segments
+     * @return true if registration succeeded, false otherwise
+     */
     bool RegisterModule(const std::string& name, uint64_t base,
                         uint64_t highVa, uint64_t entry, bool isSelf,
                         size_t segmentCount);
 
-    // The bionic-native side of the bridge. Duplicate NIDs fail by name.
+    /**
+     * Registers a bionic-native HLE export callable through the NID gate.
+     * Duplicate NIDs fail by name.
+     * @param library Library name (e.g., "libkernel")
+     * @param nid NID (Name ID)
+     * @param name Symbol name (e.g., "sceKernelOpen")
+     * @param fn Host function to invoke
+     * @return true if registration succeeded, false if NID duplicate
+     */
     bool RegisterHleExport(const std::string& library, uint64_t nid,
                            const std::string& name, HleHostFn fn);
 
-    // A NID exported by loaded guest code (direct guest-to-guest calls).
-    // Registered for resolution/evidence; NOT gate-callable (see header).
+    /**
+     * Registers a NID exported by loaded guest code (for guest-to-guest calls).
+     * NOT gate-callable (HLE bridge cannot synthesize guest call frame yet).
+     * @param nid NID (Name ID)
+     * @param guestAddr Guest virtual address of export
+     * @param name Symbol name
+     * @return true if registration succeeded, false otherwise
+     */
     bool RegisterGuestExport(uint64_t nid, uint64_t guestAddr,
                              const std::string& name);
 
-    // Gate entry used by GuestSyscalls::Dispatch. Does not hold the
-    // registry mutex while the HLE function runs (re-entry allowed).
+    /**
+     * Dispatches NID gate call from guest (used by GuestSyscalls::Dispatch).
+     * Does not hold mutex while HLE function runs (re-entry allowed).
+     * @param nid NID to dispatch
+     * @param args Guest argument array
+     * @param argc Argument count
+     * @return GateResult with success/value or failure/error
+     */
     GateResult DispatchNid(uint64_t nid, const uint64_t* args, size_t argc);
 
+    /**
+     * Returns dispatch statistics.
+     * @return Reference to DispatchStats
+     */
     const DispatchStats& Stats();
-    std::string GetSummaryString();      // evidence line for reports
-    // v1.42 — the distinct missing-NID list with per-NID hit counts
-    // (bounded). This is the REAL per-game compatibility gap: what the
-    // guest actually asked for that no HLE provides. Counted like
-    // Vita3K's EmuEnvState::missing_nids (modules/module_parent.cpp),
-    // exposed so a device session names the next work item.
+
+    /**
+     * Returns human-readable summary for evidence reports.
+     * @return Summary string
+     */
+    std::string GetSummaryString();
+
+    /**
+     * Returns distinct missing-NID list with per-NID hit counts.
+     * This is the real per-game compatibility gap: what guest asked for that no HLE provides.
+     * @return Formatted missing NIDs summary
+     */
     std::string GetMissingNidsSummary();
+
+    /**
+     * Returns count of distinct missing NIDs.
+     * @return Missing NID count
+     */
     size_t MissingNidCount();
+
+    /**
+     * Returns count of registered modules.
+     * @return Module count
+     */
     size_t ModuleCount();
+
+    /**
+     * Returns count of registered exports (HLE + guest).
+     * @return Export count
+     */
     size_t ExportCount();
 
 private:
@@ -135,17 +209,26 @@ private:
 // ---------------------------------------------------------------------------
 // Real ELF64 PT_DYNAMIC reader (bounded; named errors; no guesses).
 // ---------------------------------------------------------------------------
+
+/**
+ * Parsed ELF64 dynamic section information.
+ */
 struct DynamicInfo {
-    bool        ok = false;
-    std::string error;                       // named reason when !ok
-    std::string soname;
-    std::vector<std::string> needed;         // DT_NEEDED strings
-    size_t      dynEntries = 0;              // entries before DT_NULL
-    // Every dynamic tag in the SCE OS-specific range, verbatim.
-    std::vector<std::pair<uint64_t, uint64_t>> sceTags;
-    std::string summary;                     // one evidence line
+    bool        ok = false;                  ///< Whether parse succeeded
+    std::string error;                       ///< Named reason when !ok
+    std::string soname;                      ///< DT_SONAME string
+    std::vector<std::string> needed;         ///< DT_NEEDED strings
+    size_t      dynEntries = 0;              ///< Entries before DT_NULL
+    std::vector<std::pair<uint64_t, uint64_t>> sceTags;  ///< SCE OS-specific tags (0x61000000 range)
+    std::string summary;                     ///< One evidence line
 };
 
+/**
+ * Parses PT_DYNAMIC from an ELF64 image in memory.
+ * @param data Pointer to ELF image data
+ * @param size Size of ELF image in bytes
+ * @return DynamicInfo with parse results
+ */
 DynamicInfo ParseDynamicFromElfImage(const uint8_t* data, size_t size);
 
 } // namespace PX5

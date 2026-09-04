@@ -57,27 +57,42 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.File
 
+/**
+ * Main activity for the PX5 emulator, handling initialization, navigation, and input.
+ */
 class MainActivity : ComponentActivity() {
 
     private lateinit var soundManager: SoundManager
     private var fexCoreWrapper: FexCoreWrapper? = null
     private var fexCoreStatus: String = "Uninitialized"
 
-    // Physical gamepad pass-through (handheld Android consoles + BT pads).
-    // Routed before Compose so the emulation stage never sees volume-style
-    // system interference; only active while EmuScreen is on screen.
+    /**
+     * Dispatches physical gamepad key events before Compose (handheld consoles + BT pads).
+     * Only active while EmuScreen is on screen.
+     * @param event The key event
+     * @return true if event was consumed, false otherwise
+     */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (PhysicalControllerBridge.enabled &&
             PhysicalControllerBridge.handleKey(event)) return true
         return super.dispatchKeyEvent(event)
     }
 
+    /**
+     * Dispatches physical gamepad motion events (analog sticks, triggers).
+     * @param event The motion event
+     * @return true if event was consumed, false otherwise
+     */
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
         if (PhysicalControllerBridge.enabled &&
             PhysicalControllerBridge.handleMotion(event)) return true
         return super.dispatchGenericMotionEvent(event)
     }
 
+    /**
+     * Initializes the activity: logging, build identity, sound, settings, FEXCore, UI.
+     * @param savedInstanceState Previous state if any
+     */
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -278,6 +293,13 @@ class MainActivity : ComponentActivity() {
     // 3-layer logging: Event / State / Diagnostic
     // ========================================================================
 
+    /**
+     * Logs an event with component, action, optional detail and result.
+     * @param component Component name (e.g., "FEXCore", "UI")
+     * @param action Action name (e.g., "initializeRuntime")
+     * @param detail Optional detail string
+     * @param result Optional result string
+     */
     private fun logEvent(component: String, action: String, detail: String = "", result: String = "") {
         val msg = buildString {
             append("EVENT")
@@ -289,10 +311,20 @@ class MainActivity : ComponentActivity() {
         writeLog(msg)
     }
 
+    /**
+     * Logs a state change for a component.
+     * @param component Component name
+     * @param state New state string
+     */
     private fun logState(component: String, state: String) {
         writeLog("STATE component=$component state=$state")
     }
 
+    /**
+     * Logs an exception with source context and stack trace.
+     * @param source Source context (e.g., "FexCoreWrapper.constructor")
+     * @param e The exception to log
+     */
     private fun logException(source: String, e: Throwable) {
         val sw = java.io.StringWriter()
         val pw = java.io.PrintWriter(sw)
@@ -300,12 +332,19 @@ class MainActivity : ComponentActivity() {
         writeLog("DIAGNOSTIC source=$source exception=${e.javaClass.name} message=${e.message ?: "(none)"}\n${sw.toString().trim()}")
     }
 
+    /**
+     * Writes a log message to the app-wide event stream.
+     * @param message Message to log
+     */
     private fun writeLog(message: String) {
         // Delegates to the app-wide stream so every component (dialogs,
         // importers, coroutines) writes the same px5_diagnostic.log format.
         PX5EventLog.write(message)
     }
 
+    /**
+     * Called when activity resumes; starts background music.
+     */
     override fun onResume() {
         super.onResume()
         logState("activity", "resumed")
@@ -314,6 +353,9 @@ class MainActivity : ComponentActivity() {
         } catch (_: Throwable) {}
     }
 
+    /**
+     * Called when activity pauses; pauses background music.
+     */
     override fun onPause() {
         super.onPause()
         logState("activity", "paused")
@@ -322,6 +364,9 @@ class MainActivity : ComponentActivity() {
         } catch (_: Throwable) {}
     }
 
+    /**
+     * Called when activity is destroyed; releases sound resources.
+     */
     override fun onDestroy() {
         super.onDestroy()
         logState("activity", "destroyed")
@@ -331,6 +376,13 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/**
+ * Main navigation composable for the app, handling home/settings/logs/emulation screens.
+ * @param soundManager Sound manager instance
+ * @param fexCoreWrapper FEXCore native wrapper
+ * @param fexCoreStatus Current FEXCore status string
+ * @param gameViewModel ViewModel for game database
+ */
 @Composable
 fun AppNavigation(
     soundManager: SoundManager,
@@ -770,6 +822,13 @@ fun AppNavigation(
     }
 }
 
+/**
+ * Import status card showing progress or results of game/driver imports.
+ * @param text Status text to display
+ * @param busy Whether import is in progress
+ * @param onDismiss Callback when user dismisses the card
+ * @param modifier Modifier for the card
+ */
 @Composable
 private fun ImportStatusCard(
     text: String,
@@ -831,6 +890,11 @@ private fun ImportStatusCard(
 // Android GameController conventions (AXIS_X/Y left stick, AXIS_Z/RZ right
 // stick, AXIS_HAT_X/Y D-pad, BRAKE/LTRIGGER + GAS/RTRIGGER triggers).
 // ---------------------------------------------------------------------------
+
+/**
+ * Physical gamepad bridge for Android gaming handhelds and Bluetooth controllers.
+ * Routes hardware input to the same native atomics as on-screen touch controls.
+ */
 object PhysicalControllerBridge {
 
     @Volatile var enabled: Boolean = false
@@ -844,9 +908,16 @@ object PhysicalControllerBridge {
     private var rx = 0f; private var ry = 0f
     private var l2 = 0f; private var r2 = 0f
 
+    /**
+     * Applies deadzone to analog axis value.
+     * @param v Input axis value
+     * @return Deadzoned value (0 if within deadzone)
+     */
     private fun dz(v: Float): Float = if (kotlin.math.abs(v) < DEADZONE) 0f else v
 
-    /** Clears every axis and button so leaving a game never sticks inputs. */
+    /**
+     * Clears every axis and button so leaving a game never sticks inputs.
+     */
     fun reset() {
         lx = 0f; ly = 0f; rx = 0f; ry = 0f; l2 = 0f; r2 = 0f
         wrapper?.nativeSetLeftStick(0f, 0f)
@@ -854,6 +925,11 @@ object PhysicalControllerBridge {
         wrapper?.nativeSetTriggers(0f, 0f)
     }
 
+    /**
+     * Handles physical gamepad key events (buttons, D-pad).
+     * @param e Key event
+     * @return true if event was consumed, false otherwise
+     */
     fun handleKey(e: KeyEvent): Boolean {
         val w = wrapper ?: return false
         val pressed = e.action == KeyEvent.ACTION_DOWN
@@ -879,6 +955,11 @@ object PhysicalControllerBridge {
         return w.nativeSetButtonState(bit, pressed)
     }
 
+    /**
+     * Handles physical gamepad motion events (analog sticks, triggers, HAT D-pad).
+     * @param e Motion event
+     * @return true if event was consumed, false otherwise
+     */
     fun handleMotion(e: MotionEvent): Boolean {
         val w = wrapper ?: return false
         val src = e.source

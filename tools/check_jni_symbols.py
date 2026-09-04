@@ -25,14 +25,32 @@ DEF_RE = re.compile(re.escape(PREFIX) + r"(\w+)")
 
 
 def declared():
+    """Extracts declared native method names from FexCoreWrapper.java.
+
+    Returns:
+        Set of native method names declared in Java
+    """
     return set(DECL_RE.findall(JAVA.read_text()))
 
 
 def defined(path):
+    """Extracts defined JNI symbol names from a C++ source file.
+
+    Args:
+        path: Path to C++ source file
+
+    Returns:
+        Set of JNI method names defined in the file
+    """
     return set(DEF_RE.findall(path.read_text()))
 
 
 def main():
+    """Verifies that all declared native methods have definitions in both ABIs.
+
+    Returns:
+        0 on success, 1 if any mismatches found
+    """
     for p in (JAVA, NATIVE, STUB):
         if not p.exists():
             print(f"[FAIL] missing source file: {p}")

@@ -16,6 +16,10 @@ namespace PX5 {
 // threads later. The UI also reads back a summary + last-event latency to
 // PROVE on screen that the pipeline really runs end-to-end.
 // ---------------------------------------------------------------------------
+
+/**
+ * PS5 DualSense button bit masks.
+ */
 enum PadButtons : uint32_t {
     PAD_CROSS     = 1u << 0,
     PAD_CIRCLE    = 1u << 1,
@@ -32,36 +36,114 @@ enum PadButtons : uint32_t {
     PAD_PS_HOME   = 1u << 12,
 };
 
+/**
+ * Input manager for DualSense controller state (lock-free atomics).
+ */
 class InputManager {
 public:
+    /**
+     * Returns the singleton InputManager instance.
+     * @return Reference to singleton
+     */
     static InputManager& GetInstance();
 
-    // Legacy blob update kept for any existing callers.
+    /**
+     * Legacy DualSense state structure for blob updates.
+     */
     struct DualSenseState {
-        uint32_t buttons;
-        float lx, ly;
-        float rx, ry;
-        float l2, r2;
-        bool touchPadPressed;
+        uint32_t buttons;       ///< Button bit mask
+        float lx, ly;           ///< Left stick axes
+        float rx, ry;           ///< Right stick axes
+        float l2, r2;           ///< Trigger values [0..1]
+        bool touchPadPressed;   ///< Touchpad press state
     };
 
+    /**
+     * Sets a button state (press or release).
+     * @param bit Button bit mask (from PadButtons enum)
+     * @param pressed true for press, false for release
+     */
     void SetButton(uint32_t bit, bool pressed);
+
+    /**
+     * Sets left analog stick position.
+     * @param lx X axis [-1..1]
+     * @param ly Y axis [-1..1]
+     */
     void SetLeftStick(float lx, float ly);
+
+    /**
+     * Sets right analog stick position.
+     * @param rx X axis [-1..1]
+     * @param ry Y axis [-1..1]
+     */
     void SetRightStick(float rx, float ry);
+
+    /**
+     * Sets trigger values.
+     * @param l2 L2 trigger [0..1]
+     * @param r2 R2 trigger [0..1]
+     */
     void SetTriggers(float l2, float r2);
+
+    /**
+     * Sets touchpad press state.
+     * @param pressed true if pressed, false otherwise
+     */
     void TouchpadPressed(bool pressed);
 
+    /**
+     * Returns current button bit mask.
+     * @return Button mask (combination of PadButtons bits)
+     */
     uint32_t ButtonMask() const { return m_buttons.load(std::memory_order_relaxed); }
+
+    /**
+     * Returns left stick X axis.
+     * @return Lx value [-1..1]
+     */
     float Lx() const { return m_lx.load(); }
+
+    /**
+     * Returns left stick Y axis.
+     * @return Ly value [-1..1]
+     */
     float Ly() const { return m_ly.load(); }
+
+    /**
+     * Returns right stick X axis.
+     * @return Rx value [-1..1]
+     */
     float Rx() const { return m_rx.load(); }
+
+    /**
+     * Returns right stick Y axis.
+     * @return Ry value [-1..1]
+     */
     float Ry() const { return m_ry.load(); }
+
+    /**
+     * Returns L2 trigger value.
+     * @return L2 value [0..1]
+     */
     float L2() const { return m_l2.load(); }
+
+    /**
+     * Returns R2 trigger value.
+     * @return R2 value [0..1]
+     */
     float R2() const { return m_r2.load(); }
 
-    // ms since epoch of most recent event (any source) — readback evidence.
+    /**
+     * Returns milliseconds since epoch of most recent input event.
+     * @return Last event timestamp (readback evidence)
+     */
     uint64_t LastEventMs() const { return m_lastEventMs.load(); }
 
+    /**
+     * Returns human-readable summary of current input state.
+     * @return Summary string with buttons, axes, timestamp
+     */
     std::string GetSummaryString() const;
 
 private:

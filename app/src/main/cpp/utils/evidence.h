@@ -45,81 +45,126 @@ namespace Evidence {
 
 constexpr int kMaxSegments = 16;
 
-// Byte-stream kind a hash/file-offset refers to. The distinction matters:
-// for a plain ELF the parsed stream IS the on-disk file; for a SELF
-// container the executed code comes from the extracted INNER ELF stream.
+/**
+ * Byte-stream kind for hash/file-offset references.
+ * Distinguishes plain ELF (stream=disk file) from SELF (stream=extracted inner ELF).
+ */
 enum class Stream : uint32_t {
     None = 0,
-    File = 1,        // the container/file on disk (plain ELF, or SELF)
-    InnerElf = 2,    // the extracted inner ELF byte stream (SELF images)
+    File = 1,        ///< Container/file on disk (plain ELF or SELF)
+    InnerElf = 2,    ///< Extracted inner ELF byte stream (SELF images)
 };
 
+/**
+ * Image identity for evidence binding and crash attribution.
+ * Contains SHA-256 hashes of loaded image and its segments, plus entry proof.
+ */
 struct ImageIdentity {
-    bool     valid = false;
-    Stream   stream = Stream::None;      // stream the segment offsets refer to
-    char     sha256[65];                 // hash of the executed byte stream
-    char     containerSha256[65];        // hash of the on-disk file (SELF);
-                                         // equals sha256 for plain ELFs
-    uint64_t streamSize = 0;
-    uint64_t containerSize = 0;   // v1.42: on-disk container size (differs
-                                  // from streamSize for SELF containers)
-    char     path[256];
-    uint64_t entry = 0;
-    bool     isSelf = false;
-    int      segCount = 0;
+    bool     valid = false;               ///< Whether identity is valid
+    Stream   stream = Stream::None;       ///< Stream kind segment offsets refer to
+    char     sha256[65];                  ///< Hash of executed byte stream
+    char     containerSha256[65];         ///< Hash of on-disk file (SELF); equals sha256 for ELF
+    uint64_t streamSize = 0;              ///< Executed stream size
+    uint64_t containerSize = 0;           ///< On-disk container size
+    char     path[256];                   ///< File path
+    uint64_t entry = 0;                   ///< Entry point address
+    bool     isSelf = false;              ///< Whether image came from SELF
+    int      segCount = 0;                ///< Number of segments
+
+    /**
+     * Per-segment evidence with hash and file offset.
+     */
     struct Segment {
-        uint64_t va;
-        uint64_t memsz;
-        uint64_t fileOff;    // offset of this segment's file bytes in the
-                             // hashed stream
-        uint64_t filesz;
-        uint32_t prot;       // MemoryFlags bits as declared
-        uint32_t phdrIndex;  // phdr index (matches the loader log lines)
-        char     sha256[65]; // hash of the segment's file bytes
+        uint64_t va;                      ///< Virtual address
+        uint64_t memsz;                   ///< Memory size
+        uint64_t fileOff;                 ///< Offset in hashed stream
+        uint64_t filesz;                  ///< File size
+        uint32_t prot;                    ///< Protection flags
+        uint32_t phdrIndex;               ///< Program header index
+        char     sha256[65];              ///< Hash of segment file bytes
     } segs[kMaxSegments];
-    // Entry proof (v1.41): memory bytes at entry vs source-stream bytes.
-    bool     entryProven = false;
-    bool     entryMatch = false;
-    uint64_t entryFileOff = 0;
-    char     entrySha256[65];  // hash of the 32 entry bytes (both sides when
-                               // entryMatch; memory side otherwise)
+
+    bool     entryProven = false;         ///< Whether entry proof was performed
+    bool     entryMatch = false;          ///< Whether entry bytes match source
+    uint64_t entryFileOff = 0;            ///< Entry point file offset
+    char     entrySha256[65];             ///< Hash of 32 entry bytes
 };
 
-// SHA-256 — self-contained, no deps. FIPS 180-4. `out` needs 65 bytes
-// (64 hex chars + NUL), lowercase.
+/**
+ * Computes SHA-256 hash and outputs as lowercase hex string.
+ * Self-contained, no deps. FIPS 180-4.
+ * @param data Input data
+ * @param len Data length
+ * @param out Output buffer (needs 65 bytes: 64 hex + NUL)
+ */
 void Sha256Hex(const void* data, size_t len, char out[65]);
+
+/**
+ * Computes SHA-256 hash and outputs raw digest.
+ * @param data Input data
+ * @param len Data length
+ * @param digest Output buffer (32 bytes)
+ */
 void Sha256(const void* data, size_t len, uint8_t digest[32]);
 
-// Known-answer vectors ("", "abc", the 56-byte block boundary vector).
-// Runs in the foundation suite so the device itself proves the evidence
-// primitive before any image is hashed with it.
+/**
+ * Runs SHA-256 known-answer test vectors (FIPS 180-4).
+ * Tests empty string, "abc", 56-byte block boundary.
+ * Runs in foundation suite to prove evidence primitive on device.
+ * @return true if all KAT vectors passed, false otherwise
+ */
 bool SelfTest();
 
-// Bind the image the loader just mapped (normal execution context, once
-// per load, before dispatch). Copies everything into BSS.
+/**
+ * Binds image identity after loader maps it (before dispatch).
+ * Copies identity into BSS for async-signal-safe access.
+ * @param img Image identity to bind
+ */
 void BindImage(const ImageIdentity& img);
-// Async-signal-safe snapshot of the bound image (crash handler).
-// Returns false when no image was bound this session.
+
+/**
+ * Gets snapshot of bound image identity (async-signal-safe, for crash handler).
+ * @param out Output parameter receiving image identity
+ * @return false if no image bound this session, true otherwise
+ */
 bool GetImage(ImageIdentity& out);
 
-// Log namespace (v1.41, the trust-review requirement): the log itself must
-// separate SYNTHETIC foundation-suite activity from REAL-guest activity so
-// no reader ever mistakes an exit42 fixture PASS for game execution.
-// The top-level flows set the flag (SelfTestFoundation -> false,
-// LoadExecutable -> true); the loader/syscall layers only read it.
-// Default is FALSE: anything logged from an unset context is labeled
-// synthetic — the safe direction for an honesty tool.
+/**
+ * Sets log namespace flag: SYNTHETIC (foundation suite) vs REAL-GUEST.
+ * Separates test fixture activity from real game execution in logs.
+ * Default FALSE (synthetic) — safe direction for honesty tool.
+ * @param real true for real-guest session, false for synthetic/test
+ */
 void SetSessionRealGuest(bool real);
+
+/**
+ * Returns whether current session is real-guest (vs. synthetic).
+ * @return true if real-guest session, false if synthetic
+ */
 bool SessionIsRealGuest();
 
-// Append-only evidence ledger (one line per event, fsynced). Set the path
-// once at startup (same dir as the main log). Events carry the bound image
-// hash automatically when one is bound.
+/**
+ * Sets path for append-only evidence ledger.
+ * One line per event, fsynced. Set once at startup (same dir as main log).
+ * @param path Ledger file path
+ */
 void SetLedgerPath(const std::string& path);
+
+/**
+ * Appends event to evidence ledger with printf-style formatting.
+ * Events carry bound image hash automatically when image is bound.
+ * @param format Printf-style format string
+ * @param ... Format arguments
+ */
 void AppendLedger(const char* format, ...) __attribute__((format(printf, 1, 2)));
 
-// First-K guest syscall evidence (called from the syscall bridge; capped
-// internally so a chatty crt cannot flood the ledger).
+/**
+ * Records guest syscall in evidence ledger (first K calls, capped).
+ * Called from syscall bridge; prevents chatty crt from flooding ledger.
+ * @param nr Syscall number
+ * @param a0 First argument
+ * @param a1 Second argument
+ */
 void NoteGuestSyscall(uint32_t nr, uint64_t a0, uint64_t a1);
 
 } // namespace Evidence
