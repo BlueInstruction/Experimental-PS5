@@ -14,15 +14,14 @@ real engine technology rather than mockups:
   there is no Wine-like compatibility environment and no Linux runtime
   container.
 
-PSX5 is an original, independent implementation. It is not a fork or blend
-of sharpdroid, Bachata S4, or any other Android PS4/PS5 attempt — external
-projects serve as engineering references only (see Credits).
+PSX5 is an independent implementation; external projects are engineering
+references only (see Credits).
 
-> ⚠️ This is early engineering work. It does not run commercial games.
-> The project refuses to fake features: see the honest status ledger in
-> [AGENT.md §5](AGENT.md#5-subsystem-status-honesty-ledger).
+> ⚠️ This is early engineering research. It does not run commercial games.
+> Subsystem status is tracked with runtime evidence — see the status table
+> in [CONTRIBUTING.md §5](CONTRIBUTING.md#5-subsystem-status).
 
-## Current status (evidence-based)
+## Current status
 
 | Area | Today |
 |------|-------|
@@ -32,10 +31,6 @@ projects serve as engineering references only (see Credits).
 | GNM → Vulkan graphics translation | ❌ not started |
 | Audio · input · UI shell | 🟡 functional wrappers + Compose shell with real preferences |
 | Driver switching | 🟡 slot manager present; on-device `vulkaninfo` verification next |
-
-For agents working on this repo, **AGENT.md is the operating contract**:
-architecture map, pinned-dependency rules, patch policy, testing ladder,
-and the workflow law of the repository.
 
 ## Build
 
@@ -49,6 +44,12 @@ gradle assembleRelease --no-daemon
 
 CI (`PX5 Build APK`) performs exactly this sequence on every push to
 `main`, alongside `android-lint`, `cppcheck`, and `clang-tidy` analysis.
+
+## Documentation
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers the repository layout, the
+pinned FEXCore dependency contract, the testing ladder, commit message
+conventions, and the subsystem status table.
 
 ## Legal
 

@@ -107,8 +107,8 @@ Runtime ──────► PS5 Probes ────► Evidence
                                     agent-report.json
 ```
 
-The AI agent **interprets** evidence and suggests fixes.
-The engine **decides** the verdict.
+Verdicts are computed by the engine itself; evidence interpretation
+and fix suggestions are downstream consumers of `agent-report.json`.
 
 ## Device Matrix & Handheld Strategy (2026-08)
 
@@ -121,7 +121,7 @@ Android already exposes through the standard GAMEPAD/JOYSTICK APIs.
 |---|---|---|
 | Android handheld, flagship | Snapdragon 8 Gen 2/3 (AYN Odin 2 class), Snapdragon G3x Gen 2 | Primary target tier. Custom-driver path (adrenotools/Turnip) applies; physical pad pass-through is the default input surface; performance presets realistic. |
 | Android handheld, upper-mid | Snapdragon 865-class (Retroid Pocket 5 class) | Same software path; resolution scale + Safe/Balanced presets recommended; thermal envelopes are smaller. |
-| Android handheld, entry | Dimensity / Helio class | Vulkan 1.1+ baseline; custom-driver loading is Qualcomm/adrenotools-specific and honestly reported as unavailable elsewhere; no fake Mali/Xclipse claims. |
+| Android handheld, entry | Dimensity / Helio class | Vulkan 1.1+ baseline; custom-driver loading is Qualcomm/adrenotools-specific and reported as unavailable elsewhere; no speculative Mali/Xclipse claims. |
 | Phones, flagship | Snapdragon 8 series | Touch overlay + BT pads; same engine path as handheld tier. |
 | Future vendor diversity | MediaTek Mali, Exynos Xclipse | The GraphicsDriverManager contract (meta.json → libraryName → loader) is vendor-generic by design; a Mali/Xclipse backend is future work and will not be claimed to exist before it exists. |
 
@@ -136,7 +136,7 @@ Concrete capabilities this strategy already landed:
   (live counters) — no UI switch claims an effect it cannot verify.
 * Explicit swapchain present-mode selection, validated against the device
   before use, with loud fallback.
-* Fork-isolated self-tests: a JIT fault produces a crash dump and an honest
+* Fork-isolated self-tests: a JIT fault produces a crash dump and a full
   report instead of killing the app.
 
 Next planned steps for the device matrix (order reflects dependency, not
