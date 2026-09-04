@@ -178,11 +178,20 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
     }
 
     case NR_brk: {
-        if (a0 == 0) return 0;               // query before loader sets base
-        MemoryManager::GetInstance().SetProgramBreak(a0);
+        // Linux brk(2) returns the CURRENT break -- the new one on success,
+        // the unchanged one on failure. Returning the requested value
+        // unconditionally (as this did) told the guest allocator it owned a
+        // range that was never mapped; its first store then faulted.
+        uint64_t cur = 0;
+        if (!MemoryManager::GetInstance().SetBrk(a0, cur)) {
+            PX5_LOGW(LogCategory::KERNEL,
+                     "guest brk(0x%llx) refused - break unchanged at 0x%llx",
+                     (unsigned long long)a0, (unsigned long long)cur);
+            return cur;
+        }
         std::lock_guard<std::mutex> lk(g_stateMutex);
         g_stats.handledCalls++;
-        return a0;
+        return cur;
     }
 
     case NR_mmap: {                          // (addr,len,prot,flags,fd,off)
@@ -192,12 +201,14 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
             LogUnimplemented(nr, "mmap(non-fixed/anon)", a0, a1, a3);
             return kErrNoSys;
         }
-        // v1.32 guest ABI policy: MAP_FIXED requests below the window
-        // anchor are mirrored 4 GiB up into the window and the guest
-        // receives the TRANSLATED address (vc32 fixture contract:
-        // mmap(0x49000000) must return 0x149000000, then round-trip a
-        // magic through it). Without the mirror the manager rejects
-        // low VAs and every such guest aborts its own path with -EINVAL.
+        // Guest ABI deviation, applied knowingly: a MAP_FIXED below the
+        // window anchor cannot be given the address it asked for (that
+        // memory belongs to the Android process), so it is relocated 4 GiB
+        // up into the window and the guest receives the TRANSLATED address
+        // as mmap's return value. A guest that honours the return value
+        // works; a guest that hardcodes the low address and ignores the
+        // return value will fault. The alternative -- rejecting every low
+        // MAP_FIXED with -EINVAL -- fails those guests too, and earlier.
         uint64_t addr = a0;
         if (MemoryManager::GetInstance().TranslateLowFixedVa(addr)) {
             PX5_LOGI(LogCategory::KERNEL,

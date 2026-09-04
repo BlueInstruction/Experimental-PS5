@@ -406,7 +406,10 @@ private fun LazyListScope.audioSection(soundManager: SoundManager) {
         var soundEffectsEnabled by remember { mutableStateOf(soundManager.isSoundEnabled) }
         var bgMusicEnabled by remember { mutableStateOf(soundManager.isBgMusicEnabled) }
         SettingsHeader("Audio")
-        SettingsItemText("Audio driver", "AAudio (system)")
+        // The engine opens no audio stream at all (AudioEngine::Initialize
+        // returns false). Saying "AAudio (system)" here told the user a
+        // driver was in use; these toggles only affect UI sounds.
+        SettingsItemText("Guest audio", "Not implemented - guest output is silent")
         SettingsToggleItem(
             title = "UI sound effects",
             subtitle = "",

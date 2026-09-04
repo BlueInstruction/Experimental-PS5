@@ -60,7 +60,9 @@ tools/
 
 ```bash
 ./tools/fetch_fexcore.sh
-export PX5_FEXCORE_ROOT="$PWD/../deps/FEX"
+# tools/fetch_fexcore.sh defaults to <repo>/.deps/FEX; set this only
+# to override that location.
+# export PX5_FEXCORE_ROOT="/custom/path/FEX"
 gradle assembleRelease --no-daemon
 ```
 

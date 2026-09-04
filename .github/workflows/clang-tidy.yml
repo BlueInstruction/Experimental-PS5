@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 25
     env:
-      PX5_FEXCORE_ROOT: ${{ github.workspace }}/../deps/FEX
+      PX5_FEXCORE_ROOT: ${{ github.workspace }}/.deps/FEX
 
     steps:
       - name: Checkout
@@ -85,7 +85,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE=/usr/local/lib/android/sdk/ndk/27.3.13750724/build/cmake/android.toolchain.cmake \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DPX5_FEXCORE_ROOT="$GITHUB_WORKSPACE/../deps/FEX" \
+            -DPX5_FEXCORE_ROOT="$GITHUB_WORKSPACE/.deps/FEX" \
             ../../src/main/cpp || true
           # Copy the compile DB to a stable location
           cp compile_commands.json ../../../compile_commands.json 2>/dev/null || true

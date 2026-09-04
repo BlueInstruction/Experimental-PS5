@@ -32,6 +32,45 @@
 namespace fs = std::filesystem;
 
 // ---------------------------------------------------------------------------
+// JniString — GetStringUTFChars with the two things every call site here
+// used to skip: a null check and a guaranteed Release.
+//
+// GetStringUTFChars returns nullptr when the VM cannot allocate the copy
+// (it raises OutOfMemoryError and does NOT throw into native code). The
+// previous code fed that pointer straight into std::string parameters,
+// which is undefined behaviour, and leaked the chars on every early return.
+// One call site even wrote `p ? p : ""` on one line and then passed the raw
+// `p` on the next.
+//
+// Usage:
+//   JniString path(env, pathStr);
+//   if (!path) return JNI_FALSE;      // null jstring or OOM
+//   ... use path.str() / path.c_str() ...
+// ---------------------------------------------------------------------------
+class JniString {
+public:
+    JniString(JNIEnv* env, jstring js) : m_env(env), m_js(js) {
+        if (m_env && m_js) {
+            m_chars = m_env->GetStringUTFChars(m_js, nullptr);
+        }
+    }
+    ~JniString() {
+        if (m_chars) m_env->ReleaseStringUTFChars(m_js, m_chars);
+    }
+    JniString(const JniString&) = delete;
+    JniString& operator=(const JniString&) = delete;
+
+    explicit operator bool() const { return m_chars != nullptr; }
+    const char* c_str() const { return m_chars ? m_chars : ""; }
+    std::string str()   const { return std::string(c_str()); }
+
+private:
+    JNIEnv*     m_env   = nullptr;
+    jstring     m_js    = nullptr;
+    const char* m_chars = nullptr;
+};
+
+// ---------------------------------------------------------------------------
 // JNI surface v2 (honest contract).
 //
 // REMOVED vs v1: every fake adrenotools/Turnip toggle, thunks/FEX config
@@ -60,47 +99,44 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeShutdown(JNIEnv*, jobject) {
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeInstallPkg(
         JNIEnv* env, jobject, jstring pkgPathStr, jstring destPathStr) {
-    if (!pkgPathStr || !destPathStr) return JNI_FALSE;
-    const char* pkg = env->GetStringUTFChars(pkgPathStr, nullptr);
-    const char* dst = env->GetStringUTFChars(destPathStr, nullptr);
+    JniString pkg(env, pkgPathStr);
+    JniString dst(env, destPathStr);
+    if (!pkg || !dst) return JNI_FALSE;
 
     bool ok = false;
     std::error_code ec;
     try {
-        fs::create_directories(fs::path(dst).parent_path(), ec);
-        ok = fs::copy_file(pkg, dst, fs::copy_options::overwrite_existing, ec);
+        fs::create_directories(fs::path(dst.c_str()).parent_path(), ec);
+        ok = fs::copy_file(pkg.c_str(), dst.c_str(),
+                           fs::copy_options::overwrite_existing, ec);
     } catch (...) { ok = false; }
 
     PX5_LOGI(PX5::LogCategory::LOADER,
-             "PKG install %s -> %s : %s (%s)", pkg, dst,
+             "PKG install %s -> %s : %s (%s)", pkg.c_str(), dst.c_str(),
              ok ? "OK" : "FAIL", ec.message().c_str());
 
-    env->ReleaseStringUTFChars(pkgPathStr, pkg);
-    env->ReleaseStringUTFChars(destPathStr, dst);
-    return ok ? JNI_TRUE : JNI_FALSE;
+    return ok ? JNI_TRUE : JNI_FALSE;   // JniString releases on scope exit
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadElf(JNIEnv* env, jobject,
                                                         jstring pathStr) {
-    if (!pathStr) return JNI_FALSE;
-    const char* p = env->GetStringUTFChars(pathStr, nullptr);
-    PX5::Breadcrumb::Set("jni: LoadElf %s", p);
-    const bool res =
-        PX5::Emulator::GetInstance().LoadExecutable(p, /*isSelf=*/false);
-    env->ReleaseStringUTFChars(pathStr, p);
+    JniString path(env, pathStr);
+    if (!path) return JNI_FALSE;
+    PX5::Breadcrumb::Set("jni: LoadElf %s", path.c_str());
+    const bool res = PX5::Emulator::GetInstance()
+                         .LoadExecutable(path.str(), /*isSelf=*/false);
     return res ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadSelf(JNIEnv* env, jobject,
                                                          jstring pathStr) {
-    if (!pathStr) return JNI_FALSE;
-    const char* p = env->GetStringUTFChars(pathStr, nullptr);
-    PX5::Breadcrumb::Set("jni: LoadSelf %s", p);
-    const bool res =
-        PX5::Emulator::GetInstance().LoadExecutable(p, /*isSelf=*/true);
-    env->ReleaseStringUTFChars(pathStr, p);
+    JniString path(env, pathStr);
+    if (!path) return JNI_FALSE;
+    PX5::Breadcrumb::Set("jni: LoadSelf %s", path.c_str());
+    const bool res = PX5::Emulator::GetInstance()
+                         .LoadExecutable(path.str(), /*isSelf=*/true);
     return res ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -145,17 +181,16 @@ bool PathLooksLikeSelf(const std::string& path) {
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadExecutable(
         JNIEnv* env, jobject, jstring pathStr) {
-    if (!pathStr) return JNI_FALSE;
-    const char* p = env->GetStringUTFChars(pathStr, nullptr);
-    PX5::Breadcrumb::Set("jni: LoadExecutable(auto) %s", p);
+    JniString path(env, pathStr);
+    if (!path) return JNI_FALSE;
+    PX5::Breadcrumb::Set("jni: LoadExecutable(auto) %s", path.c_str());
 
-    const bool isSelf = PathLooksLikeSelf(p ? p : "");
+    const bool isSelf = PathLooksLikeSelf(path.str());
     PX5_LOGI(PX5::LogCategory::LOADER,
-             "LoadExecutable: %s -> %s", p, isSelf ? "SELF" : "ELF");
+             "LoadExecutable: %s -> %s", path.c_str(), isSelf ? "SELF" : "ELF");
 
     const bool res =
-        PX5::Emulator::GetInstance().LoadExecutable(p, isSelf);
-    env->ReleaseStringUTFChars(pathStr, p);
+        PX5::Emulator::GetInstance().LoadExecutable(path.str(), isSelf);
     return res ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -195,7 +230,35 @@ std::string VerifyChildDump(time_t forkWall) {
 
 // Runs `work` in a fork()ed child and returns its honest report.
 //
-// WHY: a JIT defect must kill the TEST, not the app. The 2026-08-28 device
+// ===========================================================================
+// KNOWN LIMITATION -- READ BEFORE ADDING A NEW CALLER.
+//
+// This is fork() WITHOUT exec(), from a process that is heavily
+// multithreaded (Kotlin dispatchers, the render loop, FEXCore's own
+// threads, the Vulkan loader). POSIX only guarantees async-signal-safe
+// calls in such a child, because every mutex held by a thread that did not
+// come along stays locked forever. `work` here does the opposite: it
+// allocates std::string, takes the logger mutex, and in some callers
+// re-enters FEXCore and the Vulkan loader.
+//
+// That is not theoretical. The comments on nativeRunGpuProof record the
+// child dying deterministically at entry with SIGABRT across v1.15 -> v1.32,
+// and reach the correct diagnosis: "Isolation for GPU work returns with
+// fork+exec (a real child binary), not with fork()."
+//
+// So the containment this wrapper offers is REAL for pure-CPU, allocation-
+// light work (the GNM decoder self-test) and UNRELIABLE for anything that
+// touches the engine, the driver or the logger: a CRASHED verdict from such
+// a child may be an artefact of the fork, not a defect in the code under
+// test. nativeRunGpuProof and nativeRunFoundationSelfTestInProcess were
+// moved back in-process for exactly that reason.
+//
+// The real fix is a small exec()ed helper binary; until that exists, do not
+// add engine/driver work to this path and do not read CRASHED from it as
+// proof that the tested code is broken.
+// ===========================================================================
+//
+// WHY IT EXISTS AT ALL: a JIT defect must kill the TEST, not the app. The 2026-08-28 device
 // logs show both proof buttons terminating the whole process right after
 // "Guest thread created" — the Kotlin try/catch cannot catch a native
 // signal. With this wrapper:
@@ -264,6 +327,11 @@ std::string RunIsolated(const char* name,
         // Child: only this test runs here. No JNI, no shared state writes.
         // sigaltstack is per-thread and NOT inherited across fork — arm the
         // child's main thread before any engine work.
+        //
+        // Everything below this line is already outside what POSIX
+        // guarantees after fork() in a multithreaded process (see the
+        // KNOWN LIMITATION block above). It is tolerated for pure-CPU
+        // callers only.
         PX5::CrashHandler::ArmThreadAltStack();
         close(fds[0]);
         ChildTrail trail;
@@ -360,6 +428,16 @@ std::string RunIsolated(const char* name,
         const int sig = WTERMSIG(status);
         std::string out = std::string(name) + ": CRASHED in isolated child (signal " +
                           std::to_string(sig) + ")\n";
+        // Do not let this verdict be read as "the tested code is broken".
+        // The child is a fork() without exec() out of a multithreaded
+        // process, so a lock held by a thread that did not survive the fork
+        // produces exactly this signature independently of the code under
+        // test. Say so in the report the user actually reads.
+        out += "NOTE: this child is fork()ed without exec() from a "
+               "multithreaded process. A crash here can be an artefact of "
+               "that (a mutex held by a thread that did not come along), "
+               "not necessarily a defect in the tested code. Confirm "
+               "in-process before treating it as a real failure.\n";
         out += VerifyChildDump(forkWall);
         if (!trail.empty()) out += "\nchild trail (last completed step is the one "
                                   "whose successor never appeared):\n" + trail;
@@ -391,9 +469,9 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadExecutableIsolated(
         JNIEnv* env, jobject, jstring pathStr) {
     if (!pathStr) return env->NewStringUTF("isolated load: no path given");
-    const char* p = env->GetStringUTFChars(pathStr, nullptr);
-    const std::string path = p ? p : "";
-    if (p) env->ReleaseStringUTFChars(pathStr, p);
+    JniString pathChars(env, pathStr);
+    if (!pathChars) return env->NewStringUTF("isolated load: out of memory");
+    const std::string path = pathChars.str();
     PX5::Breadcrumb::Set("jni: isolated load probe %s", path.c_str());
 
     const std::string report = RunIsolated(
@@ -462,9 +540,9 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunExecutionProbe(
         JNIEnv* env, jobject, jstring pathStr, jint timeoutMs) {
     if (!pathStr) return env->NewStringUTF("execution probe: no path given");
-    const char* p = env->GetStringUTFChars(pathStr, nullptr);
-    const std::string path = p ? p : "";
-    if (p) env->ReleaseStringUTFChars(pathStr, p);
+    JniString pathChars(env, pathStr);
+    if (!pathChars) return env->NewStringUTF("execution probe: out of memory");
+    const std::string path = pathChars.str();
     PX5::Breadcrumb::Set("jni: execution probe %s (%d ms budget)",
                          path.c_str(), static_cast<int>(timeoutMs));
 
@@ -644,13 +722,11 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeGetEngineCounters(
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeApplyEngineConfigOverride(
         JNIEnv* env, jobject, jstring jKey, jstring jValue) {
-    if (!jKey || !jValue) return JNI_FALSE;
-    const char* k = env->GetStringUTFChars(jKey, nullptr);
-    const char* v = env->GetStringUTFChars(jValue, nullptr);
+    JniString key(env, jKey);
+    JniString value(env, jValue);
+    if (!key || !value) return JNI_FALSE;
     const bool ok = PX5::FexCoreIntegration::ApplyEngineConfigOverride(
-        k ? k : "", v ? v : "");
-    if (k) env->ReleaseStringUTFChars(jKey, k);
-    if (v) env->ReleaseStringUTFChars(jValue, v);
+        key.str(), value.str());
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -857,10 +933,11 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeApplySettings(
         else            Logger::SetMinLevel(LogLevel::INFO);
     }
 
-    if (logDirJ) {
-        const char* d = env->GetStringUTFChars(logDirJ, nullptr);
-        if (d && *d) Logger::Initialize(d);   // idempotent; first call wins
-        if (d) env->ReleaseStringUTFChars(logDirJ, d);
+    {
+        JniString logDir(env, logDirJ);
+        if (*logDir.c_str()) {
+            Logger::Initialize(logDir.str());   // idempotent; first call wins
+        }
     }
     PX5_LOGI(LogCategory::SETTINGS,
              "settings applied: scale=%d%% vsync=%d verbose=%d driverMode=%u "
@@ -933,15 +1010,16 @@ extern "C" JNIEXPORT jint JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRegisterDriverSlot(
         JNIEnv* env, jobject, jstring labelJ, jstring soPathJ,
         jstring sonameJ) {
-    const char* l = env->GetStringUTFChars(labelJ, nullptr);
-    const char* s = env->GetStringUTFChars(soPathJ, nullptr);
-    const char* n = sonameJ ? env->GetStringUTFChars(sonameJ, nullptr) : nullptr;
+    // labelJ/soPathJ used to be dereferenced with no null check at all:
+    // a null jstring from Kotlin crashed the process inside GetStringUTFChars.
+    JniString label(env, labelJ);
+    JniString soPath(env, soPathJ);
+    JniString soname(env, sonameJ);
+    if (!label || !soPath) return -1;
+    const char* n = soname.c_str();
     const uint32_t id = PX5::GpuDriverManager::GetInstance()
-                            .RegisterSlot(l ? l : "", s ? s : "",
-                                          (n && *n) ? n : "libvulkan_adreno.so");
-    env->ReleaseStringUTFChars(labelJ, l);
-    env->ReleaseStringUTFChars(soPathJ, s);
-    if (n) env->ReleaseStringUTFChars(sonameJ, n);
+                            .RegisterSlot(label.str(), soPath.str(),
+                                          (*n) ? n : "libvulkan_adreno.so");
     return static_cast<jint>(id);
 }
 
@@ -1015,11 +1093,7 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeInitRuntimeContext(
         jstring jTmpLibDir, jstring jDriverRootDir,
         jstring jIdentity) {
     auto toStr = [env](jstring s) -> std::string {
-        if (!s) return {};
-        const char* c = env->GetStringUTFChars(s, nullptr);
-        std::string out = c ? c : "";
-        if (c) env->ReleaseStringUTFChars(s, c);
-        return out;
+        return JniString(env, s).str();   // null-safe, always released
     };
     const std::string logsDir  = toStr(jLogsDir);
     const std::string hookDir  = toStr(jHookLibDir);
@@ -1088,11 +1162,7 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeLogEvent(
         JNIEnv* env, jobject, jstring jCategory, jstring jMessage) {
     auto toStr = [env](jstring s) -> std::string {
-        if (!s) return {};
-        const char* c = env->GetStringUTFChars(s, nullptr);
-        std::string out = c ? c : "";
-        if (c) env->ReleaseStringUTFChars(s, c);
-        return out;
+        return JniString(env, s).str();   // null-safe, always released
     };
     const std::string cat = toStr(jCategory);
     const std::string msg = toStr(jMessage);

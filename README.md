@@ -27,7 +27,8 @@ references only (see Credits).
 | Memory / syscalls / loader | partial: real implementations with self-tests; hardening ongoing |
 | Vulkan device layer | partial: instance/device/submission loop proven in smoke tests |
 | GNM → Vulkan graphics translation | not started |
-| Audio / input / UI shell | partial: functional wrappers + Compose shell with real preferences |
+| Audio | **not implemented**: `AudioEngine::Initialize()` returns false and says so. No AAudio stream is ever opened |
+| Input / UI shell | partial: Compose shell with real preferences; controller bridge present |
 | Driver switching | partial: slot manager present; on-device `vulkaninfo` verification next |
 
 ## Build
@@ -35,9 +36,18 @@ references only (see Credits).
 Requirements: JDK 17, Gradle 8.9, SDK API 35, NDK 27.3.13750724, CMake 3.22.1
 
 ```bash
-./tools/fetch_fexcore.sh          # materializes pinned upstream FEX sources
-export PX5_FEXCORE_ROOT="$PWD/../deps/FEX"
+./tools/fetch_fexcore.sh          # materializes pinned upstream FEX into .deps/FEX
+./tools/fetch_adrenotools.sh      # optional: Turnip driver loading
 gradle assembleRelease --no-daemon
+```
+
+Both scripts default to `<repo>/.deps/`; set `PX5_FEXCORE_ROOT` /
+`PX5_ADRENOTOOLS_ROOT` only to override that location.
+
+Host-side regression tests need no Android toolchain and run in seconds:
+
+```bash
+./tools/hosttests/run.sh          # memory range queries + JNI symbol parity
 ```
 
 CI (`PX5 Build APK`) performs exactly this sequence on every push to

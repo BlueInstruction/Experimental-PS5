@@ -1,3 +1,8 @@
+# === EXTERNAL DEPENDENCIES ===
+# Materialized by tools/fetch_fexcore.sh / tools/fetch_adrenotools.sh at
+# pinned commits. Never committed: FEX alone is ~21k files / >1 GB.
+.deps/
+
 # === BUILD ARTIFACTS & INTERMEDIATES ===
 .gradle/
 **/.gradle/
@@ -5,6 +10,9 @@
 **/.cxx/
 build/
 **/build/
+# Machine-specific SDK path. Was committed as sdk.dir=/home/z/android-sdk,
+# which is one developer's home directory and breaks every other checkout.
+local.properties
 android/local.properties
 *.o
 *.a

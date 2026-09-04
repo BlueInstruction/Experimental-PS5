@@ -4,10 +4,10 @@
 #include <cstdint>
 #include <cstddef>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 #include <mutex>
-#include <unordered_map>
 
 namespace PX5 {
 
@@ -90,8 +90,14 @@ public:
     bool  IsValidAddress(uint64_t vaddr, size_t size) const;
 
     // Program break for brk(2) emulation.
-    void     SetProgramBreak(uint64_t base);
-    uint64_t GrowProgramBreak(intptr_t increment);   // returns new break, 0=fail
+    void     SetProgramBreak(uint64_t base);   // loader-side initial anchor
+
+    // Real brk(2) for the syscall bridge. `requested`==0 queries the current
+    // break. Growing MAPS the new span RW before returning it -- the guest
+    // writes there immediately. Returns false when the request cannot be
+    // honoured, so the bridge can answer with the unchanged break instead of
+    // handing the guest an address that is not backed by memory.
+    bool SetBrk(uint64_t requested, uint64_t& outBreak);
 
     size_t GetTotalAllocatedMB() const;
 
@@ -135,14 +141,22 @@ private:
     MemoryManager() = default;
     ~MemoryManager() = default;
 
-    struct WindowCandidate { uint64_t base; size_t size; };
+    struct WindowCandidate { uint64_t base; };
     static std::vector<WindowCandidate> WindowCandidates();
     bool MapMemoryImpl_Unlocked(uint64_t vaddr, size_t size, uint32_t flags,
                                 const std::string& tag,
                                 std::vector<std::pair<uint64_t, size_t>>* invalidatedOut);
 
     struct MemoryBlock { uint64_t va; size_t size; uint32_t flags; std::string tag; };
-    std::unordered_map<uint64_t, MemoryBlock> m_allocations;
+    // ORDERED by base VA: address queries are RANGE lookups (upper_bound),
+    // not key lookups. A block covers many pages, so an unordered_map keyed
+    // by page never answered correctly for anything past a block's first
+    // page. See FindBlock_Unlocked.
+    std::map<uint64_t, MemoryBlock> m_allocations;
+
+    // Greatest block whose [va, va+size) contains vaddr, or nullptr.
+    // Caller holds m_mutex.
+    const MemoryBlock* FindBlock_Unlocked(uint64_t vaddr) const;
 
     // mutable: logically-const queries (FindExecutableMapping) still lock.
     mutable std::mutex m_mutex;

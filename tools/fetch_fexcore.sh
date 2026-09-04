@@ -8,13 +8,19 @@
 # a pinned commit via this single entry point, which keeps builds auditable
 # and bit-for-bit reproducible across machines.
 #
+# DEFAULT DESTINATION: <repo>/.deps/FEX  -- one path, used verbatim by this
+# script, app/build.gradle.kts and every CI workflow. It lives inside the
+# repo (and is .gitignored) so that no consumer has to agree on how many
+# "../" to prepend; the previous five call sites disagreed and following the
+# README literally ended in a CMake FATAL_ERROR.
+#
 #   Local :  ./tools/fetch_fexcore.sh
-#            (default destination: <repo>/../../deps/FEX)
-#   CI    :  PX5_FEXCORE_ROOT=$PWD/deps/FEX ./tools/fetch_fexcore.sh
+#   CI    :  ./tools/fetch_fexcore.sh
+#   Custom:  PX5_FEXCORE_ROOT=/somewhere/FEX ./tools/fetch_fexcore.sh
 #
 # To upgrade the pin, bump PIN_TAG/PIN_SHA below to a released monthly tag
 # (https://github.com/FEX-Emu/FEX/tags) and re-run this script plus one full
-# rebuild. AGENT.md documents the compatibility contract with our compat/
+# rebuild. AGENTS.md documents the compatibility contract with our compat/
 # layer (std::atomic_ref polyfill, disabled LTO, lld, static FEXCore target).
 # ============================================================================
 set -euo pipefail
@@ -24,7 +30,7 @@ PIN_SHA="e869aa644a16e4332cdc15c1ea0b4d13d482385d"
 UPSTREAM="https://github.com/FEX-Emu/FEX.git"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEST="${PX5_FEXCORE_ROOT:-$REPO_ROOT/../../deps/FEX}"
+DEST="${PX5_FEXCORE_ROOT:-$REPO_ROOT/.deps/FEX}"
 PATCH_DIR="$REPO_ROOT/tools/patches"
 apply_overlay_patches() {
     local TGT="$1" PATCH

@@ -60,7 +60,10 @@ jobs:
           #
           # --suppress=missingIncludeSystem silences noise from system headers.
           #
-          # --error-exitcode=1 makes CI fail on actual errors (not warnings).
+          # Findings are graded by tools/cppcheck_gate.py in the next step:
+          # severity=error fails the build, everything else is reported.
+          # cppcheck itself must not abort here, or the gate never gets to
+          # print the summary.
           cppcheck \
             --enable=warning,style,performance,portability \
             --suppress=missingIncludeSystem \
@@ -87,11 +90,14 @@ jobs:
             -I app/src/main/cpp/filesystem \
             -I app/src/main/cpp/media \
             --output-file=build-reports/cppcheck.xml \
-            app/src/main/cpp/ 2>&1 | tee build-reports/cppcheck.log || true
+            app/src/main/cpp/ 2>&1 | tee build-reports/cppcheck.log
 
           # Convert XML to SARIF for GitHub upload
           cppcheck-htmlreport --file=build-reports/cppcheck.xml \
             --report-dir=build-reports/html || true
+
+      - name: Gate on cppcheck findings
+        run: python3 tools/cppcheck_gate.py build-reports/cppcheck.xml
 
       - name: Convert cppcheck XML to SARIF
         run: |
@@ -117,8 +123,10 @@ jobs:
             :
           fi
 
-          # Option 3: minimal inline SARIF (no findings — just so the
-          # upload step succeeds and we don't get a red X on CI).
+          # Option 3: minimal inline SARIF. This exists only so the Security
+          # tab upload has a well-formed file; it deliberately contains no
+          # results and is NOT a pass signal. The build's actual pass/fail
+          # decision is made by the "Gate on cppcheck findings" step above.
           echo "All converters failed; generating minimal empty SARIF."
           cat > build-reports/cppcheck.sarif <<'EOF'
           {

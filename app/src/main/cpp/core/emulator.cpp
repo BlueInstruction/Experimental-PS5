@@ -24,6 +24,33 @@
 
 namespace PX5 {
 
+namespace {
+
+// Resolve a writable location for a scratch fixture.
+//
+// Every call site used to end its fallback chain with a literal
+// "/data/local/tmp/...", directly under a comment explaining that
+// /data/local/tmp is NOT writable by app processes. That path can only
+// fail, and the failure surfaced as a confusing "fixture write failed"
+// instead of naming the real cause. There is no third candidate: if
+// neither the VFS base nor the crash-handler log dir is available, say so
+// and let the caller report it.
+//
+// Returns an empty string when no app-writable anchor exists.
+std::string ResolveFixturePath(const std::string& baseDir,
+                               const char* fileName) {
+    if (!baseDir.empty()) {
+        return baseDir + "/" + fileName;
+    }
+    const std::string& logs = CrashHandler::LogsDir();
+    if (!logs.empty()) {
+        return logs + "/" + fileName;
+    }
+    return {};
+}
+
+}  // namespace
+
 Emulator& Emulator::GetInstance() {
     static Emulator instance;
     return instance;
@@ -41,8 +68,10 @@ bool Emulator::Initialize(const std::string& baseDir) {
     }
 
     VirtualFileSystem::GetInstance().Initialize(baseDir);
-    VulkanGpuDevice::GetInstance().Initialize();   // honest; may fail w/ detail
-    AudioEngine::GetInstance().Initialize();
+    VulkanGpuDevice::GetInstance().Initialize();   // may fail, reports detail
+    // Audio is not implemented; Initialize() returns false and logs why.
+    // Startup does not depend on it.
+    (void)AudioEngine::GetInstance().Initialize();
 
     m_baseDir = baseDir;
     m_initialized.store(true);
@@ -79,12 +108,20 @@ bool Emulator::LoadExecutable(const std::string& path, bool isSelf) {
     }
     Breadcrumb::Set("load: memmgr ready");
     if (m_baseDir.empty()) {
-        // v1.28: /data/local/tmp is unwritable for app processes — anchor
-        // the VFS under the crash-handler logs dir (wired at startup,
-        // app-writable by construction) whenever it is available.
+        // /data/local/tmp is not writable by app processes, so it is not a
+        // fallback -- it is just a slower failure. Anchor the VFS under the
+        // crash-handler logs dir (wired at startup, app-writable by
+        // construction); if that is unavailable, report it instead of
+        // pointing the VFS at a path that cannot work.
         const std::string& logs = CrashHandler::LogsDir();
-        m_baseDir = logs.empty() ? std::string("/data/local/tmp/px5_fallback")
-                                 : logs + "/vfs";
+        if (logs.empty()) {
+            PX5_LOGE(LogCategory::CORE,
+                     "No app-writable directory available (crash-handler logs "
+                     "dir is unset): cannot anchor the guest VFS");
+            Breadcrumb::Set("load: no writable VFS anchor");
+            return false;
+        }
+        m_baseDir = logs + "/vfs";
         VirtualFileSystem::GetInstance().Initialize(m_baseDir);
     }
 
@@ -448,14 +485,12 @@ std::string Emulator::SelfTestFoundation() {
     // --- Step 5: ELF file round-trip through real loader -----------------
     {
         auto& mm = MemoryManager::GetInstance();
-        // v1.28: /data/local/tmp is unwritable for app processes (the vc28
-        // session failed step 5 exactly there — "ELF fixture write failed")
-        // — the crash-handler logs dir is wired at startup and app-writable
-        // by construction, so it is the fixture anchor of record.
-        const std::string elfPath = !m_baseDir.empty() ? m_baseDir + "/px5_guest.elf"
-            : (!CrashHandler::LogsDir().empty()
-                ? CrashHandler::LogsDir() + "/px5_guest.elf"
-                : std::string("/data/local/tmp/px5_guest.elf"));
+        const std::string elfPath =
+            ResolveFixturePath(m_baseDir, "px5_guest.elf");
+        if (elfPath.empty()) {
+            lines.push_back("[FAIL] 5. no app-writable dir for the ELF fixture");
+            goto done;
+        }
 
         std::ofstream f(elfPath, std::ios::binary | std::ios::trunc);
         f.write(reinterpret_cast<const char*>(TEST_GUEST_ELF),
@@ -514,11 +549,12 @@ std::string Emulator::SelfTestFoundation() {
     // end-to-end proof that a SELF-carried image runs, not merely parses.
     {
         auto& mm = MemoryManager::GetInstance();
-        // v1.28: fixture anchor of record — see the step-5 comment above.
-        const std::string selfPath = !m_baseDir.empty() ? m_baseDir + "/px5_guest.self"
-            : (!CrashHandler::LogsDir().empty()
-                ? CrashHandler::LogsDir() + "/px5_guest.self"
-                : std::string("/data/local/tmp/px5_guest.self"));
+        const std::string selfPath =
+            ResolveFixturePath(m_baseDir, "px5_guest.self");
+        if (selfPath.empty()) {
+            lines.push_back("[FAIL] 5b. no app-writable dir for the SELF fixture");
+            goto done;
+        }
 
         const std::vector<uint8_t> elfFile(
             TEST_GUEST_ELF_V2, TEST_GUEST_ELF_V2 + TEST_GUEST_ELF_V2_SIZE);
@@ -587,11 +623,12 @@ std::string Emulator::SelfTestFoundation() {
     // --- Step 6: ADVANCED ELF v2 — real mmap + memory round-trip --------
     {
         auto& mm = MemoryManager::GetInstance();
-        // v1.28: fixture anchor of record — see the step-5 comment above.
-        const std::string elfPath = !m_baseDir.empty() ? m_baseDir + "/px5_guest_v2.elf"
-            : (!CrashHandler::LogsDir().empty()
-                ? CrashHandler::LogsDir() + "/px5_guest_v2.elf"
-                : std::string("/data/local/tmp/px5_guest_v2.elf"));
+        const std::string elfPath =
+            ResolveFixturePath(m_baseDir, "px5_guest_v2.elf");
+        if (elfPath.empty()) {
+            lines.push_back("[FAIL] 6. no app-writable dir for the ELFv2 fixture");
+            goto done;
+        }
 
         std::ofstream f(elfPath, std::ios::binary | std::ios::trunc);
         f.write(reinterpret_cast<const char*>(TEST_GUEST_ELF_V2),

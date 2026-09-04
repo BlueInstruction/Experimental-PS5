@@ -30,10 +30,15 @@
 
 ## Evidence Engine Integration
 
-The [agent-evidence-engine](https://github.com/BlueInstruction/agent-evidence-engine)
-operates alongside the core emulator phases. It is not a sequential
-emulator phase — it is the measurement and validation layer that
-prevents blind development.
+A separate evidence-engine repository was planned to operate alongside the
+core emulator phases as a measurement and validation layer. It does not
+exist yet: the link that used to be here (`BlueInstruction/agent-evidence-engine`)
+returns 404, and every component in the table below is still ⬜, so nothing
+in this section has been built.
+
+What DOES exist and runs today is `tools/hosttests/run.sh` — host-side
+regression tests with no toolchain dependency, wired into the build
+workflow.
 
 ### v1 — Evidence Collection (current)
 

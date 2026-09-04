@@ -1,4 +1,5 @@
 #include "memory.h"
+#include "page_size.h"
 #include "../utils/logger.h"
 
 #include <sys/mman.h>
@@ -10,11 +11,13 @@
 #include <cstdio>
 #include <unistd.h>
 
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
+
 namespace PX5 {
 
 namespace {
-constexpr size_t kPageSize = 4096;
-
 size_t RoundUp(size_t v, size_t a) { return (v + a - 1) & ~(a - 1); }
 uint64_t RoundUp64(uint64_t v, uint64_t a) { return (v + a - 1) & ~(a - 1); }
 uint64_t RoundDown64(uint64_t v, uint64_t a) { return v & ~(a - 1); }
@@ -26,15 +29,21 @@ MemoryManager& MemoryManager::GetInstance() {
 }
 
 std::vector<MemoryManager::WindowCandidate> MemoryManager::WindowCandidates() {
-    // Canonical foundation window. CANONICAL anchor chosen so that
-    // TEST_GUEST_LOAD_VADDR (0x140000000) lives INSIDE the first half.
-    // Larger windows / dynamic layout (FEXCore BaseAddress path) is a
-    // documented Phase-C upgrade, not silently assumed here.
+    // Candidate ANCHORS only. The size comes from Initialize(totalMemoryMB)
+    // and is the same for every candidate -- these entries used to carry a
+    // hardcoded 0x10000000 (256 MiB) that no caller ever read, so
+    // Initialize(4096) looked like it asked for 4 GiB while the constant
+    // here said 256 MiB. Removing the field removes the contradiction.
+    //
+    // CANONICAL anchor chosen so that TEST_GUEST_LOAD_VADDR (0x140000000)
+    // lives INSIDE the window. Larger windows / dynamic layout (FEXCore
+    // BaseAddress path) is a documented Phase-C upgrade, not silently
+    // assumed here.
     constexpr uint64_t kPrimaryAnchor = 0x140000000ULL;
     constexpr uint64_t kFallbackShift = 0x00800000ULL * 32; // -256 MiB step
     return {
-        { kPrimaryAnchor,                      0x10000000ULL },
-        { kPrimaryAnchor - kFallbackShift,     0x10000000ULL },
+        { kPrimaryAnchor },
+        { kPrimaryAnchor - kFallbackShift },
     };
 }
 
@@ -43,7 +52,7 @@ bool MemoryManager::Initialize(size_t totalMemoryMB) {
     if (m_initialized) return true;
 
     const size_t windowSize = RoundUp(totalMemoryMB * 1024ull * 1024ull,
-                                      kPageSize);
+                                      HostPageSize());
 
     void* hostWindow = nullptr;
     uint64_t chosenBase = 0;
@@ -53,19 +62,36 @@ bool MemoryManager::Initialize(size_t totalMemoryMB) {
         // Where possible we want the guest numeric base and the host mapping
         // to start at the SAME address (identity-friendly), but correctness
         // never depends on it: the bridge math works either way.
+        //
+        // MAP_FIXED_NOREPLACE, never bare MAP_FIXED. Plain MAP_FIXED does not
+        // fail when the range is taken -- it silently UNMAPS whatever lives
+        // there. At 0x140000000 on Android that can be an ART heap region, a
+        // loaded .so, or the JIT cache, and the corruption surfaces later as
+        // an unrelated crash. NOREPLACE makes a busy range return EEXIST so
+        // the fallback candidate below is actually reachable instead of being
+        // dead code.
         void* p = mmap(reinterpret_cast<void*>(cand.base),
                        windowSize,
                        PROT_NONE,
-                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE |
+                           MAP_FIXED_NOREPLACE,
                        -1, 0);
         if (p != MAP_FAILED && reinterpret_cast<uint64_t>(p) == cand.base) {
             hostWindow = p;
             chosenBase = cand.base;
-            chosenNote = "MAP_FIXED at preferred anchor";
+            chosenNote = "MAP_FIXED_NOREPLACE at preferred anchor";
             break;
         }
         if (p != MAP_FAILED) {
+            // Kernel too old to honour NOREPLACE: it fell back to a
+            // "hint" mapping elsewhere. Release it and keep looking rather
+            // than accepting a base we did not ask for.
             munmap(p, windowSize);
+            PX5_LOGD(LogCategory::MEMORY,
+                     "Window candidate 0x%llx: kernel relocated the mapping "
+                     "(no MAP_FIXED_NOREPLACE support) - rejected",
+                     (unsigned long long)cand.base);
+            continue;
         }
         PX5_LOGD(LogCategory::MEMORY,
                  "Window candidate 0x%llx unavailable (%s)",
@@ -140,8 +166,8 @@ bool MemoryManager::MapMemoryImpl_Unlocked(uint64_t vaddr, size_t size,
     if (!m_initialized) return false;
     if (vaddr == 0 || size == 0) return false;
 
-    const uint64_t vaLo = RoundDown64(vaddr, kPageSize);
-    const uint64_t vaHi = RoundUp64(vaddr + size, kPageSize);
+    const uint64_t vaLo = RoundDown64(vaddr, HostPageSize());
+    const uint64_t vaHi = RoundUp64(vaddr + size, HostPageSize());
 
     if (vaLo < m_guestBase || vaHi > m_guestBase + m_windowSize) {
         PX5_LOGE(LogCategory::MEMORY,
@@ -240,25 +266,50 @@ bool MemoryManager::UnmapMemory(uint64_t vaddr, size_t size) {
     size_t   len   = 0;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        auto it = m_allocations.find(RoundDown64(vaddr, kPageSize));
-        if (it == m_allocations.end()) return false;
+        if (!m_initialized || size == 0) return false;
 
-        vaLo = it->first;
-        len = std::min(size <= kPageSize ? RoundUp64(vaddr + size - vaLo, kPageSize)
-                                          : size,
-                        it->second.size);
-        const uint64_t vaHi = vaLo + len;
+        // Range lookup: the request may start in the middle of a block, and
+        // it may cover only part of it. The old code required an exact base
+        // match and then erased the WHOLE block record while only resealing
+        // `len` bytes -- leaving the remainder mapped but invisible to the
+        // manager, and m_allocatedBytes permanently wrong.
+        const MemoryBlock* hit = FindBlock_Unlocked(vaddr);
+        if (!hit) return false;
+
+        vaLo = PageAlignDown(vaddr);
+        const uint64_t reqHi = PageAlignUp(vaddr + size);
+        const uint64_t blkHi = hit->va + hit->size;
+        const uint64_t vaHi = std::min(reqHi, blkHi);
+        if (vaHi <= vaLo) return false;
+        len = static_cast<size_t>(vaHi - vaLo);
+
+        const MemoryBlock original = *hit;
         CollectExecOverlaps_Unlocked(vaLo, vaHi, invalidated);
 
         char* hostLo = static_cast<char*>(m_hostWindow) + (vaLo - m_guestBase);
         // Re-seal as PROT_NONE instead of munmap so the window stays coherent.
         if (mprotect(hostLo, len, PROT_NONE) != 0) return false;
 
+        // Split the record so the surviving head/tail stay accounted for.
+        m_allocations.erase(original.va);
+        if (vaLo > original.va) {
+            m_allocations[original.va] = { original.va,
+                                           static_cast<size_t>(vaLo - original.va),
+                                           original.flags, original.tag };
+        }
+        if (vaHi < blkHi) {
+            m_allocations[vaHi] = { vaHi, static_cast<size_t>(blkHi - vaHi),
+                                    original.flags, original.tag };
+        }
+
         m_allocatedBytes -= len;
-        m_allocations.erase(it);
         PX5_LOGI(LogCategory::MEMORY,
-                 "Unmapped guest VA 0x%llx (%zu B resealed)",
-                 (unsigned long long)vaLo, len);
+                 "Unmapped guest VA 0x%llx (%zu B resealed, block "
+                 "[0x%llx..0x%llx) split head=%llu tail=%llu)",
+                 (unsigned long long)vaLo, len,
+                 (unsigned long long)original.va, (unsigned long long)blkHi,
+                 (unsigned long long)(vaLo > original.va ? vaLo - original.va : 0),
+                 (unsigned long long)(vaHi < blkHi ? blkHi - vaHi : 0));
     }
     if (!invalidated.empty() && m_codeInvalidationNotify) {
         for (const auto& [base, blen] : invalidated) {
@@ -279,8 +330,8 @@ bool MemoryManager::ProtectMemory(uint64_t vaddr, size_t size, uint32_t flags) {
         if (vaddr < m_guestBase || vaddr + size > m_guestBase + m_windowSize)
             return false;
 
-        const uint64_t vaLo = RoundDown64(vaddr, kPageSize);
-        const uint64_t vaHi = RoundUp64(vaddr + size, kPageSize);
+        const uint64_t vaLo = RoundDown64(vaddr, HostPageSize());
+        const uint64_t vaHi = RoundUp64(vaddr + size, HostPageSize());
 
         // v1.38: same never-below-read rule as the map path — a guest
         // mprotect(PROT_EXEC) must stay fetchable for the JIT.
@@ -359,25 +410,54 @@ void* MemoryManager::GetHostPointer(uint64_t vaddr) {
     return static_cast<char*>(m_hostWindow) + (vaddr - m_guestBase);
 }
 
+const MemoryManager::MemoryBlock*
+MemoryManager::FindBlock_Unlocked(uint64_t vaddr) const {
+    // Range lookup, NOT key lookup. m_allocations is keyed by the base VA of
+    // each block, and a block spans many pages: a 2.9 MiB PT_LOAD produces
+    // exactly ONE entry. Looking up RoundDown(vaddr, pageSize) therefore only
+    // ever matched the block's first page and reported every later address as
+    // unmapped -- which made IsValidAddress() and FindExecutableMapping()
+    // answer "no" for essentially the whole image.
+    if (m_allocations.empty()) return nullptr;
+    auto it = m_allocations.upper_bound(vaddr);   // first base > vaddr
+    if (it == m_allocations.begin()) return nullptr;
+    --it;                                        // greatest base <= vaddr
+    const MemoryBlock& blk = it->second;
+    if (vaddr < blk.va || vaddr >= blk.va + blk.size) return nullptr;
+    return &blk;
+}
+
 bool MemoryManager::IsValidAddress(uint64_t vaddr, size_t size) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_initialized) return false;
-    return vaddr >= m_guestBase &&
-           vaddr + size <= m_guestBase + m_windowSize &&
-           m_allocations.count(RoundDown64(vaddr, kPageSize)) > 0;
+    if (vaddr < m_guestBase || vaddr + size > m_guestBase + m_windowSize)
+        return false;
+    // The whole requested span must be covered, not just its first byte.
+    const uint64_t end = vaddr + (size ? size : 1);
+    uint64_t cursor = vaddr;
+    while (cursor < end) {
+        const MemoryBlock* blk = FindBlock_Unlocked(cursor);
+        if (!blk) return false;
+        cursor = blk->va + blk->size;
+    }
+    return true;
 }
 
 bool MemoryManager::FindExecutableMapping(uint64_t vaddr, ExecMapInfo& out) const {
     std::lock_guard<std::mutex> lock(m_mutex);
     out = {0, 0, false, false};
     if (!m_initialized) return false;
-    auto it = m_allocations.find(RoundDown64(vaddr, kPageSize));
-    if (it == m_allocations.end()) return false;
-    const auto& blk = it->second;
-    if (!(blk.flags & MemoryFlags::PAGE_EXEC)) return false;
-    out.base     = blk.va;
-    out.size     = blk.size;
+    // Range lookup (see FindBlock_Unlocked). FEXCore calls this through
+    // QueryGuestExecutableRange before translating every block; the old
+    // key lookup answered {0,0,false} for every address past a segment's
+    // first page, so the decoder refused to translate almost all guest code.
+    const MemoryBlock* blk = FindBlock_Unlocked(vaddr);
+    if (!blk) return false;
+    if (!(blk->flags & MemoryFlags::PAGE_EXEC)) return false;
+    out.base     = blk->va;
+    out.size     = blk->size;
     out.exec     = true;
-    out.writable = (blk.flags & MemoryFlags::PAGE_WRITE) != 0;
+    out.writable = (blk->flags & MemoryFlags::PAGE_WRITE) != 0;
     return true;
 }
 
@@ -387,21 +467,43 @@ void MemoryManager::SetProgramBreak(uint64_t base) {
         m_programBreak = base;
 }
 
-uint64_t MemoryManager::GrowProgramBreak(intptr_t increment) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_programBreak == 0) return 0;
-    const uint64_t next =
-        increment >= 0 ? RoundUp64(m_programBreak + increment, kPageSize)
-                       : (m_programBreak >= static_cast<uint64_t>(-increment)
-                            ? RoundDown64(m_programBreak + increment, kPageSize)
-                            : 0);
-    if (next == 0 || next < m_guestBase || next >= m_programBreakLimit) return 0;
-    // Commit pages up to the new break lazily.
-    const uint64_t commitFrom =
-        RoundUp64(std::min<uint64_t>(next, m_programBreak) - 1, kPageSize);
-    (void)commitFrom;
-    m_programBreak = next;
-    return next;
+bool MemoryManager::SetBrk(uint64_t requested, uint64_t& outBreak) {
+    // Real brk(2): the guest's crt allocator calls this and then WRITES to
+    // the returned range. The previous implementation only moved a counter
+    // ("commit pages lazily" followed by a discarded variable), so the
+    // syscall bridge handed back an address backed by PROT_NONE window
+    // pages and the first malloc() store faulted.
+    std::vector<std::pair<uint64_t, size_t>> invalidated;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_initialized || m_programBreak == 0) return false;
+
+        if (requested == 0) {           // query form
+            outBreak = m_programBreak;
+            return true;
+        }
+        const uint64_t next = PageAlignUp(requested);
+        if (next < m_guestBase || next >= m_programBreakLimit) return false;
+
+        const uint64_t cur = PageAlignUp(m_programBreak);
+        if (next > cur) {
+            // Grow: actually back the new span with RW pages.
+            if (!MapMemoryImpl_Unlocked(cur, static_cast<size_t>(next - cur),
+                                        MemoryFlags::PAGE_READ |
+                                            MemoryFlags::PAGE_WRITE,
+                                        "guest_brk", &invalidated)) {
+                return false;
+            }
+        }
+        m_programBreak = requested;
+        outBreak = m_programBreak;
+    }
+    if (!invalidated.empty() && m_codeInvalidationNotify) {
+        for (const auto& [base, blen] : invalidated) {
+            m_codeInvalidationNotify(base, blen);
+        }
+    }
+    return true;
 }
 
 size_t MemoryManager::GetTotalAllocatedMB() const {
@@ -434,10 +536,20 @@ uint64_t MemoryManager::GetGuestEnd() const {
 bool MemoryManager::TranslateLowFixedVa(uint64_t& va) const {
     std::lock_guard<std::mutex> lk(m_mutex);
     if (!m_initialized || va >= m_guestBase) return false;
-    // Mirror 4 GiB up: 0x49000000 -> 0x149000000 (the vc32 fixture's
-    // demanded answer). The window anchor 0x140000000 is itself a
-    // 4 GiB-mirrored shape (0x1_40000000), so low guest VAs land at the
-    // architecturally matching window offset.
+    // RELOCATION, NOT EMULATION -- and the caller must tell the guest.
+    //
+    // A guest MAP_FIXED below the window anchor cannot be honoured at the
+    // address it asked for: that memory belongs to the Android process.
+    // Rather than fail every such request, the request is relocated 4 GiB
+    // up (0x49000000 -> 0x149000000), which lands inside the window because
+    // the anchor 0x140000000 is itself 4 GiB-shaped.
+    //
+    // This is a deliberate ABI deviation, not PS5 behaviour: a real
+    // MAP_FIXED either gets its address or fails. It is safe ONLY because
+    // the caller returns the translated address to the guest, so a guest
+    // that checks mmap's return value follows the relocation. A guest that
+    // hardcodes the low address and ignores the return value WILL fault --
+    // that is a known limitation of this path, not a working translation.
     const uint64_t rebased = va + 0x100000000ull;
     if (rebased < m_guestBase ||
         rebased >= m_guestBase + m_windowSize) return false;
