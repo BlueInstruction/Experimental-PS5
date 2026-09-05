@@ -49,3 +49,4 @@ upload/
 download/
 __pycache__/
 *.pyc
+build-reports/
