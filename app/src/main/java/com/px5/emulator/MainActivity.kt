@@ -922,12 +922,26 @@ object PhysicalControllerBridge {
 
     /**
      * Clears every axis and button so leaving a game never sticks inputs.
+     * Buttons are released explicitly: the native atomics latch state, so a
+     * button held while this bridge is disabled stays pressed forever.
      */
     fun reset() {
         lx = 0f; ly = 0f; rx = 0f; ry = 0f; l2 = 0f; r2 = 0f
-        wrapper?.nativeSetLeftStick(0f, 0f)
-        wrapper?.nativeSetRightStick(0f, 0f)
-        wrapper?.nativeSetTriggers(0f, 0f)
+        val w = wrapper ?: return
+        w.nativeSetLeftStick(0f, 0f)
+        w.nativeSetRightStick(0f, 0f)
+        w.nativeSetTriggers(0f, 0f)
+        val buttons = intArrayOf(
+            FexCoreWrapper.PAD_CROSS, FexCoreWrapper.PAD_CIRCLE,
+            FexCoreWrapper.PAD_SQUARE, FexCoreWrapper.PAD_TRIANGLE,
+            FexCoreWrapper.PAD_DPAD_UP, FexCoreWrapper.PAD_DPAD_DOWN,
+            FexCoreWrapper.PAD_DPAD_LEFT, FexCoreWrapper.PAD_DPAD_RIGHT,
+            FexCoreWrapper.PAD_L1, FexCoreWrapper.PAD_R1,
+            FexCoreWrapper.PAD_OPTIONS, FexCoreWrapper.PAD_SHARE,
+            FexCoreWrapper.PAD_PS_HOME, FexCoreWrapper.PAD_L3,
+            FexCoreWrapper.PAD_R3,
+        )
+        for (bit in buttons) w.nativeSetButtonState(bit, false)
     }
 
     /**
