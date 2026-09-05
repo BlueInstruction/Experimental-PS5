@@ -163,6 +163,11 @@ FexCoreIntegration::ExecResult Emulator::ExecuteLoadedGuest() {
 
     void* ripHost = mm.GetHostPointer(m_image.entryPoint);
     void* spHost  = mm.GetHostPointer(kStackGuestVa - 256);   // arg area headroom
+    // v1.46 — the REAL initial SP (the argc-block VA built by the v1.39
+    // block below). The dispatch ledger used to print kStackGuestVa-256 —
+    // the pre-v1.39 headroom — which lied about where the guest actually
+    // starts and hid that RDI must point exactly there.
+    uint64_t initialSpVa = kStackGuestVa - 256;
 
     if (!ripHost || !spHost) {
         res.error = "host bridge failed for entry/stack";
@@ -274,6 +279,7 @@ FexCoreIntegration::ExecResult Emulator::ExecuteLoadedGuest() {
         memcpy(base + ofRandom, rnd, sizeof rnd);
 
         spHost = mm.GetHostPointer(argBlockVa);
+        initialSpVa = argBlockVa;
         if (!spHost) {
             res.error = "host bridge failed for initial stack";
             return res;
@@ -353,10 +359,12 @@ FexCoreIntegration::ExecResult Emulator::ExecuteLoadedGuest() {
     // v1.41 — the dispatch is on the record before it happens: RIP/SP/FS
     // land in the ledger chained to the bound image hash.
     Evidence::AppendLedger(
-        "dispatch enter rip=0x%llx sp=0x%llx fs_base=0x%llx",
+        "dispatch enter rip=0x%llx sp=0x%llx fs_base=0x%llx rdi=0x%llx "
+        "abi=orbis-start",
         (unsigned long long)m_image.entryPoint,
-        (unsigned long long)kStackGuestVa - 256,
-        (unsigned long long)guestFsBase);
+        (unsigned long long)initialSpVa,
+        (unsigned long long)guestFsBase,
+        (unsigned long long)initialSpVa);
     res = FexCoreIntegration::ExecuteAtHostRip(reinterpret_cast<uint64_t>(ripHost),
                                                reinterpret_cast<uint64_t>(spHost),
                                                guestFsBase);

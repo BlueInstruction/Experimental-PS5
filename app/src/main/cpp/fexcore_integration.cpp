@@ -851,6 +851,30 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
                  (unsigned long long)initialFsBase);
     }
 
+    // v1.46 — THE ENTRY-ABI FIX (vc47). ORBIS process-start contract: the
+    // kernel points RDI at the application-parameter block ON THE GUEST
+    // STACK ([RDI]=argc, [RDI+8]=argv[0], ..., auxv) — _start decodes
+    // `mov r14d,[rdi]` / `lea r15,[rdi+8]` (verified in the mapped eboot:
+    // entry bytes 44 8b 37 / 4c 8d 7f 08). Linux-style _start instead reads
+    // argc FROM THE STACK, and FEXCore::CreateThread leaves every GPR at 0 —
+    // so the real eboot died on its FIRST memory access (LDAR W19,[x11],
+    // x11=0, si_addr=0x0) BEFORE any PLT call. That is the crash every
+    // session since vc40 hit ~1 s after dispatch; the vc45 "null import
+    // wall / jmp [0]" reading was a misattribution (the GOT slot is never
+    // 0 — it holds the file's lazy back-pointer; and execution never even
+    // reached the PLT). The v1.39 initial stack already places argc at the
+    // initial SP, so the ORBIS contract is exactly RDI = initial SP.
+    // RSI/RDX stay 0: _start saves RSI for its second call; if that call
+    // dereferences it, the import-trap ledger will name the import instead
+    // of a mystery fault.
+    frame->State.gregs[FEXCore::X86State::REG_RDI] = hostStackTop;
+    frame->State.gregs[FEXCore::X86State::REG_RSI] = 0;
+    frame->State.gregs[FEXCore::X86State::REG_RDX] = 0;
+    PX5_LOGI(LogCategory::FEX,
+             "ORBIS entry ABI set: rdi=0x%llx (argc block at initial SP) "
+             "rsi=0 rdx=0 (v1.46 — mov r14d,[rdi] null-load eliminated)",
+             (unsigned long long)hostStackTop);
+
     g_execThread = thread;
     SmcManager::GetInstance().SetExecThread(thread);
     // Clear any previous run's synchronous-fault record BEFORE execution so

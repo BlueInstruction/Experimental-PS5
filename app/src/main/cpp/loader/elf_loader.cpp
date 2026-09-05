@@ -345,10 +345,9 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
     }
 
     // ------------------------------------------------------------------
-    // v1.45 — import-trap installation. The vc45 session died on the
-    // null-import wall (PLT#0 -> GOT slot 0 in LOAD#4 BSS -> jmp [0] ->
-    // SIGSEGV LDAXR). Every UNDEF STRONG import slot collected above now
-    // points at a 16-byte guest stub instead of 0:
+    // v1.45 — import-trap installation. Every UNDEF STRONG import slot
+    // collected above now points at a 16-byte guest stub instead of the
+    // file's lazy-binding back-pointer:
     //     B8 <nr>       mov eax, kPx5ImportTrapSyscall
     //     BF <idx>      mov edi, <import index>
     //     0F 05         syscall        -> GuestSyscalls::Dispatch
@@ -356,6 +355,15 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
     //     90 90 90      padding (never executed)
     // A missing import is now a NAMED ledger event and the guest keeps
     // running; a data read of the slot sees a mapped RX page, not null.
+    // HISTORY HONESTY (v1.46): the vc45 record said "PLT#0 -> GOT slot 0
+    // in LOAD#4 BSS". Both halves were wrong — the first PLT slot is
+    // 0x4943E0 (file value 0x2e54c6, the lazy back-pointer, NOT 0), and
+    // the vc45/vc46 crash happened BEFORE any PLT call: _start's first
+    // memory access is mov r14d,[rdi] with RDI still 0 (no ORBIS entry
+    // ABI at dispatch) — fixed v1.46 in fexcore_integration.cpp. The
+    // traps stay: they are what the guest hits as soon as the ABI is
+    // right, and every JUMP_SLOT slot would otherwise keep pointing at
+    // an unmapped link-time VA.
     // ------------------------------------------------------------------
     size_t trapInstalled = 0;
     if (!pend.empty()) {
@@ -456,7 +464,14 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
                                      MemoryFlags::PAGE_READ |
                                          MemoryFlags::PAGE_EXEC);
                 // Point the slots at the stubs.
-                size_t slotsWritten = 0;
+                // v1.46 — every write is read back and verified. The vc46
+                // session left slotsWritten=815 as a blind memcpy count;
+                // a silent host-bridge write loss would have been invisible
+                // (the guest would have kept reading the file's lazy
+                // back-pointer). A mismatch now names the slot and refuses
+                // to claim the install as sound.
+                size_t slotsWritten = 0, readbackMismatch = 0;
+                uint64_t firstBadSlotVa = 0, firstBadGot = 0;
                 for (size_t i = 0; i < traps.size(); ++i) {
                     if (!vaWritableSeg(traps[i].slotVa)) continue;
                     void* host = memRef.GetHostPointer(traps[i].slotVa);
@@ -465,6 +480,24 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
                     memcpy(host, &v, sizeof v);
                     traps[i].slotWritten = true;
                     ++slotsWritten;
+                    uint64_t back = 0;
+                    memcpy(&back, host, sizeof back);
+                    if (back != v) {
+                        ++readbackMismatch;
+                        if (firstBadSlotVa == 0) {
+                            firstBadSlotVa = traps[i].slotVa;
+                            firstBadGot = back;
+                        }
+                    }
+                }
+                if (readbackMismatch) {
+                    PX5_LOGE(LogCategory::LOADER,
+                             "IMPORT-TRAPS: readback MISMATCH slots=%zu "
+                             "first slotVa=0x%llx expected=stub got=0x%llx "
+                             "— guest may still see stale slot content",
+                             readbackMismatch,
+                             (unsigned long long)firstBadSlotVa,
+                             (unsigned long long)firstBadGot);
                 }
                 trapInstalled = traps.size();
                 RuntimeLinker::GetInstance().SetImportTraps(
@@ -472,13 +505,16 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
 
                 PX5_LOGI(LogCategory::LOADER,
                          "IMPORT-TRAPS: stubs=%zu region=[0x%llx..0x%llx] "
-                         "nr=0x%x stride=16 slotsWritten=%zu nameless=%zu — "
+                         "nr=0x%x stride=16 slotsWritten=%zu readbackOk=%zu "
+                         "readbackMismatch=%zu nameless=%zu — "
                          "unresolved slots now trap to a named ledger",
                          trapInstalled,
                          (unsigned long long)stubBase,
                          (unsigned long long)(stubBase + stubBytes),
                          kPx5ImportTrapSyscall,
-                         slotsWritten, nameless);
+                         slotsWritten,
+                         slotsWritten - readbackMismatch,
+                         readbackMismatch, nameless);
                 Evidence::AppendLedger(
                     "import traps stubs=%zu region=0x%llx nr=0x%x",
                     trapInstalled, (unsigned long long)stubBase,

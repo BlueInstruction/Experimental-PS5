@@ -131,6 +131,13 @@ uint64_t SlotValue(uint64_t va) {
 
 int main() {
     Evidence::SetLedgerPath("/tmp/px5_import_trap_test_ledger.log");
+    // The ledger path is a fixed HOST file shared across runs — on a
+    // persistent runner it accumulates stale lines and the flood-
+    // discipline check (count occurrences) fails on yesterday's events.
+    // CI never saw this (fresh VM per run); every run owns its file now.
+    if (FILE* trunc = fopen("/tmp/px5_import_trap_test_ledger.log", "w")) {
+        fclose(trunc);
+    }
     auto& mm = MemoryManager::GetInstance();
     if (!mm.Initialize(4096)) {                 // device-sized window
         printf("window init failed\n");

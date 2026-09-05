@@ -19,11 +19,21 @@
 //   (0..447) and outside the x32 range (0x40000000..0x400003FF), so no
 //   real guest syscall can ever collide with it.
 //
-// THE IMPORT TRAP (v1.45)
-//   The vc45 session proved the null-import wall: the game's _start calls
-//   a PLT entry whose GOT slot the loader correctly refuses to invent
-//   (slot stays 0) -> jmp [0] -> SIGSEGV. The trap flips that wall into
-//   the ledger: every UNDEF STRONG import slot gets a 16-byte guest stub
+// THE IMPORT TRAP (v1.45, corrected v1.46)
+//   The vc45 session crashed ~1 s after dispatch and the record blamed
+//   "the null-import wall: PLT#0 -> GOT slot stays 0 -> jmp [0]". The
+//   vc46 device log proved both halves wrong: (a) the crash repeats
+//   BYTE-IDENTICAL with all 815 trap slots installed and ZERO trap hits
+//   and ZERO syscalls — execution never reached any PLT; (b) the file's
+//   first JUMP_SLOT slot (0x4943E0) is never 0 anyway — it holds the
+//   lazy-binding back-pointer 0x2e54c6 (PLT+6, link-time VA, unmapped
+//   once the image is based at 0x140000000). The REAL wall was the
+//   missing ORBIS entry ABI: FEXCore::CreateThread zeroes every GPR, so
+//   _start's first memory access `mov r14d,[rdi]` loaded through RDI=0
+//   (host LDAR [0], si_addr=0) before any call. v1.46 fixes that at
+//   dispatch (fexcore_integration.cpp: RDI = initial SP = argc block).
+//   The trap stays exactly as designed: every UNDEF STRONG import slot
+//   gets a 16-byte guest stub
 //   (mov eax,kPx5ImportTrapSyscall; mov edi,<import index>; syscall; ret)
 //   written by the loader into a dedicated RWX-then-RX guest region.
 //   A call now lands in GuestSyscalls::Dispatch, names the missing import
