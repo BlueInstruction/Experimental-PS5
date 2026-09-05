@@ -20,8 +20,16 @@ NATIVE = ROOT / "app/src/main/cpp/fexcore_wrapper.cpp"
 STUB = ROOT / "app/src/main/cpp/stub/ui_smoke_stub.cpp"
 
 PREFIX = "Java_com_px5_emulator_core_FexCoreWrapper_"
-DECL_RE = re.compile(r"\bpublic\s+(?:static\s+)?native\s+[\w<>\[\]., ]+?\s+(\w+)\s*\(")
+# Any modifier sequence before `native` (JLS allows reordering:
+# `static public native` is legal). The old regex accepted only
+# "public [static] native", silently skipping private/package-private
+# declarations -- exactly the class of drift this checker exists for.
+_DECL_MODS = r"(?:(?:public|private|protected|static|final|synchronized|strictfp)\s+)*"
+DECL_RE = re.compile(r"\b" + _DECL_MODS + r"native\s+[\w<>\[\].,\s?]+?\s+(\w+)\s*\(")
 DEF_RE = re.compile(re.escape(PREFIX) + r"(\w+)")
+# Comment text counts as NO definition: a `// removed Java_..._Foo` mention
+# used to satisfy the parity check while the symbol stayed missing.
+_CPP_COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
 
 
 def declared():
@@ -42,7 +50,7 @@ def defined(path):
     Returns:
         Set of JNI method names defined in the file
     """
-    return set(DEF_RE.findall(path.read_text()))
+    return set(DEF_RE.findall(_CPP_COMMENT_RE.sub("", path.read_text())))
 
 
 def main():

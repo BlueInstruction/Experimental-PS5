@@ -9,9 +9,13 @@ plugins {
 // diagnostic stream at every startup — so any pasted log self-identifies
 // the exact APK, commit, and FEXCore pin it came from.
 //
-// Uses ProcessBuilder rather than Project.exec {}: the latter is not
-// configuration-cache compatible and Gradle 8.9 flags it at configuration
-// time. Same output, same honest "unknown" fallback.
+// Runs an external git process at CONFIGURATION time. With the
+// configuration cache disabled (gradle.properties keeps it off) this is
+// evaluated fresh every build, which the build-identity contract requires:
+// GIT_SHA must name the HEAD this APK was built from. If the configuration
+// cache is ever enabled, move this into a ValueSource first -- a cache hit
+// would otherwise replay a stale SHA into BuildConfig.
+// Same output, same honest "unknown" fallback.
 fun gitSha(): String = try {
     val proc = ProcessBuilder("git", "rev-parse", "--short", "HEAD")
         .directory(rootProject.projectDir)
@@ -45,8 +49,8 @@ android {
         applicationId = "com.px5.emulator"
         minSdk = 28
         targetSdk = 35
-        versionCode = 44
-        versionName = "1.43"
+        versionCode = 45
+        versionName = "1.44"
 
         buildConfigField("String", "GIT_SHA", "\"${gitSha()}\"")
         buildConfigField("String", "FEXCORE_PIN", "\"${fexCorePin()}\"")
