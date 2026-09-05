@@ -91,6 +91,10 @@ public:
 
     /**
      * Maps memory at the specified guest virtual address with given protections.
+     * MAP_FIXED-style: pages of existing mappings inside [vaddr, vaddr+size)
+     * leave their old records (split head/tail keep the old flags); the byte
+     * accounting is adjusted by exactly the replaced size.
+     *
      * @param vaddr Guest virtual address
      * @param size Region size in bytes
      * @param flags Protection flags (PAGE_READ | PAGE_WRITE | PAGE_EXEC)
@@ -167,6 +171,9 @@ public:
     /**
      * Implements brk(2) syscall: adjusts program break, backing new memory with RW pages.
      * requested==0 queries current break without changing it.
+     * A shrink releases the brk-backed pages fully above the new break
+     * (records split at the new break; foreign mappings above it are kept).
+     *
      * @param requested New break address (0 to query)
      * @param outBreak Output parameter receiving the resulting break address
      * @return true if request succeeded, false if it cannot be honoured
@@ -272,7 +279,9 @@ private:
      */
     struct MemoryBlock { uint64_t va; size_t size; uint32_t flags; std::string tag; };
 
-    /// ORDERED by base VA for range lookups (upper_bound), not key lookups
+    /// ORDERED by base VA for range lookups (upper_bound), not key lookups.
+    /// Invariant: records never overlap; MapMemory/ProtectMemory split
+    /// records at range boundaries (SplitBlocksAt_Unlocked) to preserve it.
     std::map<uint64_t, MemoryBlock> m_allocations;
 
     /**
@@ -281,6 +290,17 @@ private:
      * @return Pointer to block containing vaddr, or nullptr if unmapped
      */
     const MemoryBlock* FindBlock_Unlocked(uint64_t vaddr) const;
+
+    /**
+     * Splits every record straddling vaLo or vaHi so no record crosses the
+     * range bounds; the clamped middle piece keeps the old flags and its key
+     * is returned (with keys of records already fully inside). Byte
+     * accounting is neutral. (Caller holds m_mutex.)
+     * @param vaLo Low boundary (inclusive)
+     * @param vaHi High boundary (exclusive)
+     * @return Keys of records fully inside [vaLo, vaHi)
+     */
+    std::vector<uint64_t> SplitBlocksAt_Unlocked(uint64_t vaLo, uint64_t vaHi);
 
     /// mutable: logically-const queries (IsValidAddress) still lock.
     /// FindExecutableMapping deliberately does NOT: fault handlers reach it,

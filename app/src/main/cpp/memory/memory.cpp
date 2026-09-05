@@ -23,6 +23,20 @@ size_t RoundUp(size_t v, size_t a) { return (v + a - 1) & ~(a - 1); }
 uint64_t RoundUp64(uint64_t v, uint64_t a) { return (v + a - 1) & ~(a - 1); }
 uint64_t RoundDown64(uint64_t v, uint64_t a) { return v & ~(a - 1); }
 
+// Overflow-safe "[vaddr, vaddr+size) inside [base, limit)". The naive
+// vaddr+size comparison wraps for guest-controlled sizes near 2^64 and the
+// wrapped sum passes the check (IsValidAddress said yes for SIZE_MAX,
+// WriteGuestMemory reached memcpy with a 2^64 length). Subtract instead of
+// add: size must fit in what remains after vaddr.
+inline bool RangeInWindow(uint64_t vaddr, uint64_t size,
+                          uint64_t base, uint64_t limit) {
+    return vaddr >= base && vaddr < limit && size <= limit - vaddr;
+}
+
+// Every span the brk allocator backs is tagged with this, so a shrink
+// releases only pages brk itself mapped and never a foreign mapping.
+constexpr const char* kBrkTag = "guest_brk";
+
 // Blocks SIGSEGV/SIGBUS for the scope duration (same discipline as
 // FaultSafeLock in fexcore_integration.cpp): used around the exec-snapshot
 // rebuild so a fault handler on this thread can never observe a stuck odd
@@ -189,16 +203,26 @@ bool MemoryManager::MapMemoryImpl_Unlocked(uint64_t vaddr, size_t size,
     if (!m_initialized) return false;
     if (vaddr == 0 || size == 0) return false;
 
-    const uint64_t vaLo = RoundDown64(vaddr, HostPageSize());
-    const uint64_t vaHi = RoundUp64(vaddr + size, HostPageSize());
-
-    if (vaLo < m_guestBase || vaHi > m_guestBase + m_windowSize) {
+    // Containment FIRST and overflow-safe: only after the range is proven to
+    // fit is vaddr+size computed anywhere below.
+    if (!RangeInWindow(vaddr, size, m_guestBase, m_guestBase + m_windowSize)) {
         PX5_LOGE(LogCategory::MEMORY,
-                 "MapMemory REJECTED: [0x%llx..0x%llx] outside window "
+                 "MapMemory REJECTED: 0x%llx +0x%zx outside window "
                  "[0x%llx..0x%llx]",
-                 (unsigned long long)vaLo, (unsigned long long)vaHi,
+                 (unsigned long long)vaddr, size,
                  (unsigned long long)m_guestBase,
                  (unsigned long long)(m_guestBase + m_windowSize));
+        return false;
+    }
+
+    const uint64_t vaLo = RoundDown64(vaddr, HostPageSize());
+    const uint64_t vaHi = RoundUp64(vaddr + size, HostPageSize());
+    if (vaHi > m_guestBase + m_windowSize) {
+        // Page-rounding the in-window end runs past the window: same
+        // rejection the old bound check produced for this case.
+        PX5_LOGE(LogCategory::MEMORY,
+                 "MapMemory REJECTED: page-rounded end 0x%llx past window end",
+                 (unsigned long long)vaHi);
         return false;
     }
 
@@ -227,7 +251,20 @@ bool MemoryManager::MapMemoryImpl_Unlocked(uint64_t vaddr, size_t size,
         return false;
     }
 
+    // MAP_FIXED-style replace, bookkeeping included: records are split at
+    // vaLo/vaHi so surviving head/tail keep their own flags, fully-covered
+    // records are dropped, and the byte accounting moves by exactly the
+    // covered size. The previous code only overwrote the m_allocations KEY,
+    // leaving stale records that still claimed the overlapped pages (wrong
+    // flags for FindExecutableMapping, double-counted bytes).
+    const auto covered = SplitBlocksAt_Unlocked(vaLo, vaHi);
+    size_t releasedBytes = 0;
+    for (uint64_t key : covered) {
+        releasedBytes += m_allocations[key].size;
+        m_allocations.erase(key);
+    }
     m_allocations[vaLo] = { vaLo, vaHi - vaLo, hostFlags, tag };
+    m_allocatedBytes -= releasedBytes;
     m_allocatedBytes += vaHi - vaLo;
     RebuildExecSnapshot_Unlocked();
     PX5_LOGI(LogCategory::MEMORY,
@@ -289,6 +326,11 @@ bool MemoryManager::UnmapMemory(uint64_t vaddr, size_t size) {
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_initialized || size == 0) return false;
+
+        // Overflow guard: a wrapped vaddr+size made the old alignment math
+        // produce reqHi < vaLo and the walk below reported silent success.
+        if (!RangeInWindow(vaddr, size, m_guestBase, m_guestBase + m_windowSize))
+            return false;
 
         const uint64_t vaLo = PageAlignDown(vaddr);
         const uint64_t reqHi = PageAlignUp(vaddr + size);
@@ -372,11 +414,12 @@ bool MemoryManager::ProtectMemory(uint64_t vaddr, size_t size, uint32_t flags) {
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_initialized) return false;
-        if (vaddr < m_guestBase || vaddr + size > m_guestBase + m_windowSize)
+        if (!RangeInWindow(vaddr, size ? size : 1,
+                           m_guestBase, m_guestBase + m_windowSize))
             return false;
 
         const uint64_t vaLo = RoundDown64(vaddr, HostPageSize());
-        const uint64_t vaHi = RoundUp64(vaddr + size, HostPageSize());
+        const uint64_t vaHi = RoundUp64(vaddr + (size ? size : 1), HostPageSize());
 
         // v1.38: same never-below-read rule as the map path — a guest
         // mprotect(PROT_EXEC) must stay fetchable for the JIT.
@@ -403,11 +446,13 @@ bool MemoryManager::ProtectMemory(uint64_t vaddr, size_t size, uint32_t flags) {
                      (unsigned long long)vaLo, strerror(errno));
             return false;
         }
-        // Update the recorded flags: the SMC registry and the executable-
-        // range query both read what the guest asked for from here.
-        for (auto& [base, blk] : m_allocations) {
-            if (blk.va + blk.size <= vaLo || blk.va >= vaHi) continue;
-            blk.flags = flags;
+        // Update the recorded flags for EXACTLY the pages re-protected:
+        // records are split at the range bounds first, so a partial-range
+        // mprotect no longer paints the surviving head/tail with flags the
+        // mprotect never applied.
+        const auto covered = SplitBlocksAt_Unlocked(vaLo, vaHi);
+        for (uint64_t key : covered) {
+            m_allocations[key].flags = flags;
         }
         RebuildExecSnapshot_Unlocked();   // writable bit may have changed
     }
@@ -430,7 +475,8 @@ bool MemoryManager::ReadGuestMemory(uint64_t vaddr, void* outBuffer, size_t size
     // address math; m_allocations is not consulted here.
     void* h = GetHostPointer(vaddr);
     if (!h || !outBuffer ||
-        vaddr + size > m_guestBase + m_windowSize) return false;
+        !RangeInWindow(vaddr, size, m_guestBase, m_guestBase + m_windowSize))
+        return false;
     memcpy(outBuffer, h, size);
     return true;
 }
@@ -442,7 +488,8 @@ bool MemoryManager::WriteGuestMemory(uint64_t vaddr, const void* inBuffer, size_
     // ours may be held across the memcpy.
     void* h = GetHostPointer(vaddr);
     if (!h || !inBuffer ||
-        vaddr + size > m_guestBase + m_windowSize) return false;
+        !RangeInWindow(vaddr, size, m_guestBase, m_guestBase + m_windowSize))
+        return false;
     memcpy(h, inBuffer, size);
     return true;
 }
@@ -473,13 +520,58 @@ MemoryManager::FindBlock_Unlocked(uint64_t vaddr) const {
     return &blk;
 }
 
+std::vector<uint64_t>
+MemoryManager::SplitBlocksAt_Unlocked(uint64_t vaLo, uint64_t vaHi) {
+    // Caller holds m_mutex. Guarantees no record straddles vaLo or vaHi:
+    // straddlers are split and their head/tail keep the original flags and
+    // tag; the clamped middle piece becomes its own record (old flags) and
+    // its key is returned in the covered list. Accounting is NEUTRAL here —
+    // the callers decide what happens to the covered records (map: erase and
+    // replace; protect: reflag; brk shrink: erase after resealing).
+    std::vector<uint64_t> covered;
+    std::vector<uint64_t> drop;
+    std::vector<MemoryBlock> keep;
+    for (const auto& [key, blk] : m_allocations) {
+        (void)key;
+        const uint64_t end = blk.va + blk.size;
+        if (end <= vaLo || blk.va >= vaHi) continue;   // no overlap
+        if (blk.va >= vaLo && end <= vaHi) {           // fully covered
+            covered.push_back(blk.va);
+            continue;
+        }
+        if (blk.va < vaLo)
+            keep.push_back({ blk.va,
+                             static_cast<size_t>(vaLo - blk.va),
+                             blk.flags, blk.tag });
+        if (end > vaHi)
+            keep.push_back({ vaHi,
+                             static_cast<size_t>(end - vaHi),
+                             blk.flags, blk.tag });
+        // The clamped middle piece keeps its bytes counted: it is re-inserted
+        // here (old flags) and its key rides in `covered` for the caller.
+        const uint64_t midLo = std::max<uint64_t>(blk.va, vaLo);
+        const uint64_t midHi = std::min<uint64_t>(end, vaHi);
+        keep.push_back({ midLo,
+                         static_cast<size_t>(midHi - midLo),
+                         blk.flags, blk.tag });
+        drop.push_back(blk.va);
+        covered.push_back(midLo);
+    }
+    for (uint64_t k : drop) m_allocations.erase(k);
+    for (const auto& s : keep) m_allocations[s.va] = s;
+    return covered;
+}
+
 bool MemoryManager::IsValidAddress(uint64_t vaddr, size_t size) const {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_initialized) return false;
-    if (vaddr < m_guestBase || vaddr + size > m_guestBase + m_windowSize)
+    // The whole requested span must be covered, not just its first byte,
+    // and the span must fit the window WITHOUT wrapping (size near 2^64
+    // used to wrap vaddr+size back inside the window and answer "yes").
+    const uint64_t span = size ? size : 1;
+    if (!RangeInWindow(vaddr, span, m_guestBase, m_guestBase + m_windowSize))
         return false;
-    // The whole requested span must be covered, not just its first byte.
-    const uint64_t end = vaddr + (size ? size : 1);
+    const uint64_t end = vaddr + span;
     uint64_t cursor = vaddr;
     while (cursor < end) {
         const MemoryBlock* blk = FindBlock_Unlocked(cursor);
@@ -599,8 +691,40 @@ bool MemoryManager::SetBrk(uint64_t requested, uint64_t& outBreak) {
             if (!MapMemoryImpl_Unlocked(cur, static_cast<size_t>(next - cur),
                                         MemoryFlags::PAGE_READ |
                                             MemoryFlags::PAGE_WRITE,
-                                        "guest_brk", &invalidated)) {
+                                        kBrkTag, &invalidated)) {
                 return false;
+            }
+        } else if (next < cur) {
+            // Shrink: Linux brk(2) releases the pages fully above the new
+            // break. Only spans brk itself mapped (kBrkTag) are released;
+            // the walk stops at the first hole or foreign mapping, so a
+            // loader block above the break can never be torn down here.
+            // The previous implementation silently kept shrunk pages mapped
+            // and counted, and a later grow re-mapped over them.
+            uint64_t cursor = next;
+            std::vector<std::pair<uint64_t, uint64_t>> release;
+            while (cursor < m_programBreakLimit) {
+                const MemoryBlock* blk = FindBlock_Unlocked(cursor);
+                if (!blk || blk->tag != kBrkTag) break;
+                const uint64_t lo = std::max<uint64_t>(blk->va, next);
+                const uint64_t hi = blk->va + blk->size;
+                if (hi <= lo) break;
+                release.emplace_back(lo, hi);
+                cursor = hi;
+            }
+            for (const auto& [lo, hi] : release) {
+                char* h = static_cast<char*>(m_hostWindow) + (lo - m_guestBase);
+                if (mprotect(h, hi - lo, PROT_NONE) != 0) {
+                    PX5_LOGE(LogCategory::MEMORY,
+                             "SetBrk shrink: mprotect failed for 0x%llx: %s",
+                             (unsigned long long)lo, strerror(errno));
+                    return false;
+                }
+                const auto covered = SplitBlocksAt_Unlocked(lo, hi);
+                for (uint64_t key : covered) {
+                    m_allocatedBytes -= m_allocations[key].size;
+                    m_allocations.erase(key);
+                }
             }
         }
         m_programBreak = requested;

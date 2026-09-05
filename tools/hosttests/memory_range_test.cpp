@@ -105,6 +105,82 @@ int main() {
             "munmap of a never-mapped range succeeds (Linux returns 0)");
     }
 
+    printf("\nMAP_FIXED-style replace (overlay must leave NO stale records):\n");
+    {
+        const size_t MiB = 1024 * 1024;
+        const uint64_t a = base + 0xC000000;         // 192 MiB into the window
+        const size_t x0 = mm.GetTotalAllocatedMB();
+        mm.MapMemory(a, 2 * MiB,
+                     MemoryFlags::PAGE_READ | MemoryFlags::PAGE_WRITE, "ov-A");
+        chk(mm.GetTotalAllocatedMB() == x0 + 2, "A adds its full 2 MiB");
+        mm.MapMemory(a + MiB, 2 * MiB,
+                     MemoryFlags::PAGE_READ | MemoryFlags::PAGE_EXEC, "ov-B");
+        chk(mm.GetTotalAllocatedMB() == x0 + 3,
+            "overlay accounts +1 MiB net (2 added, 1 replaced)");
+        chk(mm.IsValidAddress(a + MiB - 0x1000, 1), "A head survives");
+        MemoryManager::ExecMapInfo info{};
+        chk(!mm.FindExecutableMapping(a + MiB - 0x1000, info),
+            "A head keeps RW flags (stale exec record is gone)");
+        chk(mm.FindExecutableMapping(a + MiB + 0x1000, info) && info.exec,
+            "B reports executable across the overlap");
+        chk(mm.IsValidAddress(a + 2 * MiB + 0x1000, 1),
+            "B extends past A's old end");
+        mm.MapMemory(a + MiB, 2 * MiB,
+                     MemoryFlags::PAGE_READ | MemoryFlags::PAGE_EXEC, "ov-B2");
+        chk(mm.GetTotalAllocatedMB() == x0 + 3,
+            "exact self-overwrite changes nothing");
+
+        printf("Partial protect splits flags at the range bounds:\n");
+        mm.ProtectMemory(a + MiB, MiB, MemoryFlags::PAGE_READ);
+        chk(!mm.FindExecutableMapping(a + MiB + 0x1000, info),
+            "covered head of B lost exec (and W)");
+        chk(mm.FindExecutableMapping(a + 2 * MiB + 0x1000, info) &&
+                info.exec && !info.writable,
+            "B tail beyond the protect keeps its original R-X");
+    }
+
+    printf("\nOverflow-safe range checks (a wrapped span must never pass):\n");
+    {
+        const uint64_t wrapVa = base + 0x1000;
+        const uint64_t wrapSize = (0 - wrapVa) + 0x10;   // va+size wraps to 0x10
+        unsigned char buf[8];
+        chk(!mm.IsValidAddress(wrapVa, (size_t)wrapSize), "IsValidAddress refuses");
+        chk(!mm.MapMemory(wrapVa, (size_t)wrapSize,
+                          MemoryFlags::PAGE_READ | MemoryFlags::PAGE_WRITE,
+                          "wrap-map"), "MapMemory refuses");
+        chk(!mm.UnmapMemory(wrapVa, (size_t)wrapSize), "UnmapMemory refuses");
+        chk(!mm.ProtectMemory(wrapVa, (size_t)wrapSize,
+                              MemoryFlags::PAGE_READ |
+                                  MemoryFlags::PAGE_WRITE), "ProtectMemory refuses");
+        chk(!mm.ReadGuestMemory(wrapVa, buf, (size_t)wrapSize),
+            "ReadGuestMemory refuses");
+        chk(!mm.WriteGuestMemory(wrapVa, buf, (size_t)wrapSize),
+            "WriteGuestMemory refuses");
+        chk(!mm.IsValidAddress(mm.GetGuestEnd(), 1), "end-of-window address refused");
+    }
+
+    printf("\nbrk shrink releases the pages above the new break:\n");
+    {
+        const size_t MiB = 1024 * 1024;
+        const uint64_t brkBase = base + 0x8000000;   // 128 MiB into the window
+        mm.SetProgramBreak(brkBase);
+        uint64_t out = 0;
+        chk(mm.SetBrk(brkBase + 4 * MiB, out), "grow to +4 MiB");
+        const size_t grownMB = mm.GetTotalAllocatedMB();
+        chk(mm.SetBrk(brkBase + MiB, out) && out == brkBase + MiB,
+            "shrink to +1 MiB reports the new break");
+        chk(mm.GetTotalAllocatedMB() == grownMB - 3,
+            "shrink released exactly 3 MiB of accounting");
+        chk(!mm.IsValidAddress(brkBase + 2 * MiB + 0x1000, 1),
+            "a released page is unmapped");
+        chk(mm.IsValidAddress(brkBase + 0x8000, 1),
+            "a kept page below the new break is mapped");
+        chk(mm.SetBrk(brkBase + 4 * MiB, out), "re-grow over the released span");
+        chk(mm.IsValidAddress(brkBase + 2 * MiB + 0x1000, 1),
+            "re-grown page is mapped again");
+        chk(mm.GetTotalAllocatedMB() == grownMB, "accounting restored");
+    }
+
     printf("\nExecutable-range snapshot coherence (lock-free query path):\n");
     {
         const uint64_t e = base + 0x6000000;         // 96 MiB into the window
