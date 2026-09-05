@@ -1,5 +1,6 @@
 package com.px5.emulator
 
+import android.annotation.SuppressLint
 import android.net.Uri
 import android.os.Bundle
 import android.view.KeyEvent
@@ -72,6 +73,10 @@ class MainActivity : ComponentActivity() {
      * @param event The key event
      * @return true if event was consumed, false otherwise
      */
+    // RestrictedApi fires only because androidx.core is a different library
+    // group than PSX5; overriding dispatchKeyEvent on an Activity is its
+    // intended use.
+    @SuppressLint("RestrictedApi")
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (PhysicalControllerBridge.enabled &&
             PhysicalControllerBridge.handleKey(event)) return true
