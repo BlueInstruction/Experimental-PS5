@@ -24,7 +24,7 @@ CXX="${CXX:-g++}"
 echo "[hosttests] compiler: $($CXX --version | head -1)"
 
 echo "[hosttests] building memory_range_test"
-"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter \
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
     -I"$SHIM" -I"$CPP" \
     -o "$OUT/memory_range_test" \
     "$ROOT/tools/hosttests/memory_range_test.cpp" \

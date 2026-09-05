@@ -187,6 +187,10 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
             PX5_LOGW(LogCategory::KERNEL,
                      "guest brk(0x%llx) refused - break unchanged at 0x%llx",
                      (unsigned long long)a0, (unsigned long long)cur);
+            // The bridge handled the call (made a decision and answered the
+            // guest); refusal must not hide it from the counters.
+            std::lock_guard<std::mutex> lk(g_stateMutex);
+            g_stats.handledCalls++;
             return cur;
         }
         std::lock_guard<std::mutex> lk(g_stateMutex);

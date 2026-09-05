@@ -10,6 +10,7 @@
 #include <cstring>
 #include <cstdio>
 #include <unistd.h>
+#include <signal.h>
 
 #ifndef MAP_FIXED_NOREPLACE
 #define MAP_FIXED_NOREPLACE 0x100000
@@ -21,6 +22,26 @@ namespace {
 size_t RoundUp(size_t v, size_t a) { return (v + a - 1) & ~(a - 1); }
 uint64_t RoundUp64(uint64_t v, uint64_t a) { return (v + a - 1) & ~(a - 1); }
 uint64_t RoundDown64(uint64_t v, uint64_t a) { return v & ~(a - 1); }
+
+// Blocks SIGSEGV/SIGBUS for the scope duration (same discipline as
+// FaultSafeLock in fexcore_integration.cpp): used around the exec-snapshot
+// rebuild so a fault handler on this thread can never observe a stuck odd
+// seqlock generation.
+class ScopedFaultMask {
+public:
+    ScopedFaultMask() {
+        sigset_t block;
+        sigemptyset(&block);
+        sigaddset(&block, SIGSEGV);
+        sigaddset(&block, SIGBUS);
+        pthread_sigmask(SIG_BLOCK, &block, &m_saved);
+    }
+    ~ScopedFaultMask() { pthread_sigmask(SIG_SETMASK, &m_saved, nullptr); }
+    ScopedFaultMask(const ScopedFaultMask&) = delete;
+    ScopedFaultMask& operator=(const ScopedFaultMask&) = delete;
+private:
+    sigset_t m_saved{};
+};
 } // namespace
 
 MemoryManager& MemoryManager::GetInstance() {
@@ -111,6 +132,7 @@ bool MemoryManager::Initialize(size_t totalMemoryMB) {
     m_programBreakLimit = m_guestBase + m_windowSize;
     m_allocatedBytes = 0;
     m_initialized = true;
+    RebuildExecSnapshot_Unlocked();
 
     PX5_LOGI(LogCategory::MEMORY,
              "Guest window reserved: VA=[0x%llx..0x%llx] host=%p via %s",
@@ -132,6 +154,7 @@ void MemoryManager::Shutdown() {
     m_windowSize = 0;
     m_allocatedBytes = 0;
     m_initialized = false;
+    RebuildExecSnapshot_Unlocked();
     PX5_LOGI(LogCategory::MEMORY, "Memory window shut down successfully");
 }
 
@@ -206,6 +229,7 @@ bool MemoryManager::MapMemoryImpl_Unlocked(uint64_t vaddr, size_t size,
 
     m_allocations[vaLo] = { vaLo, vaHi - vaLo, hostFlags, tag };
     m_allocatedBytes += vaHi - vaLo;
+    RebuildExecSnapshot_Unlocked();
     PX5_LOGI(LogCategory::MEMORY,
              "Mapped guest VA 0x%llx-0x%llx (%zu B, prot=%d, tag=%s)",
              (unsigned long long)vaLo, (unsigned long long)vaHi,
@@ -262,54 +286,75 @@ int MemoryManager::CreateSharedMemory(const char* name, size_t size) {
 
 bool MemoryManager::UnmapMemory(uint64_t vaddr, size_t size) {
     std::vector<std::pair<uint64_t, size_t>> invalidated;
-    uint64_t vaLo = 0;
-    size_t   len   = 0;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_initialized || size == 0) return false;
 
-        // Range lookup: the request may start in the middle of a block, and
-        // it may cover only part of it. The old code required an exact base
-        // match and then erased the WHOLE block record while only resealing
-        // `len` bytes -- leaving the remainder mapped but invisible to the
-        // manager, and m_allocatedBytes permanently wrong.
-        const MemoryBlock* hit = FindBlock_Unlocked(vaddr);
-        if (!hit) return false;
-
-        vaLo = PageAlignDown(vaddr);
+        const uint64_t vaLo = PageAlignDown(vaddr);
         const uint64_t reqHi = PageAlignUp(vaddr + size);
-        const uint64_t blkHi = hit->va + hit->size;
-        const uint64_t vaHi = std::min(reqHi, blkHi);
-        if (vaHi <= vaLo) return false;
-        len = static_cast<size_t>(vaHi - vaLo);
+        if (vaLo < m_guestBase || reqHi > m_guestBase + m_windowSize)
+            return false;
 
-        const MemoryBlock original = *hit;
-        CollectExecOverlaps_Unlocked(vaLo, vaHi, invalidated);
-
-        char* hostLo = static_cast<char*>(m_hostWindow) + (vaLo - m_guestBase);
-        // Re-seal as PROT_NONE instead of munmap so the window stays coherent.
-        if (mprotect(hostLo, len, PROT_NONE) != 0) return false;
-
-        // Split the record so the surviving head/tail stay accounted for.
-        m_allocations.erase(original.va);
-        if (vaLo > original.va) {
-            m_allocations[original.va] = { original.va,
-                                           static_cast<size_t>(vaLo - original.va),
-                                           original.flags, original.tag };
+        // NR_munmap semantics: EVERY mapped page in [vaLo, reqHi) is
+        // unmapped; holes are not an error (Linux munmap(2) returns 0 for
+        // them). The previous implementation stopped at the end of the
+        // first intersecting block and still reported success, so a range
+        // spanning two allocations left the later ones mapped while the
+        // guest believed they were gone.
+        struct Span { uint64_t lo, hi; MemoryBlock blk; };
+        std::vector<Span> spans;
+        uint64_t cursor = vaLo;
+        while (cursor < reqHi) {
+            const MemoryBlock* hit = FindBlock_Unlocked(cursor);
+            if (!hit) {
+                // Hole: jump to the next block base at or after cursor.
+                auto nxt = m_allocations.upper_bound(cursor);
+                if (nxt == m_allocations.end()) break;
+                cursor = nxt->first;
+                continue;
+            }
+            const uint64_t lo = std::max<uint64_t>(hit->va, vaLo);
+            const uint64_t hi = std::min<uint64_t>(hit->va + hit->size, reqHi);
+            spans.push_back({ lo, hi, *hit });   // copy: erased during apply
+            cursor = hi;
         }
-        if (vaHi < blkHi) {
-            m_allocations[vaHi] = { vaHi, static_cast<size_t>(blkHi - vaHi),
-                                    original.flags, original.tag };
+        if (spans.empty()) return true;   // nothing mapped in range: Linux succeeds
+
+        for (const auto& sp : spans) {
+            CollectExecOverlaps_Unlocked(sp.lo, sp.hi, invalidated);
         }
 
-        m_allocatedBytes -= len;
+        size_t resealed = 0;
+        for (const auto& sp : spans) {
+            const MemoryBlock original = sp.blk;
+            char* hostLo = static_cast<char*>(m_hostWindow) + (sp.lo - m_guestBase);
+            // Re-seal as PROT_NONE instead of munmap so the window stays coherent.
+            if (mprotect(hostLo, sp.hi - sp.lo, PROT_NONE) != 0) {
+                PX5_LOGE(LogCategory::MEMORY,
+                         "UnmapMemory: mprotect failed for 0x%llx: %s",
+                         (unsigned long long)sp.lo, strerror(errno));
+                return false;
+            }
+
+            // Split the record so the surviving head/tail stay accounted for.
+            m_allocations.erase(original.va);
+            if (sp.lo > original.va) {
+                m_allocations[original.va] = { original.va,
+                                               static_cast<size_t>(sp.lo - original.va),
+                                               original.flags, original.tag };
+            }
+            if (sp.hi < original.va + original.size) {
+                m_allocations[sp.hi] = { sp.hi,
+                                         static_cast<size_t>(original.va + original.size - sp.hi),
+                                         original.flags, original.tag };
+            }
+            m_allocatedBytes -= static_cast<size_t>(sp.hi - sp.lo);
+            resealed += static_cast<size_t>(sp.hi - sp.lo);
+        }
+        RebuildExecSnapshot_Unlocked();
         PX5_LOGI(LogCategory::MEMORY,
-                 "Unmapped guest VA 0x%llx (%zu B resealed, block "
-                 "[0x%llx..0x%llx) split head=%llu tail=%llu)",
-                 (unsigned long long)vaLo, len,
-                 (unsigned long long)original.va, (unsigned long long)blkHi,
-                 (unsigned long long)(vaLo > original.va ? vaLo - original.va : 0),
-                 (unsigned long long)(vaHi < blkHi ? blkHi - vaHi : 0));
+                 "Unmapped guest VA 0x%llx (%zu B resealed across %zu block(s))",
+                 (unsigned long long)vaLo, resealed, spans.size());
     }
     if (!invalidated.empty() && m_codeInvalidationNotify) {
         for (const auto& [base, blen] : invalidated) {
@@ -364,6 +409,7 @@ bool MemoryManager::ProtectMemory(uint64_t vaddr, size_t size, uint32_t flags) {
             if (blk.va + blk.size <= vaLo || blk.va >= vaHi) continue;
             blk.flags = flags;
         }
+        RebuildExecSnapshot_Unlocked();   // writable bit may have changed
     }
     if (!invalidated.empty() && m_codeInvalidationNotify) {
         for (const auto& [base, blen] : invalidated) {
@@ -443,22 +489,80 @@ bool MemoryManager::IsValidAddress(uint64_t vaddr, size_t size) const {
     return true;
 }
 
+void MemoryManager::RebuildExecSnapshot_Unlocked() {
+    // Caller holds m_mutex, so rebuilds are serialized (single writer).
+    // Fault signals are masked for the store window: the generation must
+    // never be left odd for a fault handler on THIS thread to spin on.
+    ScopedFaultMask mask;
+    m_execSeq.fetch_add(1, std::memory_order_relaxed);      // odd: rebuilding
+
+    uint32_t n = 0;
+    bool truncated = false;
+    for (const auto& [base, blk] : m_allocations) {
+        (void)base;
+        if (!(blk.flags & MemoryFlags::PAGE_EXEC)) continue;
+        if (n >= kExecSnapshotCap) { truncated = true; break; }
+        m_execRanges[n].base.store(blk.va, std::memory_order_relaxed);
+        m_execRanges[n].end.store(blk.va + blk.size, std::memory_order_relaxed);
+        m_execRanges[n].writable.store(
+            (blk.flags & MemoryFlags::PAGE_WRITE) != 0,
+            std::memory_order_relaxed);
+        ++n;
+    }
+    m_execRangeCount.store(n, std::memory_order_relaxed);
+    m_execTruncated.store(truncated, std::memory_order_relaxed);
+    // Release: publishes the new generation to lock-free readers.
+    m_execSeq.fetch_add(1, std::memory_order_release);      // even: stable
+
+    if (truncated) {
+        // Logged after publication: outside the masked window, and the
+        // snapshot readers never touch the logger.
+        PX5_LOGE(LogCategory::MEMORY,
+                 "Exec-range snapshot truncated at %zu entries: "
+                 "executable queries beyond the cap answer 'not found'",
+                 n);
+    }
+}
+
 bool MemoryManager::FindExecutableMapping(uint64_t vaddr, ExecMapInfo& out) const {
-    std::lock_guard<std::mutex> lock(m_mutex);
     out = {0, 0, false, false};
-    if (!m_initialized) return false;
-    // Range lookup (see FindBlock_Unlocked). FEXCore calls this through
-    // QueryGuestExecutableRange before translating every block; the old
-    // key lookup answered {0,0,false} for every address past a segment's
-    // first page, so the decoder refused to translate almost all guest code.
-    const MemoryBlock* blk = FindBlock_Unlocked(vaddr);
-    if (!blk) return false;
-    if (!(blk->flags & MemoryFlags::PAGE_EXEC)) return false;
-    out.base     = blk->va;
-    out.size     = blk->size;
-    out.exec     = true;
-    out.writable = (blk->flags & MemoryFlags::PAGE_WRITE) != 0;
-    return true;
+    // Lock-free seqlock read. This call is reachable from the SMC fault
+    // handler's unprotect path (and FEXCore's translation query), where
+    // taking m_mutex can self-deadlock on an interrupted lock owner. Every
+    // field is atomic, so no read races; the generation pass guarantees the
+    // entries all belong to one published snapshot. The writer masks fault
+    // signals mid-rebuild, so a handler can never spin on its own thread's
+    // odd generation; a DIFFERENT thread's rebuild completes in bounded time.
+    for (;;) {
+        const uint64_t seq0 = m_execSeq.load(std::memory_order_acquire);
+        if (seq0 & 1) continue;                       // mid-rebuild: retry
+        const uint32_t count = m_execRangeCount.load(std::memory_order_relaxed);
+
+        // Greatest base <= vaddr (same semantics FindBlock_Unlocked has).
+        size_t lo = 0, hi = count;
+        while (lo < hi) {
+            const size_t mid = lo + (hi - lo) / 2;
+            if (m_execRanges[mid].base.load(std::memory_order_relaxed) <= vaddr)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        const ExecRange* hit = nullptr;
+        if (lo > 0) {
+            const ExecRange& r = m_execRanges[lo - 1];
+            if (vaddr < r.end.load(std::memory_order_relaxed)) hit = &r;
+        }
+
+        if (m_execSeq.load(std::memory_order_acquire) == seq0) {
+            if (!hit) return false;
+            out.base     = hit->base.load(std::memory_order_relaxed);
+            out.size     = hit->end.load(std::memory_order_relaxed) - out.base;
+            out.exec     = true;
+            out.writable = hit->writable.load(std::memory_order_relaxed) != 0;
+            return true;
+        }
+        // Generation changed mid-search: read the next stable snapshot.
+    }
 }
 
 void MemoryManager::SetProgramBreak(uint64_t base) {
@@ -476,6 +580,10 @@ bool MemoryManager::SetBrk(uint64_t requested, uint64_t& outBreak) {
     std::vector<std::pair<uint64_t, size_t>> invalidated;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
+        // Linux brk(2): a refused request must return the UNCHANGED break,
+        // never an unwritten output. Every refusal path below flows through
+        // this one write; the success paths overwrite it.
+        outBreak = m_programBreak;
         if (!m_initialized || m_programBreak == 0) return false;
 
         if (requested == 0) {           // query form
@@ -511,6 +619,10 @@ size_t MemoryManager::GetTotalAllocatedMB() const {
 }
 
 std::string MemoryManager::GetWindowInfoString() const {
+    // UI diagnostics read this while the executor thread mutates the map:
+    // hold the mutex so the read is not a data race. No signal-context
+    // caller reaches this function.
+    std::lock_guard<std::mutex> lk(m_mutex);
     if (!m_initialized) return "window=NOT_INITIALIZED";
     char buf[160];
     snprintf(buf, sizeof(buf),

@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <atomic>
 
 namespace PX5 {
 
@@ -191,6 +192,9 @@ public:
     /**
      * Finds the executable mapping containing the given address.
      * Returns false (exec=false) if address is not in an executable region.
+     * Signal-safe: reads an atomically published snapshot instead of taking
+     * m_mutex, because the SMC fault handler reaches this call from signal
+     * context (see fexcore_integration.cpp FaultSafeLock notes).
      * @param vaddr Guest virtual address to query
      * @param out Output parameter receiving mapping info
      * @return true if vaddr is in a mapped executable region, false otherwise
@@ -278,7 +282,10 @@ private:
      */
     const MemoryBlock* FindBlock_Unlocked(uint64_t vaddr) const;
 
-    /// mutable: logically-const queries (FindExecutableMapping) still lock
+    /// mutable: logically-const queries (IsValidAddress) still lock.
+    /// FindExecutableMapping deliberately does NOT: fault handlers reach it,
+    /// and a handler taking this mutex could self-deadlock on a thread that
+    /// faulted while holding it.
     mutable std::mutex m_mutex;
     bool     m_initialized = false;
     uint64_t m_guestBase   = 0;      ///< numeric guest anchor
@@ -299,6 +306,35 @@ private:
      */
     void CollectExecOverlaps_Unlocked(uint64_t vaLo, uint64_t vaHi,
                                       std::vector<std::pair<uint64_t, size_t>>& out) const;
+
+    // ---- Signal-safe executable-range snapshot ----------------------------
+    //
+    // FindExecutableMapping is reachable from the SMC fault handler, where
+    // taking m_mutex can self-deadlock (a fault interrupting a thread that
+    // holds it). Instead the query reads this snapshot: writers rebuild it
+    // under m_mutex after every exec-relevant mutation and publish through a
+    // seqlock (odd generation = mid-rebuild); readers retry until the
+    // generation is stable. All fields are atomic, so the read has no data
+    // race; the seqlock pass only guards generation consistency.
+    //
+    // The rebuild masks SIGSEGV/SIGBUS (same discipline as FaultSafeLock in
+    // fexcore_integration.cpp): a handler on the rebuilding thread can then
+    // never spin on a generation its own interrupted thread left odd.
+    struct ExecRange {
+        std::atomic<uint64_t> base{0};
+        std::atomic<uint64_t> end{0};
+        std::atomic<uint32_t> writable{0};
+    };
+    static constexpr size_t kExecSnapshotCap = 128;
+    ExecRange              m_execRanges[kExecSnapshotCap];
+    std::atomic<uint32_t>  m_execRangeCount{0};
+    std::atomic<uint64_t>  m_execSeq{0};          ///< seqlock generation
+    std::atomic<bool>      m_execTruncated{false};
+
+    /**
+     * Rebuilds and publishes the executable-range snapshot (caller holds m_mutex).
+     */
+    void RebuildExecSnapshot_Unlocked();
 };
 
 } // namespace PX5
