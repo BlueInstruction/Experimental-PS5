@@ -275,11 +275,12 @@ public:
     }
 
     // Live counter accessors for the engine counters panel (real values,
-    // including zeroes — see the class contract above).
+    // including zeroes).
     uint64_t CounterPagesProtected()  const { return m_pagesProtected.load(std::memory_order_relaxed); }
     uint64_t CounterFaults()          const { return m_faultCount.load(std::memory_order_relaxed); }
     uint64_t CounterInvalidations()   const { return m_invalidateCount.load(std::memory_order_relaxed); }
     uint64_t CounterUnalignedRepairs()const { return m_unalignedCount.load(std::memory_order_relaxed); }
+    uint64_t CounterUnexpectedSiCode()const { return m_unexpectedSiCode.load(std::memory_order_relaxed); }
     size_t   LiveProtectedCount() {
         FaultSafeLock lk(m_pageMutex);
         return m_protectedPages.size();
@@ -1054,14 +1055,38 @@ std::string GetEngineCounters() {
     auto& smc = SmcManager::GetInstance();
     auto& mm = MemoryManager::GetInstance();
 
+    // The trap record is written from signal context while execution runs.
+    // Reading it here mid-run was a data race; report 'pending' instead and
+    // read the fields only when no execution is active. The acquire load
+    // pairs with the executor's (seq_cst, hence release) null store, so once
+    // idle is observed, the final published record is fully visible and no
+    // handler can be mid-write (GuestTrapRouter publishes only on the
+    // active executor).
+    const bool execActive =
+        g_execThread.load(std::memory_order_acquire) != nullptr;
+    char trapLine[128];
+    if (execActive) {
+        snprintf(trapLine, sizeof(trapLine),
+                 "guestTraps: count=%llu last=pending (execution active)",
+                 (unsigned long long)g_guestTrapCount.load(std::memory_order_relaxed));
+    } else {
+        (void)g_trapSeq.load(std::memory_order_acquire);   // pairs with publish
+        const GuestTrapInfo t = g_lastGuestTrap;
+        snprintf(trapLine, sizeof(trapLine),
+                 "guestTraps: count=%llu lastSignal=%u lastTrapNo=%u "
+                 "lastGuestRIP=0x%llx",
+                 (unsigned long long)g_guestTrapCount.load(std::memory_order_relaxed),
+                 (unsigned)t.signal, (unsigned)t.trapNo,
+                 (unsigned long long)t.guestRip);
+    }
+
     char buf[512];
     snprintf(buf, sizeof(buf),
              "engine: %s\n"
              "syscalls: total=%llu handled=%llu unhandled=%llu bytesOut=%llu\n"
              "SMC: pagesProtected=%llu faults=%llu invalidations=%llu "
-             "unalignedRepairs=%llu liveProtected=%zu\n"
-             "guestTraps: count=%llu lastSignal=%u lastTrapNo=%u "
-             "lastGuestRIP=0x%llx\n"
+             "unalignedRepairs=%llu liveProtected=%zu unexpectedSiCode=%llu\n"
+             "%s\n"
              "memory: %s\n"
              "guestThreads: lastRun=%s",
              IsInitialized() ? "initialized" : "not initialized",
@@ -1074,10 +1099,8 @@ std::string GetEngineCounters() {
              (unsigned long long)smc.CounterInvalidations(),
              (unsigned long long)smc.CounterUnalignedRepairs(),
              smc.LiveProtectedCount(),
-             (unsigned long long)g_guestTrapCount.load(std::memory_order_relaxed),
-             (unsigned)g_lastGuestTrap.signal,
-             (unsigned)g_lastGuestTrap.trapNo,
-             (unsigned long long)g_lastGuestTrap.guestRip,
+             (unsigned long long)smc.CounterUnexpectedSiCode(),
+             trapLine,
              mm.GetWindowInfoString().c_str(),
              g_execThread.load(std::memory_order_relaxed) ? "active" : "idle");
 
