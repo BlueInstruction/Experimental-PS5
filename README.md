@@ -51,7 +51,7 @@ Host-side regression tests need no Android toolchain and run in seconds:
 ```
 
 CI (`PX5 Build APK`) performs exactly this sequence on every push to
-`main`, alongside `android-lint`, `cppcheck`, and `clang-tidy` analysis.
+`main`, alongside `android-lint` and `cppcheck` analysis.
 
 ## Documentation
 

@@ -11,8 +11,8 @@
 #   - Performance (heavy work on main thread, inefficient layouts)
 #   - Correctness (wrong fragment lifecycle, missing permissions)
 #
-# Output: lint-results-debug.sarif uploaded to GitHub's Security tab +
-#         HTML report as an artifact.
+# Output: HTML report as an artifact; SARIF (when AGP emits it) is
+#         uploaded to GitHub's Security tab.
 
 name: Android Lint
 
@@ -56,14 +56,17 @@ jobs:
       - name: Run Android Lint
         run: |
           # Run only the lint task — not the full assembleDebug, which
-          # would also trigger native CMake build (slow + needs NDK).
-          # `-x lintDebug` is the variant-specific task; we also use
-          # `lint` to cover all variants.
-          gradle :app:lintDebug --no-daemon --stacktrace 2>&1 | tee lint.log || true
+          # would also trigger the native CMake build (slow + needs NDK).
+          # No `|| true` here: the step must fail when lint finds errors
+          # (abortOnError), otherwise the check would be permanently green
+          # no matter what lint reports.
+          set -o pipefail
+          gradle :app:lintDebug --no-daemon --stacktrace 2>&1 | tee lint.log
 
       - name: Check for SARIF output
         run: |
-          # AGP 8.x writes SARIF to app/build/reports/lint-results-debug.sarif
+          # AGP does not emit SARIF by default; if the file is absent the
+          # upload below is skipped instead of faking a report.
           if [ -f app/build/reports/lint-results-debug.sarif ]; then
             echo "SARIF found: app/build/reports/lint-results-debug.sarif"
             ls -la app/build/reports/lint-results-debug.sarif

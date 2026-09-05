@@ -45,7 +45,7 @@ tools/
 ├── verify_evidence.py      # rechecks the load-evidence ledger offline
 └── patches/fex-*.patch     # patches applied onto the FEX tree
 
-.github/workflows/          # APK build (arm64-v8a), lint, cppcheck, clang-tidy
+.github/workflows/          # APK build (arm64-v8a), lint, cppcheck
 ```
 
 ## Build
