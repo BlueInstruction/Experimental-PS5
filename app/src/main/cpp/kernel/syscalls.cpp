@@ -104,20 +104,26 @@ uint64_t GuestPcRing::Seq() {
 }
 
 void GuestPcRing::Format(char* out, size_t outCap) {
+    if (!out || outCap == 0) return;
     const uint64_t seq = g_pcRingSeq.load(std::memory_order_relaxed);
     const uint64_t last = g_pcRingLast.load(std::memory_order_relaxed);
     size_t o = static_cast<size_t>(
         snprintf(out, outCap, "seq=%llu last=0x%llx recent=[",
                  (unsigned long long)seq, (unsigned long long)last));
+    // snprintf returns what WOULD be written; without this clamp a truncated
+    // header pushes o past outCap and the next snprintf gets a negative
+    // "remaining" that wraps to a bogus capacity.
+    if (o > outCap - 1) o = outCap - 1;
     const size_t n = seq < kPcRingSize ? static_cast<size_t>(seq) : kPcRingSize;
     const size_t show = n < 8 ? n : 8;
-    for (size_t i = 0; i < show && o < outCap; ++i) {
+    for (size_t i = 0; i < show && o < outCap - 1; ++i) {
         const uint64_t rip = seq >= (show - i)
             ? g_pcRing[(seq - show + i) % kPcRingSize]
             : 0;
         o += static_cast<size_t>(snprintf(out + o, outCap - o,
                                           "%s0x%llx", i ? "," : "",
                                           (unsigned long long)rip));
+        if (o > outCap - 1) o = outCap - 1;
     }
     if (o < outCap) snprintf(out + o, outCap - o, "]");
 }

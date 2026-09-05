@@ -166,14 +166,15 @@ uint64_t KernelHle::AllocateDirectMemory(uint64_t searchStart,
     (void)searchStart; (void)searchEnd;
 
     if (len == 0 || alignment == 0 ||
-        (alignment & (alignment - 1)) != 0)   // power-of-two required
-        return static_cast<uint64_t>(kErrInval);
+        (alignment & (alignment - 1)) != 0 ||   // power-of-two required
+        alignment > kDmRegionSize)              // and small enough that the
+        return static_cast<uint64_t>(kErrInval);// rounding below cannot wrap
 
-    if (m_dmNext + len > kDmRegionSize)
+    if (m_dmNext > kDmRegionSize || len > kDmRegionSize - m_dmNext)
         return static_cast<uint64_t>(kErrNoMem);
 
     const uint64_t alignedOff = (m_dmNext + alignment - 1) & ~(alignment - 1);
-    if (alignedOff + len > kDmRegionSize)
+    if (alignedOff > kDmRegionSize || len > kDmRegionSize - alignedOff)
         return static_cast<uint64_t>(kErrNoMem);
 
     const uint64_t phys = kDmRegionVa + alignedOff;   // "physical" identity
@@ -195,8 +196,11 @@ uint64_t KernelHle::MapDirectMemory(uint64_t addrRequested, uint64_t len,
                                     uint64_t prot, uint64_t /*flagsM*/,
                                     uint64_t physical, uint64_t /*maxPgOff*/) {
     Bump("sceKernelMapDirectMemory");
-    if (physical < kDmRegionVa ||
-        physical + len > kDmRegionVa + kDmRegionSize)
+    // Range checks are subtraction-based: physical/len are guest-controlled
+    // 64-bit values and a wrapped physical+len used to pass the window test.
+    if (len == 0 || len > kDmRegionSize ||
+        physical < kDmRegionVa ||
+        kDmRegionVa + kDmRegionSize - physical < len)
         return static_cast<uint64_t>(kErrInval);
 
     // Pick a map slot inside the dedicated DirectMemory map area when the
@@ -205,12 +209,13 @@ uint64_t KernelHle::MapDirectMemory(uint64_t addrRequested, uint64_t len,
     if (addrRequested == 0) {
         static uint64_t bumpMapVa = kDmMapBase;
         target = (bumpMapVa + 0xFFF) & ~0xFFFull;
-        if (target + len > kDmMapBase + kDmMapSize)
+        if (target < bumpMapVa || len > kDmMapSize ||
+            target > kDmMapBase + kDmMapSize - len)
             return static_cast<uint64_t>(kErrNoMem);
         bumpMapVa = target + len;
     } else {
-        if (addrRequested < kDmMapBase ||
-            addrRequested + len > kDmMapBase + kDmMapSize)
+        if (addrRequested < kDmMapBase || len > kDmMapSize ||
+            addrRequested > kDmMapBase + kDmMapSize - len)
             return static_cast<uint64_t>(kErrInval);
         target = addrRequested;
     }
