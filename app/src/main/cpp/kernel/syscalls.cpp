@@ -365,6 +365,19 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
         return gr.ok ? static_cast<uint64_t>(gr.value) : kErrNoSys;
     }
 
+    case kPx5ImportTrapSyscall: {
+        // PX5 import trap (v1.45): a0 = stub-encoded import index. The
+        // loader redirected every UNDEF STRONG import slot to a 16-byte
+        // guest stub that lands here; the first hit per import is logged
+        // and ledgered by name, and RAX=0 lets the guest continue past
+        // the missing import (the vc45 null-import wall, named).
+        const uint64_t ret =
+            RuntimeLinker::GetInstance().DispatchImportTrap(a0);
+        std::lock_guard<std::mutex> lk(g_stateMutex);
+        g_stats.handledCalls++;
+        return ret;
+    }
+
     case NR_futex:                           // single-threaded guests only
     case NR_sched_getaffinity: {
         std::lock_guard<std::mutex> lk(g_stateMutex);

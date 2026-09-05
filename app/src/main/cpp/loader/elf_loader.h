@@ -104,6 +104,14 @@ struct LoadedElfImage {
     uint64_t             relocSkippedOther = 0;      // named-otherwise types
     uint64_t             relocWriteRefused = 0;      // target not in a
                               // writable mapped segment — refused, not done
+    // v1.45 — what happened to the unresolved imports:
+    // relocImportTraps = UNDEF STRONG imports whose slot now points at a
+    // 16-byte trap stub (the named-ledger path, kPx5ImportTrapSyscall);
+    // relocWeakZero = UNDEF WEAK imports explicitly resolved to 0 (ELF
+    // semantics; crt NULL-checks rely on it). unresolvedImports ==
+    // traps + weakZero when every slot write succeeded.
+    uint64_t             relocImportTraps = 0;
+    uint64_t             relocWeakZero = 0;
 
     size_t TotalMemSize() const { return imageHighVa - imageLowVa; }
 };

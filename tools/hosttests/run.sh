@@ -35,6 +35,26 @@ echo "[hosttests] building memory_range_test"
 echo "[hosttests] running memory_range_test"
 "$OUT/memory_range_test"
 
+echo "[hosttests] building import_trap_test"
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
+    -I"$SHIM" -I"$CPP" \
+    -o "$OUT/import_trap_test" \
+    "$ROOT/tools/hosttests/import_trap_test.cpp" \
+    "$CPP/loader/elf_loader.cpp" \
+    "$CPP/loader/self_extract.cpp" \
+    "$CPP/loader/runtime_linker.cpp" \
+    "$CPP/memory/memory.cpp" \
+    "$CPP/utils/evidence.cpp" \
+    "$CPP/utils/logger.cpp" \
+    "$CPP/utils/diag_bridge.cpp" \
+    "$CPP/utils/breadcrumbs.cpp" \
+    "$CPP/utils/crash_handler.cpp" \
+    "$SHIM/fexcore_state_stub.cpp" \
+    -lz
+
+echo "[hosttests] running import_trap_test"
+"$OUT/import_trap_test"
+
 echo "[hosttests] running JNI symbol parity check"
 python3 "$ROOT/tools/check_jni_symbols.py"
 

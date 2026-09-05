@@ -19,6 +19,19 @@
 //   (0..447) and outside the x32 range (0x40000000..0x400003FF), so no
 //   real guest syscall can ever collide with it.
 //
+// THE IMPORT TRAP (v1.45)
+//   The vc45 session proved the null-import wall: the game's _start calls
+//   a PLT entry whose GOT slot the loader correctly refuses to invent
+//   (slot stays 0) -> jmp [0] -> SIGSEGV. The trap flips that wall into
+//   the ledger: every UNDEF STRONG import slot gets a 16-byte guest stub
+//   (mov eax,kPx5ImportTrapSyscall; mov edi,<import index>; syscall; ret)
+//   written by the loader into a dedicated RWX-then-RX guest region.
+//   A call now lands in GuestSyscalls::Dispatch, names the missing import
+//   (dynstr symbol, verbatim — no invented NID mapping), and returns 0 so
+//   the guest keeps running and the next session collects MORE misses
+//   instead of one mystery crash. UNDEF WEAK slots stay 0 (ELF semantics:
+//   weak undefined resolves to null; crt code tests those for NULL).
+//
 // HONEST BOUNDARIES
 //   * The gate executes HLE host functions ONLY. A NID registered as a
 //     guest export is NOT callable through the gate (the host bridge
@@ -45,8 +58,10 @@
 
 namespace PX5 {
 
-// Reserved guest syscall number for the NID gate (see header comment).
-constexpr uint32_t kPx5NidGateSyscall = 0x5C500001u;
+// Reserved guest syscall numbers for the NID gate and the import trap
+// (see header comment; both deliberately outside every real x86-64 range).
+constexpr uint32_t kPx5NidGateSyscall   = 0x5C500001u;
+constexpr uint32_t kPx5ImportTrapSyscall = 0x5C500002u;
 
 /**
  * Bionic-native HLE export function type.
@@ -75,6 +90,22 @@ struct DispatchStats {
     uint64_t guestRouted = 0;         ///< NID exists but is guest export (not gate-callable)
     uint64_t unresolved  = 0;         ///< NID not registered (repeat hits included)
     uint64_t unresolvedUnique = 0;    ///< DISTINCT missing NIDs (per-game HLE gap size)
+};
+
+/**
+ * One unresolved strong import redirected into a trap stub (v1.45).
+ * Index in RuntimeLinker's trap table == stub index: the guest stub at
+ * stubVa encodes its own index, and DispatchImportTrap maps it back here.
+ */
+struct ImportTrapEntry {
+    uint64_t    stubVa = 0;      ///< Guest VA of the 16-byte trap stub
+    uint64_t    slotVa = 0;      ///< Guest VA of the GOT/data slot redirected
+    std::string name;            ///< dynstr symbol name, verbatim (may be
+                                 ///< empty when the string table is missing)
+    bool        isPlt = false;   ///< true = DT_JMPREL/JUMP_SLOT, false = RELA
+    uint32_t    symIndex = 0;    ///< dynsym index of the UNDEF symbol
+    bool        slotWritten = false;  ///< false = slot could not be written
+                                     ///< (old content stays, stub never runs)
 };
 
 /**
@@ -178,6 +209,38 @@ public:
     size_t MissingNidCount();
 
     /**
+     * Installs the import-trap table built by the loader after relocation
+     * processing (v1.45). Replaces any previous table (replace-on-map load
+     * model: one image owns the registry at a time).
+     * @param regionBase Guest VA of the trap-stub region start
+     * @param regionEnd Guest VA one past the trap-stub region
+     * @param entries The trap entries, index-aligned with the stub layout
+     */
+    void SetImportTraps(uint64_t regionBase, uint64_t regionEnd,
+                        std::vector<ImportTrapEntry> entries);
+
+    /**
+     * Handles one import-trap syscall from guest (stub-encoded index in a0).
+     * First hit per index is logged and ledgered; repeats are counted only.
+     * Always returns 0 — the guest keeps running past the missing import.
+     * @param importIndex Stub-encoded import index
+     * @return Value for guest RAX (always 0)
+     */
+    uint64_t DispatchImportTrap(uint64_t importIndex);
+
+    /**
+     * Returns the import-trap ledger summary (counts + hottest imports).
+     * @return Formatted summary string
+     */
+    std::string GetImportTrapSummary();
+
+    /**
+     * Returns count of installed import traps.
+     * @return Trap entry count
+     */
+    size_t ImportTrapCount();
+
+    /**
      * Returns count of registered modules.
      * @return Module count
      */
@@ -204,6 +267,18 @@ private:
     std::unordered_map<uint64_t, uint32_t> m_missingNids;  // nid -> hits
                                                            // (bounded)
     DispatchStats m_stats;
+
+    // v1.45 — import traps (see header comment). m_trapHits is index-
+    // aligned with m_importTraps; the region bounds let crash reports
+    // and summaries attribute addresses to stubs.
+    std::vector<ImportTrapEntry> m_importTraps;
+    std::vector<uint32_t>        m_trapHits;
+    uint64_t m_trapRegionBase = 0;
+    uint64_t m_trapRegionEnd  = 0;
+    uint64_t m_trapTotalHits  = 0;
+    uint64_t m_trapDistinct   = 0;   ///< distinct imports hit at least once
+    uint64_t m_trapLedgered   = 0;   ///< distinct misses written to the ledger
+    uint64_t m_trapOob        = 0;   ///< out-of-range indices (corrupt guest)
 };
 
 // ---------------------------------------------------------------------------

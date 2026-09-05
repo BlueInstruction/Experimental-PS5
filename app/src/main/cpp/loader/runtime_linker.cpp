@@ -27,6 +27,13 @@ constexpr size_t kMaxDynEntries = 8192;
 // a game calling an unimplemented import 100k times must not flood either.
 constexpr size_t kMaxTrackedMissingNids = 4096;
 constexpr int     kMaxMissingLedger     = 64;
+// Import-trap ledger bound (v1.45): same flood discipline as the NID
+// ledger — first 64 DISTINCT named misses go to px5_evidence.log, the
+// rest live in the counters only.
+constexpr uint64_t kMaxTrapLedger = 64;
+// Import-trap out-of-range log bound: a corrupted guest calling garbage
+// indices must not flood logcat either.
+constexpr uint64_t kMaxTrapOobLogs = 8;
 // SCE reserves the 0x61000000-0x610000FF OS-specific dynamic-tag range
 // (Kyty src/loader/elf.h: DT_OS_EXPORT_LIB = 0x61000013 et al.; shadPS4
 // uses the same range as DT_SCE_*). Values are enumerated verbatim.
@@ -93,6 +100,16 @@ void RuntimeLinker::Reset() {
     m_exports.clear();
     m_missingNids.clear();
     m_stats = {};
+    // v1.45 — the import-trap table belongs to the loaded image; a reset
+    // (new run / foundation suite) drops it with everything else.
+    m_importTraps.clear();
+    m_trapHits.clear();
+    m_trapRegionBase = 0;
+    m_trapRegionEnd = 0;
+    m_trapTotalHits = 0;
+    m_trapDistinct = 0;
+    m_trapLedgered = 0;
+    m_trapOob = 0;
 }
 
 bool RuntimeLinker::RegisterModule(const std::string& name, uint64_t base,
@@ -250,6 +267,114 @@ size_t RuntimeLinker::MissingNidCount() {
 size_t RuntimeLinker::ModuleCount() {
     std::lock_guard<std::mutex> lk(m_mutex);
     return m_modules.size();
+}
+
+// ---------------------------------------------------------------------------
+// Import traps (v1.45) — see runtime_linker.h for the contract.
+// ---------------------------------------------------------------------------
+
+void RuntimeLinker::SetImportTraps(uint64_t regionBase, uint64_t regionEnd,
+                                   std::vector<ImportTrapEntry> entries) {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    m_trapRegionBase = regionBase;
+    m_trapRegionEnd  = regionEnd;
+    m_importTraps    = std::move(entries);
+    m_trapHits.assign(m_importTraps.size(), 0);
+    m_trapTotalHits = 0;
+    m_trapDistinct  = 0;
+    m_trapLedgered  = 0;
+    m_trapOob       = 0;
+}
+
+uint64_t RuntimeLinker::DispatchImportTrap(uint64_t importIndex) {
+    std::string name;
+    bool firstHit = false;
+    bool ledger = false;
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        if (importIndex >= m_importTraps.size()) {
+            // A guest can only land here with a corrupted/stale stub —
+            // count and bound the noise, never trust the index.
+            ++m_trapOob;
+            if (m_trapOob <= kMaxTrapOobLogs) {
+                PX5_LOGW(LogCategory::LOADER,
+                         "IMPORT-TRAP: index %llu out of range (stubs=%zu) "
+                         "— stale/corrupt guest stub call refused",
+                         (unsigned long long)importIndex,
+                         m_importTraps.size());
+            }
+            return 0;
+        }
+        auto& e = m_importTraps[importIndex];
+        uint32_t& hits = m_trapHits[importIndex];
+        if (hits == 0) {
+            firstHit = true;
+            ++m_trapDistinct;
+            if (m_trapLedgered < kMaxTrapLedger) {
+                ++m_trapLedgered;
+                ledger = true;
+            }
+        }
+        ++hits;
+        ++m_trapTotalHits;
+        name = e.name;
+    }
+    // Evidence + logging outside m_mutex (AppendLedger fsyncs; the HLE
+    // gate path may re-enter the registry).
+    if (firstHit) {
+        PX5_LOGW(LogCategory::LOADER,
+                 "IMPORT-TRAP hit idx=%llu name='%s' — missing import "
+                 "called by guest, RAX=0 returned (hit #%llu distinct)",
+                 (unsigned long long)importIndex, name.c_str(),
+                 (unsigned long long)m_trapDistinct);
+        if (ledger) {
+            Evidence::AppendLedger("import miss idx=%llu name='%s'",
+                                   (unsigned long long)importIndex,
+                                   name.c_str());
+        }
+    }
+    return 0;
+}
+
+std::string RuntimeLinker::GetImportTrapSummary() {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    if (m_importTraps.empty()) return "import traps: none installed";
+    // Top 8 by hits — the concrete next-HLE worklist, hottest first.
+    std::vector<std::pair<size_t, uint32_t>> items;
+    items.reserve(m_importTraps.size());
+    for (size_t i = 0; i < m_importTraps.size(); ++i)
+        if (m_trapHits[i] > 0) items.emplace_back(i, m_trapHits[i]);
+    std::sort(items.begin(), items.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    const size_t show = std::min<size_t>(items.size(), 8);
+    std::string out = "import traps: stubs=" +
+                      std::to_string(m_importTraps.size()) +
+                      " region=[0x" +
+                      [&]{ char b[24]; snprintf(b, sizeof(b), "%llx",
+                           (unsigned long long)m_trapRegionBase);
+                           return std::string(b); }() +
+                      "..0x" +
+                      [&]{ char b[24]; snprintf(b, sizeof(b), "%llx",
+                           (unsigned long long)m_trapRegionEnd);
+                           return std::string(b); }() +
+                      "] hits=" + std::to_string(m_trapTotalHits) +
+                      " (distinct=" + std::to_string(m_trapDistinct) +
+                      ")";
+    if (show == 0) return out;
+    out += " top:";
+    char one[128];
+    for (size_t i = 0; i < show; ++i) {
+        const auto& e = m_importTraps[items[i].first];
+        snprintf(one, sizeof(one), " '%s'(x%u)",
+                 e.name.c_str(), items[i].second);
+        out += one;
+    }
+    return out;
+}
+
+size_t RuntimeLinker::ImportTrapCount() {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    return m_importTraps.size();
 }
 
 size_t RuntimeLinker::ExportCount() {

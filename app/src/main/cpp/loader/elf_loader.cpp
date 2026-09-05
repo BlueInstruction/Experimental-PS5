@@ -1,5 +1,6 @@
 #include "elf_loader.h"
 #include "self_extract.h"
+#include "runtime_linker.h"
 #include "../utils/crash_handler.h"
 #include "../utils/logger.h"
 #include "../utils/breadcrumbs.h"
@@ -94,6 +95,8 @@ constexpr int64_t  DT_RELA_      = 7;
 constexpr int64_t  DT_RELASZ_    = 8;
 constexpr int64_t  DT_RELAENT_   = 9;
 constexpr int64_t  DT_SYMTAB_    = 6;
+constexpr int64_t  DT_STRTAB_    = 5;
+constexpr int64_t  DT_STRSZ_     = 10;
 constexpr int64_t  DT_JMPREL_    = 23;
 constexpr int64_t  DT_PLTRELSZ_  = 2;
 constexpr int64_t  DT_RELACOUNT_ = 0x6ffffff9;
@@ -103,6 +106,8 @@ constexpr uint32_t R_X86_64_GLOB_DAT_  = 6;
 constexpr uint32_t R_X86_64_JUMP_SLOT_ = 7;
 constexpr uint32_t R_X86_64_RELATIVE_  = 8;
 constexpr uint32_t R_X86_64_IRELATIVE_ = 37;
+
+constexpr uint8_t STB_WEAK_ = 2;   // e_info>>4 binding: weak undefined -> 0
 
 void ApplyDynamicRelocations(const uint8_t* data, size_t size,
                              uint64_t loadBase,
@@ -122,6 +127,7 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
     // ---- pass 1: the dynamic table's own facts --------------------------
     uint64_t relaVa = 0, relaSz = 0, relaEnt = 0, relaCountHint = 0;
     uint64_t symTabVa = 0, jmpRelVa = 0, pltRelSz = 0;
+    uint64_t strTabVa = 0, strSz = 0;
     const size_t maxDynEntries = out.dynFilesz / sizeof(Elf64DynRaw);
     for (size_t i = 0; i < maxDynEntries; ++i) {
         Elf64DynRaw d{};
@@ -134,6 +140,8 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
             case DT_RELAENT_:   relaEnt = d.val; break;
             case DT_RELACOUNT_: relaCountHint = d.val; break;
             case DT_SYMTAB_:    symTabVa = d.val; break;
+            case DT_STRTAB_:    strTabVa = d.val; break;
+            case DT_STRSZ_:     strSz = d.val; break;
             case DT_JMPREL_:    jmpRelVa = d.val; break;
             case DT_PLTRELSZ_:  pltRelSz = d.val; break;
             default: break;
@@ -195,14 +203,35 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
     uint64_t symStreamOff = 0;
     const bool haveSym = symTabVa ? streamOffForLinkVa(symTabVa, symStreamOff)
                                   : false;
+    // v1.45 — dynstr stream offset (for the import NAME on trap stubs;
+    // verbatim dynstr bytes, no invented mapping). Missing/unbounded
+    // string tables degrade to empty names, never to guesses.
+    uint64_t strStreamOff = 0;
+    bool haveStrTab = false;
+    if (strTabVa && strSz > 0 && strSz <= (1ull << 20) &&
+        streamOffForLinkVa(strTabVa, strStreamOff) &&
+        strStreamOff + strSz <= size) {
+        haveStrTab = true;
+    } else if (symTabVa) {
+        PX5_LOGW(LogCategory::LOADER,
+                 "REL: DT_STRTAB/DT_STRSZ unusable (va=0x%llx sz=%llu) — "
+                 "import-trap entries will carry empty names",
+                 (unsigned long long)strTabVa,
+                 (unsigned long long)strSz);
+    }
 
     // ---- pass 2: apply / count, one real loop over real entries ---------
     uint64_t applied = 0, unresolved = 0, skippedOther = 0, refused = 0;
+    uint64_t weakZero = 0, weakRefused = 0;
     uint32_t unresolvedByType[4] = {}; // index 0..3 -> type 1,6,7,other-sym
     // Bounded evidence samples (first 3 of each class).
     struct RelSample { uint64_t off, addend, oldVal, newVal, streamOff; };
     RelSample samples[3] = {};
     size_t sampleCount = 0;
+    // v1.45 — UNDEF STRONG imports collected for trap installation (slot
+    // VA, dynsym index, which table). Weak undefs resolve to 0 inline.
+    struct PendImport { uint64_t rOffset; uint32_t sym; bool isPlt; };
+    std::vector<PendImport> pend;
 
     auto processRelaTable = [&](uint64_t tableStreamOff, size_t count,
                                 bool isPlt) {
@@ -239,8 +268,9 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
             if (type == R_X86_64_64_ || type == R_X86_64_GLOB_DAT_ ||
                 type == R_X86_64_JUMP_SLOT_) {
                 // Symbol-based. Only a symbol DEFINED in this image is
-                // resolvable here; UNDEF = import = the HLE/NID worklist.
+                // resolvable here; UNDEF = import.
                 bool defined = false;
+                bool weak = false;
                 uint64_t stValue = 0;
                 if (haveSym) {
                     Elf64SymRaw s{};
@@ -249,6 +279,7 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
                     if (symOff + sizeof s <= size) {
                         memcpy(&s, data + symOff, sizeof s);
                         defined = s.shndx != 0;
+                        weak = (s.info >> 4) == STB_WEAK_;
                         stValue = s.value;
                     }
                 }
@@ -267,6 +298,25 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
                     else if (type == R_X86_64_GLOB_DAT_) ++unresolvedByType[1];
                     else if (type == R_X86_64_JUMP_SLOT_) ++unresolvedByType[2];
                     else                             ++unresolvedByType[3];
+                    if (weak) {
+                        // v1.45 — ELF semantics: a weak undefined symbol
+                        // resolves to 0. Write the 0 explicitly (defends
+                        // against file-content leftovers in GOT slots);
+                        // crt NULL-checks depend on the zero.
+                        const uint64_t targetVa = loadBase + r.offset;
+                        if (vaWritableSeg(targetVa)) {
+                            void* host = mem.GetHostPointer(targetVa);
+                            if (host) {
+                                const uint64_t zero = 0;
+                                memcpy(host, &zero, sizeof zero);
+                                ++weakZero;
+                                continue;
+                            }
+                        }
+                        ++weakRefused;
+                    } else {
+                        pend.push_back(PendImport{r.offset, sym, isPlt});
+                    }
                 }
                 continue;
             }
@@ -279,7 +329,7 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
                          (unsigned long long)(loadBase + r.offset));
             }
         }
-        (void)isPlt;
+        // isPlt now feeds the import-trap ledger (v1.45).
     };
 
     processRelaTable(relaStreamOff, relaCount, false);
@@ -294,11 +344,157 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
         processRelaTable(jmpStreamOff, pltCount, true);
     }
 
+    // ------------------------------------------------------------------
+    // v1.45 — import-trap installation. The vc45 session died on the
+    // null-import wall (PLT#0 -> GOT slot 0 in LOAD#4 BSS -> jmp [0] ->
+    // SIGSEGV LDAXR). Every UNDEF STRONG import slot collected above now
+    // points at a 16-byte guest stub instead of 0:
+    //     B8 <nr>       mov eax, kPx5ImportTrapSyscall
+    //     BF <idx>      mov edi, <import index>
+    //     0F 05         syscall        -> GuestSyscalls::Dispatch
+    //     C3            ret            -> RAX=0 back to the caller
+    //     90 90 90      padding (never executed)
+    // A missing import is now a NAMED ledger event and the guest keeps
+    // running; a data read of the slot sees a mapped RX page, not null.
+    // ------------------------------------------------------------------
+    size_t trapInstalled = 0;
+    if (!pend.empty()) {
+        constexpr uint64_t kStubStride = 16;
+        // Fixed, far-from-image placement: 512 MiB into the guest window.
+        // Clears the image, its brk growth and the ~128 MiB stack/TLS
+        // neighborhood; the window is 4 GiB wide.
+        const uint64_t stubBase =
+            MemoryManager::GetInstance().GetGuestBase() + 0x20000000ull;
+        const uint64_t stubBytes = pend.size() * kStubStride;
+        auto& memRef = MemoryManager::GetInstance();
+        const bool overlapsImage =
+            stubBase < out.imageHighVa + 4096 &&
+            stubBase + stubBytes > out.imageLowVa;
+        if (overlapsImage) {
+            PX5_LOGW(LogCategory::LOADER,
+                     "REL: import-trap region 0x%llx overlaps the image — "
+                     "slots stay 0 (the null wall stays; refusing to "
+                     "overwrite guest code)",
+                     (unsigned long long)stubBase);
+        } else if (!memRef.MapMemory(stubBase, stubBytes,
+                                     MemoryFlags::PAGE_READ |
+                                         MemoryFlags::PAGE_WRITE |
+                                         MemoryFlags::PAGE_EXEC,
+                                     "import_trap_stubs")) {
+            PX5_LOGW(LogCategory::LOADER,
+                     "REL: import-trap map FAILED at 0x%llx (%zu bytes) — "
+                     "slots stay 0",
+                     (unsigned long long)stubBase,
+                     static_cast<size_t>(stubBytes));
+        } else {
+            std::vector<ImportTrapEntry> traps;
+            traps.reserve(pend.size());
+            size_t nameless = 0;
+            bool broken = false;
+            // INVARIANT: traps[k] must correspond to stub index k (the
+            // bytes at stubBase + k*16 encode k). Any host-bridge surprise
+            // aborts the WHOLE install — a misaligned registry would name
+            // the wrong imports, which is worse than the old null wall.
+            for (size_t i = 0; i < pend.size() && !broken; ++i) {
+                const uint64_t stubVa = stubBase + i * kStubStride;
+                void* stubHost = memRef.GetHostPointer(stubVa);
+                if (!stubHost) {
+                    PX5_LOGW(LogCategory::LOADER,
+                             "REL: import-trap host bridge lost at stub "
+                             "%zu (0x%llx) — install refused, slots stay 0",
+                             i, (unsigned long long)stubVa);
+                    broken = true;
+                    break;
+                }
+                ImportTrapEntry t;
+                t.stubVa = stubVa;
+                t.slotVa = loadBase + pend[i].rOffset;
+                t.isPlt = pend[i].isPlt;
+                t.symIndex = pend[i].sym;
+                if (haveStrTab && haveSym) {
+                    Elf64SymRaw s{};
+                    const size_t symOff = symStreamOff +
+                        static_cast<size_t>(pend[i].sym) * sizeof(Elf64SymRaw);
+                    if (symOff + sizeof s <= size) {
+                        memcpy(&s, data + symOff, sizeof s);
+                        if (s.name < strSz) {
+                            const size_t cap =
+                                static_cast<size_t>(strSz - s.name);
+                            const char* p = reinterpret_cast<const char*>(
+                                data + strStreamOff + s.name);
+                            const size_t n = strnlen(p, cap);
+                            if (n < cap) t.name.assign(p, n);  // unterminated
+                                                               // stays empty
+                        }
+                    }
+                }
+                if (t.name.empty()) ++nameless;
+
+                const uint8_t code[kStubStride] = {
+                    0xB8, static_cast<uint8_t>(kPx5ImportTrapSyscall & 0xff),
+                    static_cast<uint8_t>((kPx5ImportTrapSyscall >> 8) & 0xff),
+                    static_cast<uint8_t>((kPx5ImportTrapSyscall >> 16) & 0xff),
+                    static_cast<uint8_t>((kPx5ImportTrapSyscall >> 24) & 0xff),
+                    0xBF, static_cast<uint8_t>(i & 0xff),
+                    static_cast<uint8_t>((i >> 8) & 0xff),
+                    static_cast<uint8_t>((i >> 16) & 0xff),
+                    static_cast<uint8_t>((i >> 24) & 0xff),
+                    0x0F, 0x05,                    // syscall
+                    0xC3,                          // ret
+                    0x90, 0x90, 0x90};             // padding, never executed
+                memcpy(stubHost, code, kStubStride);
+                traps.push_back(std::move(t));
+            }
+            if (broken) {
+                // Stubs written so far are unreachable garbage in a mapped
+                // region — no slot points at them, the registry stays empty.
+                traps.clear();
+            } else {
+                // Two-phase discipline: drop W once the stubs are written, so
+                // a guest bug cannot corrupt its own trap table.
+                memRef.ProtectMemory(stubBase, stubBytes,
+                                     MemoryFlags::PAGE_READ |
+                                         MemoryFlags::PAGE_EXEC);
+                // Point the slots at the stubs.
+                size_t slotsWritten = 0;
+                for (size_t i = 0; i < traps.size(); ++i) {
+                    if (!vaWritableSeg(traps[i].slotVa)) continue;
+                    void* host = memRef.GetHostPointer(traps[i].slotVa);
+                    if (!host) continue;
+                    const uint64_t v = traps[i].stubVa;
+                    memcpy(host, &v, sizeof v);
+                    traps[i].slotWritten = true;
+                    ++slotsWritten;
+                }
+                trapInstalled = traps.size();
+                RuntimeLinker::GetInstance().SetImportTraps(
+                    stubBase, stubBase + stubBytes, std::move(traps));
+
+                PX5_LOGI(LogCategory::LOADER,
+                         "IMPORT-TRAPS: stubs=%zu region=[0x%llx..0x%llx] "
+                         "nr=0x%x stride=16 slotsWritten=%zu nameless=%zu — "
+                         "unresolved slots now trap to a named ledger",
+                         trapInstalled,
+                         (unsigned long long)stubBase,
+                         (unsigned long long)(stubBase + stubBytes),
+                         kPx5ImportTrapSyscall,
+                         slotsWritten, nameless);
+                Evidence::AppendLedger(
+                    "import traps stubs=%zu region=0x%llx nr=0x%x",
+                    trapInstalled, (unsigned long long)stubBase,
+                    kPx5ImportTrapSyscall);
+                Breadcrumb::Set("dyn: import traps=%zu", trapInstalled);
+            }
+        }
+    }
+
     out.dynProcessed = true;
     out.relocApplied = applied;
     out.relocUnresolvedImports = unresolved;
     out.relocSkippedOther = skippedOther;
     out.relocWriteRefused = refused;
+    out.relocImportTraps = trapInstalled;
+    out.relocWeakZero = weakZero;
 
     PX5_LOGI(LogCategory::LOADER,
              "REL: dynamic stream_off=0x%llx filesz=%zu — RELA va=0x%llx "
@@ -311,12 +507,17 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
              pltCount ? "" : " — no usable DT_JMPREL");
     PX5_LOGI(LogCategory::LOADER,
              "REL: applied=%llu unresolvedImports=%llu "
-             "(R_64=%u GLOB_DAT=%u JUMP_SLOT=%u other=%u) skippedOther=%llu "
-             "writeRefused=%llu — unresolved = HLE/NID gate worklist",
+             "(R_64=%u GLOB_DAT=%u JUMP_SLOT=%u other=%u) trapped=%llu "
+             "weakZero=%llu weakRefused=%llu skippedOther=%llu "
+             "writeRefused=%llu — trapped = named-ledger path, the rest "
+             "of the worklist waits on HLE",
              (unsigned long long)applied,
              (unsigned long long)unresolved,
              unresolvedByType[0], unresolvedByType[1],
              unresolvedByType[2], unresolvedByType[3],
+             (unsigned long long)out.relocImportTraps,
+             (unsigned long long)weakZero,
+             (unsigned long long)weakRefused,
              (unsigned long long)skippedOther,
              (unsigned long long)refused);
     for (size_t i = 0; i < sampleCount; ++i) {
