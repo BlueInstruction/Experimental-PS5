@@ -14,7 +14,7 @@ PIN_SHA="8483dfdaa2abf97ee89ad0e5f337e7b508550c6b"
 UPSTREAM="https://github.com/Pipetto-crypto/libadrenotools.git"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEST="${PX5_ADRENOTOOLS_ROOT:-$REPO_ROOT/../../deps/adrenotools}"
+DEST="${PX5_ADRENOTOOLS_ROOT:-$REPO_ROOT/.deps/adrenotools}"
 
 if [ -f "$DEST/.pin" ] && grep -qx "$PIN_SHA" "$DEST/.pin" 2>/dev/null; then
     echo "[fetch_adrenotools] up to date: $DEST (${PIN_SHA:0:12})"

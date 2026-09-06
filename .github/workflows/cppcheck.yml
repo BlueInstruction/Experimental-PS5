@@ -11,8 +11,7 @@
 #   - Integer overflow
 #   - Dangerous casts
 #
-# Output is uploaded as SARIF so findings show up in the GitHub Security tab
-# alongside CodeQL + Codacy.
+# Output is uploaded as SARIF so findings show up in the GitHub Security tab.
 #
 # We exclude:
 #   - third_party/fex/ — upstream code we don't own (FEXCore has its own CI)
@@ -60,14 +59,16 @@ jobs:
           #
           # --suppress=missingIncludeSystem silences noise from system headers.
           #
-          # --error-exitcode=1 makes CI fail on actual errors (not warnings).
+          # Findings are graded by tools/cppcheck_gate.py in the next step:
+          # severity=error fails the build, everything else is reported.
+          # cppcheck itself must not abort here, or the gate never gets to
+          # print the summary.
           cppcheck \
             --enable=warning,style,performance,portability \
             --suppress=missingIncludeSystem \
             --suppress=unusedFunction \
             --inline-suppr \
             --force \
-            --inline-suppr \
             -D__ANDROID__ \
             -D__aarch64__ \
             -DARM64 \
@@ -87,64 +88,32 @@ jobs:
             -I app/src/main/cpp/filesystem \
             -I app/src/main/cpp/media \
             --output-file=build-reports/cppcheck.xml \
-            app/src/main/cpp/ 2>&1 | tee build-reports/cppcheck.log || true
+            app/src/main/cpp/ 2>&1 | tee build-reports/cppcheck.log
 
           # Convert XML to SARIF for GitHub upload
           cppcheck-htmlreport --file=build-reports/cppcheck.xml \
             --report-dir=build-reports/html || true
 
-      - name: Convert cppcheck XML to SARIF
-        run: |
-          # Try multiple converters; if all fail, generate a minimal SARIF
-          # ourselves so the GitHub Security tab still has something to show.
-          set +e
+      - name: Gate on cppcheck findings
+        run: python3 tools/cppcheck_gate.py build-reports/cppcheck.xml
 
-          # Option 1: official cppcheck-sarif PyPI package
+      - name: Convert cppcheck XML to SARIF
+        if: always()   # runs even when the gate failed, so the Security tab
+                       # shows the findings that broke the build
+        run: |
+          # If conversion fails, upload nothing — an empty SARIF would fake
+          # "zero findings" in the Security tab. The pass/fail decision is
+          # made by the "Gate on cppcheck findings" step, not by SARIF.
+          set +e
           pip install --quiet cppcheck-sarif 2>/dev/null
           if command -v cppcheck-sarif >/dev/null 2>&1; then
             cppcheck-sarif build-reports/cppcheck.xml -o build-reports/cppcheck.sarif
-            if [ -s build-reports/cppcheck.sarif ]; then
-              echo "SARIF generated via cppcheck-sarif"
-              exit 0
-            fi
           fi
-
-          # Option 2: use Python directly with the sarif-tools package
-          pip install --quiet sarif-tools 2>/dev/null
-          if python -c "import sarif" 2>/dev/null; then
-            # sarif-tools doesn't have a direct cppcheck converter, but
-            # we can at least verify the sarif module is importable.
-            :
+          if [ -s build-reports/cppcheck.sarif ]; then
+            echo "SARIF generated via cppcheck-sarif"
+          else
+            echo "SARIF conversion failed; skipping upload instead of uploading an empty report."
           fi
-
-          # Option 3: minimal inline SARIF (no findings — just so the
-          # upload step succeeds and we don't get a red X on CI).
-          echo "All converters failed; generating minimal empty SARIF."
-          cat > build-reports/cppcheck.sarif <<'EOF'
-          {
-            "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
-            "version": "2.1.0",
-            "runs": [
-              {
-                "tool": {
-                  "driver": {
-                    "name": "cppcheck",
-                    "informationUri": "https://cppcheck.sourceforge.io/",
-                    "version": "unknown"
-                  }
-                },
-                "results": [],
-                "invocations": [
-                  {
-                    "executionSuccessful": true,
-                    "ruleConfigurationOverrides": []
-                  }
-                ]
-              }
-            ]
-          }
-          EOF
-          echo "Minimal SARIF written to build-reports/cppcheck.sarif"
 
       - name: Upload SARIF
         if: always() && hashFiles('build-reports/cppcheck.sarif') != ''

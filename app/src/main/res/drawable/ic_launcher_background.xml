@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- PX5 launcher background — PS5-style deep blue gradient -->
+<!-- PX5 launcher background - diagonal gradient matched to the logo card edges -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
     <gradient
-        android:startColor="#001B3D"
-        android:endColor="#003893"
+        android:startColor="#00C5FE"
+        android:endColor="#4321DE"
         android:angle="135" />
 </shape>

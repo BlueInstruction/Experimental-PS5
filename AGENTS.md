@@ -45,7 +45,7 @@ tools/
 ├── verify_evidence.py      # rechecks the load-evidence ledger offline
 └── patches/fex-*.patch     # patches applied onto the FEX tree
 
-.github/workflows/          # APK build (arm64-v8a), lint, cppcheck, clang-tidy
+.github/workflows/          # APK build (arm64-v8a), lint, cppcheck
 ```
 
 ## Build
@@ -60,7 +60,9 @@ tools/
 
 ```bash
 ./tools/fetch_fexcore.sh
-export PX5_FEXCORE_ROOT="$PWD/../deps/FEX"
+# tools/fetch_fexcore.sh defaults to <repo>/.deps/FEX; set this only
+# to override that location.
+# export PX5_FEXCORE_ROOT="/custom/path/FEX"
 gradle assembleRelease --no-daemon
 ```
 

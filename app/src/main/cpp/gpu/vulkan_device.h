@@ -13,16 +13,18 @@ struct ANativeWindow;
 
 namespace PX5 {
 
-// Real Vulkan enumeration results (dlopen'd, no fake constants).
+/**
+ * Real Vulkan enumeration results (no fake constants, all dlopen'd).
+ */
 struct GpuCapabilities {
-    bool        initialized      = false;
-    std::string apiVersionStr;              // "1.3.256"
-    std::string deviceName;                 // e.g. "Adreno (TM) 750"
-    std::string driverVersionStr;
-    uint32_t    deviceId          = 0;
-    uint32_t    vendorId          = 0;
-    uint32_t    physicalDevices   = 0;
-    std::string lastError;                  // non-empty => failure detail
+    bool        initialized      = false;   ///< Whether Vulkan enumeration succeeded
+    std::string apiVersionStr;              ///< Vulkan API version (e.g., "1.3.256")
+    std::string deviceName;                 ///< Physical device name (e.g., "Adreno (TM) 750")
+    std::string driverVersionStr;           ///< Driver version string
+    uint32_t    deviceId          = 0;      ///< Vulkan device ID
+    uint32_t    vendorId          = 0;      ///< Vulkan vendor ID
+    uint32_t    physicalDevices   = 0;      ///< Number of physical devices enumerated
+    std::string lastError;                  ///< Non-empty => failure detail
 };
 
 // ---------------------------------------------------------------------------
@@ -38,48 +40,96 @@ struct GpuCapabilities {
 // Nothing is faked: every failure records its exact stage in
 // capabilities.lastError / stats error string and returns false.
 // ---------------------------------------------------------------------------
+
+/**
+ * Vulkan GPU device wrapper with honest enumeration and rendering evidence.
+ */
 class VulkanGpuDevice {
 public:
+    /**
+     * Returns the singleton VulkanGpuDevice instance.
+     * @return Reference to singleton
+     */
     static VulkanGpuDevice& GetInstance();
 
-    // ---- Layer 1 ---------------------------------------------------------
-    bool Initialize();       // loader -> instance -> physical devices
+    /**
+     * Initializes Vulkan: loader -> instance -> physical devices (Layer 1).
+     * @return true if initialization succeeded, false otherwise
+     */
+    bool Initialize();
+
+    /**
+     * Shuts down Vulkan, releasing instance and loader.
+     */
     void Shutdown();
 
+    /**
+     * Returns Vulkan capabilities discovered during initialization.
+     * @return Reference to GpuCapabilities structure
+     */
     const GpuCapabilities& GetCapabilities() const { return m_caps; }
+
+    /**
+     * Returns human-readable summary of GPU capabilities.
+     * @return Formatted summary string
+     */
     std::string GetSummaryString() const;
 
-    // ---- Layer 2 ---------------------------------------------------------
-    bool EnsureLogicalDevice();                      // idempotent
+    /**
+     * Ensures logical device and queue are created (idempotent, Layer 2).
+     * @return true if device is ready, false otherwise
+     */
+    bool EnsureLogicalDevice();
 
-    // Headless proof: image alloc + clear-image submit + fence wait.
-    // Runs on THIS singleton's device/queue — in-process only. Never call
-    // it from a fork-isolated child (the child would submit on a queue
-    // whose driver state was created by the parent — see
-    // RunSelfContainedProof for the fork-safe variant).
+    /**
+     * Runs headless offscreen proof: alloc image + clear submit + fence wait.
+     * In-process only; never call from fork-isolated child.
+     * @param detailOut Output parameter receiving proof detail
+     * @return true if proof passed, false otherwise
+     */
     bool RunOffscreenClearProof(std::string& detailOut);
 
-    // v1.18 — fork-safe GPU proof: builds a COMPLETELY LOCAL Vulkan stack
-    // (fresh instance, fresh physical-device pick, fresh VkDevice + queue,
-    // local command objects), runs the same 64x64 clear submit, then
-    // destroys everything it created. Touches no inherited driver object —
-    // the child that runs it never submits on parent-created state, which
-    // is the 2026-08-30 SIGSEGV(0x0)-after-submit class from the device
-    // video. Returns PASS/FAIL detail like RunOffscreenClearProof.
+    /**
+     * Runs fork-safe GPU proof with completely local Vulkan stack.
+     * Builds fresh instance/device/queue, submits clear, destroys everything.
+     * Safe in fork-isolated child (no inherited driver state touched).
+     * @param detailOut Output parameter receiving proof detail
+     * @return true if proof passed, false otherwise
+     */
     bool RunSelfContainedProof(std::string& detailOut);
 
-    // On-screen path driven by the emu screen SurfaceView lifecycle.
+    /**
+     * Attaches ANativeWindow for on-screen rendering (SurfaceView lifecycle).
+     * @param window Native window from Android
+     * @return true if attachment succeeded, false otherwise
+     */
     bool AttachWindowSurface(ANativeWindow* window);
+
+    /**
+     * Detaches the current window surface.
+     */
     void DetachWindowSurface();
+
+    /**
+     * Starts the dedicated render loop thread.
+     * @return true if render loop started, false otherwise
+     */
     bool StartRenderLoop();
+
+    /**
+     * Stops the render loop thread.
+     */
     void StopRenderLoop();
 
-    // v1.16 — GPU-proof containment window. The offscreen proof runs in a
-    // fork-isolated child; the render loop MUST be paused for that window
-    // so the child is the only submitter on the shared drm context
-    // (external-synchronization contract). Returns whether the loop was
-    // actually running (so the resume is symmetric).
+    /**
+     * Stops render loop for GPU proof (external-synchronization contract).
+     * @return true if loop was actually running, false otherwise
+     */
     bool StopRenderLoopForProbe();
+
+    /**
+     * Resumes render loop after GPU proof (symmetric with StopRenderLoopForProbe).
+     */
     void ResumeRenderLoopAfterProbe();
 
     struct RenderStats {

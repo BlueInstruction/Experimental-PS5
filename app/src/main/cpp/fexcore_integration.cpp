@@ -11,7 +11,10 @@
 #include <FEXCore/Utils/ArchHelpers/Arm64.h>
 #include <FEXCore/Utils/SignalScopeGuards.h>
 
+#include <atomic>
 #include <chrono>
+#include <csignal>
+#include <pthread.h>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -27,6 +30,7 @@
 
 #include "kernel/syscalls.h"
 #include "memory/memory.h"
+#include "memory/page_size.h"
 #include "utils/breadcrumbs.h"
 #include "utils/crash_handler.h"
 #include "utils/logger.h"
@@ -38,10 +42,13 @@
 namespace PX5::FexCoreIntegration {
 namespace {
 
-constexpr size_t kPageSize = 4096;
+// Host page size comes from the kernel, never a 4096 literal: Android 15
+// ships 16 KiB-page devices and a misaligned mprotect() there either fails
+// with EINVAL or covers a neighbouring mapping.
+inline size_t kPageSizeNow() { return PX5::HostPageSize(); }
 
-uint64_t PageAlignDown(uint64_t v) { return v & ~(static_cast<uint64_t>(kPageSize) - 1); }
-uint64_t PageAlignUp(uint64_t v)   { return (v + kPageSize - 1) & ~(static_cast<uint64_t>(kPageSize) - 1); }
+using PX5::PageAlignDown;
+using PX5::PageAlignUp;
 
 std::mutex g_mutex;
 std::unique_ptr<FEXCore::Context::Context> g_context;
@@ -126,6 +133,46 @@ std::atomic<FEXCore::Core::InternalThreadState*> g_execThread{nullptr};
 // Counters deliberately include the zeroes: zero SMC faults on a run that
 // writes its own code is a defect signal, not silence.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// FaultSafeLock — take a mutex that a signal handler also needs.
+//
+// m_pageMutex is locked by MarkGuestExecutableRange/UnprotectRange on normal
+// threads AND by HandleSegv in signal context. If a thread faults while it
+// already holds the mutex, the handler blocks on a lock only that same thread
+// can release: an unrecoverable self-deadlock, inside the very handler whose
+// job is keeping the app alive.
+//
+// Blocking SIGSEGV/SIGBUS on the owning thread for the duration of the
+// critical section removes that case entirely -- the handler can then only
+// ever contend with a DIFFERENT thread, which is a bounded wait rather than
+// a deadlock. (A fault raised while these are blocked is fatal by
+// definition, which is correct: it means we faulted inside the SMC
+// bookkeeping itself, not in guest code.)
+// ---------------------------------------------------------------------------
+class FaultSafeLock {
+public:
+    explicit FaultSafeLock(std::mutex& m) : m_mutex(m) {
+        sigset_t block;
+        sigemptyset(&block);
+        sigaddset(&block, SIGSEGV);
+        sigaddset(&block, SIGBUS);
+        pthread_sigmask(SIG_BLOCK, &block, &m_saved);
+        m_mutex.lock();
+    }
+    ~FaultSafeLock() {
+        m_mutex.unlock();
+        pthread_sigmask(SIG_SETMASK, &m_saved, nullptr);
+    }
+    FaultSafeLock(const FaultSafeLock&) = delete;
+    FaultSafeLock& operator=(const FaultSafeLock&) = delete;
+
+private:
+    std::mutex& m_mutex;
+    sigset_t    m_saved{};
+};
+
+
 class SmcManager {
 public:
     static SmcManager& GetInstance() {
@@ -149,8 +196,8 @@ public:
         const uint64_t base = PageAlignDown(start);
         const uint64_t top  = PageAlignUp(start + length);
 
-        std::lock_guard<std::mutex> lk(m_pageMutex);
-        for (uint64_t page = base; page < top; page += kPageSize) {
+        FaultSafeLock lk(m_pageMutex);
+        for (uint64_t page = base; page < top; page += kPageSizeNow()) {
             if (m_protectedPages.count(page)) continue;
 
             MemoryManager::ExecMapInfo info{};
@@ -160,7 +207,7 @@ public:
 
             void* host = mm.GetHostPointer(page);
             if (!host) continue;
-            if (mprotect(host, kPageSize, PROT_READ | PROT_EXEC) != 0) {
+            if (mprotect(host, kPageSizeNow(), PROT_READ | PROT_EXEC) != 0) {
                 // Failing open is the safe direction: the page stays writable
                 // and SMC detection degrades for it, but a wrong mprotect
                 // could kill a live run. Say so loudly.
@@ -170,7 +217,7 @@ public:
                 continue;
             }
             m_protectedPages.insert(page);
-            ++m_pagesProtected;
+            m_pagesProtected.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
@@ -191,7 +238,7 @@ public:
             m_ctx->InvalidateThreadCachedCodeRange(thread, base, top - base);
         }
         UnprotectRange(base, top);
-        ++m_invalidateCount;
+        m_invalidateCount.fetch_add(1, std::memory_order_relaxed);
     }
 
     // ---- Fault intercept (CrashHandler calls this first) ------------------
@@ -219,22 +266,23 @@ public:
         snprintf(buf, sizeof(buf),
                  "SMC: pagesProtected=%llu faults=%llu invalidations=%llu "
                  "unalignedRepairs=%llu liveProtected=%zu",
-                 (unsigned long long)m_pagesProtected,
-                 (unsigned long long)m_faultCount,
-                 (unsigned long long)m_invalidateCount,
-                 (unsigned long long)m_unalignedCount,
+                 (unsigned long long)m_pagesProtected.load(std::memory_order_relaxed),
+                 (unsigned long long)m_faultCount.load(std::memory_order_relaxed),
+                 (unsigned long long)m_invalidateCount.load(std::memory_order_relaxed),
+                 (unsigned long long)m_unalignedCount.load(std::memory_order_relaxed),
                  m_protectedPages.size());
         return buf;
     }
 
     // Live counter accessors for the engine counters panel (real values,
-    // including zeroes — see the class contract above).
-    uint64_t CounterPagesProtected()  const { return m_pagesProtected; }
-    uint64_t CounterFaults()          const { return m_faultCount; }
-    uint64_t CounterInvalidations()   const { return m_invalidateCount; }
-    uint64_t CounterUnalignedRepairs()const { return m_unalignedCount; }
+    // including zeroes).
+    uint64_t CounterPagesProtected()  const { return m_pagesProtected.load(std::memory_order_relaxed); }
+    uint64_t CounterFaults()          const { return m_faultCount.load(std::memory_order_relaxed); }
+    uint64_t CounterInvalidations()   const { return m_invalidateCount.load(std::memory_order_relaxed); }
+    uint64_t CounterUnalignedRepairs()const { return m_unalignedCount.load(std::memory_order_relaxed); }
+    uint64_t CounterUnexpectedSiCode()const { return m_unexpectedSiCode.load(std::memory_order_relaxed); }
     size_t   LiveProtectedCount() {
-        std::lock_guard<std::mutex> lk(m_pageMutex);
+        FaultSafeLock lk(m_pageMutex);
         return m_protectedPages.size();
     }
 
@@ -244,6 +292,9 @@ private:
         const uint64_t page = PageAlignDown(faultAddr);
 
         {
+            // Signal context: see FaultSafeLock. Writers block SIGSEGV/SIGBUS
+            // while holding this mutex, so we can never be waiting on a lock
+            // held by this same thread.
             std::lock_guard<std::mutex> lk(m_pageMutex);
             if (!m_protectedPages.count(page)) {
                 return false;   // not ours: real fault, crash report follows
@@ -254,19 +305,18 @@ private:
         // fetches succeed); a claimed page with any other si_code is logged
         // and still handled the same way — the page's compiled lifetime is
         // over either way.
-        const bool accerr = (info->si_code == SEGV_ACCERR);
-        if (!accerr) {
-            PX5_LOGW(LogCategory::FEX,
-                     "SMC: fault si_code=%d (expected SEGV_ACCERR) on "
-                     "protected page 0x%llx — handling anyway",
-                     info->si_code, (unsigned long long)page);
+        // No logging in signal context (PX5_LOGW allocates, takes the
+        // logger mutex and calls liblog). Count the anomaly instead; the
+        // counters panel surfaces it from a normal thread.
+        if (info->si_code != SEGV_ACCERR) {
+            m_unexpectedSiCode.fetch_add(1, std::memory_order_relaxed);
         }
 
         // Drop stale translations for the page and hand the page back to the
         // guest's requested protection (writable again), all under the
         // invalidation lock — the same order FEX's own frontend uses.
-        InvalidateGuestCodeRange(m_execThread, page, kPageSize);
-        ++m_faultCount;
+        InvalidateGuestCodeRange(m_execThread, page, kPageSizeNow());
+        m_faultCount.fetch_add(1, std::memory_order_relaxed);
 
         // Self-rewrite-inside-current-block: resuming the interrupted
         // instruction inside the block it just modified would run on into a
@@ -277,7 +327,7 @@ private:
             const uint64_t pc = uctx->uc_mcontext.pc;
             if (m_ctx->IsAddressInCodeBuffer(thread, pc) &&
                 !m_ctx->IsCurrentBlockSingleInst(thread) &&
-                m_ctx->IsAddressInCurrentBlock(thread, page, kPageSize)) {
+                m_ctx->IsAddressInCurrentBlock(thread, page, kPageSizeNow())) {
                 const auto& cfg = g_signalDelegator.GetConfig();
                 uctx->uc_mcontext.regs[1] = 1;  // ENTRY_FILL_SRA_SINGLE_INST_REG
                 uctx->uc_mcontext.pc = cfg.AbsoluteLoopTopAddressFillSRA;
@@ -308,7 +358,7 @@ private:
             pc, reinterpret_cast<uint64_t*>(uctx->uc_mcontext.regs));
         if (!result) return false;
         uctx->uc_mcontext.pc = pc + *result;
-        ++m_unalignedCount;
+        m_unalignedCount.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
 #endif
@@ -317,8 +367,8 @@ private:
     // hot enough for it to matter); registry lock is taken here.
     void UnprotectRange(uint64_t base, uint64_t top) {
         auto& mm = MemoryManager::GetInstance();
-        std::lock_guard<std::mutex> lk(m_pageMutex);
-        for (uint64_t page = base; page < top; page += kPageSize) {
+        FaultSafeLock lk(m_pageMutex);
+        for (uint64_t page = base; page < top; page += kPageSizeNow()) {
             if (m_protectedPages.erase(page) == 0) continue;
             // Restore the guest's requested protection, not a guess. A page
             // that is no longer mapped (unmap raced the invalidation) is
@@ -335,7 +385,7 @@ private:
             const int prot = PROT_READ | PROT_EXEC |
                              (info.writable ? PROT_WRITE : 0);
             void* host = mm.GetHostPointer(page);
-            if (host && mprotect(host, kPageSize, prot) != 0) {
+            if (host && mprotect(host, kPageSizeNow(), prot) != 0) {
                 PX5_LOGE(LogCategory::FEX,
                          "SMC: unprotect mprotect(0x%x) failed page 0x%llx: %s",
                          prot, (unsigned long long)page, strerror(errno));
@@ -348,11 +398,14 @@ private:
     FEXCore::Context::Context* m_ctx = nullptr;
     FEXCore::Core::InternalThreadState* m_execThread = nullptr;
 
-    // Counters: mutable so the summary can read them from const contexts.
-    mutable uint64_t m_pagesProtected = 0;
-    mutable uint64_t m_faultCount = 0;
-    mutable uint64_t m_invalidateCount = 0;
-    mutable uint64_t m_unalignedCount = 0;
+    // Counters are incremented from SIGSEGV/SIGBUS context and read from the
+    // UI thread: plain uint64_t here was a data race. relaxed ordering is
+    // enough -- these are statistics, not synchronisation.
+    std::atomic<uint64_t> m_pagesProtected{0};
+    std::atomic<uint64_t> m_faultCount{0};
+    std::atomic<uint64_t> m_invalidateCount{0};
+    std::atomic<uint64_t> m_unalignedCount{0};
+    std::atomic<uint64_t> m_unexpectedSiCode{0};
 };
 
 // ---------------------------------------------------------------------------
@@ -455,8 +508,13 @@ void OnMemoryCodeInvalidated(uint64_t base, size_t size) {
 // GuestSignal_* blocks) or its SpillSRA variant if the PC was inside a JIT
 // code buffer. ExecuteThread then returns normally and the app survives.
 // ---------------------------------------------------------------------------
-GuestTrapInfo g_lastGuestTrap{};      // honest zero when no trap fired
-uint64_t      g_guestTrapCount = 0;   // monotonic, includes every one
+// Written from signal context, read from the UI thread. The fields are
+// published through one release store on g_trapSeq so a reader can never
+// observe a half-written record; the payload itself is plain because only
+// the handler writes it and it is always read after the acquire load.
+GuestTrapInfo         g_lastGuestTrap{};   // zeroed when no trap has fired
+std::atomic<uint64_t> g_trapSeq{0};        // publication counter (release)
+std::atomic<uint64_t> g_guestTrapCount{0}; // monotonic, includes every one
 
 bool GuestTrapRouter(int sig, void* siginfoVoid, void* uctxVoid) {
     auto* uctx = static_cast<ucontext_t*>(uctxVoid);
@@ -479,6 +537,7 @@ bool GuestTrapRouter(int sig, void* siginfoVoid, void* uctxVoid) {
 
     const uint64_t pc = uctx->uc_mcontext.pc;
     const bool inJit = g_context->IsAddressInCodeBuffer(thread, pc);
+    (void)pc;
 
     // Snapshot the honest details BEFORE unwinding (guest RIP was stored
     // into State.rip by the Break emission right before the branch).
@@ -489,18 +548,20 @@ bool GuestTrapRouter(int sig, void* siginfoVoid, void* uctxVoid) {
     trap.siCode   = synFault.si_code;
     trap.guestRip = frame->State.rip;
 
-    // The x86 trap number tells us what the guest actually did (X86_TRAPNO_*
-    // in FEXCore/Core/X86State.h): 12=#SS 13=#GP 6=#UD 3=#BP 0=#DE ...
-    PX5_LOGE(LogCategory::FEX,
-             "Guest trap routed: signal=%d trapNo=%u si_code=%u "
-             "guestRIP=0x%llx hostPC=%#llx inJit=%d — unwinding cleanly "
-             "(stop-handler), app survives",
-             sig, trap.trapNo, trap.siCode,
-             (unsigned long long)trap.guestRip,
-             (unsigned long long)pc, inJit ? 1 : 0);
+    // NO LOGGING HERE. This function runs in signal context: PX5_LOGE
+    // formats into std::string, takes the logger mutex and calls into
+    // liblog, none of which is async-signal-safe. If the interrupted thread
+    // already held that mutex the process deadlocks inside the handler --
+    // in a routine that exists specifically to keep the app alive. The trap
+    // record below is published for the UI thread, which does the logging
+    // once execution has unwound (see ExecuteAtHostRip).
+    (void)inJit;
 
     g_lastGuestTrap = trap;
-    ++g_guestTrapCount;
+    g_guestTrapCount.fetch_add(1, std::memory_order_relaxed);
+    // Release: everything written to g_lastGuestTrap above is visible to
+    // any thread that acquire-loads g_trapSeq and sees this value.
+    g_trapSeq.fetch_add(1, std::memory_order_release);
 
     // Sanctioned long-jump shutdown (see Dispatcher entry: ReturningStack-
     // Location was saved exactly for this).
@@ -790,6 +851,30 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
                  (unsigned long long)initialFsBase);
     }
 
+    // v1.46 — THE ENTRY-ABI FIX (vc47). ORBIS process-start contract: the
+    // kernel points RDI at the application-parameter block ON THE GUEST
+    // STACK ([RDI]=argc, [RDI+8]=argv[0], ..., auxv) — _start decodes
+    // `mov r14d,[rdi]` / `lea r15,[rdi+8]` (verified in the mapped eboot:
+    // entry bytes 44 8b 37 / 4c 8d 7f 08). Linux-style _start instead reads
+    // argc FROM THE STACK, and FEXCore::CreateThread leaves every GPR at 0 —
+    // so the real eboot died on its FIRST memory access (LDAR W19,[x11],
+    // x11=0, si_addr=0x0) BEFORE any PLT call. That is the crash every
+    // session since vc40 hit ~1 s after dispatch; the vc45 "null import
+    // wall / jmp [0]" reading was a misattribution (the GOT slot is never
+    // 0 — it holds the file's lazy back-pointer; and execution never even
+    // reached the PLT). The v1.39 initial stack already places argc at the
+    // initial SP, so the ORBIS contract is exactly RDI = initial SP.
+    // RSI/RDX stay 0: _start saves RSI for its second call; if that call
+    // dereferences it, the import-trap ledger will name the import instead
+    // of a mystery fault.
+    frame->State.gregs[FEXCore::X86State::REG_RDI] = hostStackTop;
+    frame->State.gregs[FEXCore::X86State::REG_RSI] = 0;
+    frame->State.gregs[FEXCore::X86State::REG_RDX] = 0;
+    PX5_LOGI(LogCategory::FEX,
+             "ORBIS entry ABI set: rdi=0x%llx (argc block at initial SP) "
+             "rsi=0 rdx=0 (v1.46 — mov r14d,[rdi] null-load eliminated)",
+             (unsigned long long)hostStackTop);
+
     g_execThread = thread;
     SmcManager::GetInstance().SetExecThread(thread);
     // Clear any previous run's synchronous-fault record BEFORE execution so
@@ -797,6 +882,7 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
     memset(&thread->CurrentFrame->SynchronousFaultData, 0,
            sizeof(thread->CurrentFrame->SynchronousFaultData));
     g_lastGuestTrap = GuestTrapInfo{};
+    g_trapSeq.fetch_add(1, std::memory_order_release);
 
     PX5_LOGI(LogCategory::FEX, "Guest thread created: RIP=%#llx SP=%#llx",
              (unsigned long long)hostRip, (unsigned long long)hostStackTop);
@@ -823,7 +909,22 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
         res.exitedCleanly = false;
     }
     res.output = GuestSyscalls::TakeOutput();
-    res.guestTrap = g_lastGuestTrap;   // honest: fired=false when no trap
+    // Acquire-load pairs with the handler's release store: if a trap was
+    // published, every field of g_lastGuestTrap is visible here.
+    (void)g_trapSeq.load(std::memory_order_acquire);
+    res.guestTrap = g_lastGuestTrap;   // fired=false when no trap occurred
+
+    // The trap is logged HERE, on a normal thread, because doing it inside
+    // the signal handler was not async-signal-safe.
+    if (res.guestTrap.fired) {
+        PX5_LOGE(LogCategory::FEX,
+                 "Guest trap routed: signal=%u trapNo=%u si_code=%u "
+                 "guestRIP=0x%llx - unwound cleanly (stop-handler), "
+                 "app survives",
+                 res.guestTrap.signal, res.guestTrap.trapNo,
+                 res.guestTrap.siCode,
+                 (unsigned long long)res.guestTrap.guestRip);
+    }
 
     g_execThread = nullptr;
     SmcManager::GetInstance().SetExecThread(nullptr);
@@ -891,24 +992,50 @@ bool RunConformanceTest() {
         return false;
     }
     void* hostPtr = mm.GetHostPointer(kTestVA);
+    if (hostPtr == nullptr) {
+        PX5_LOGE(LogCategory::FEX,
+                 "Conformance: GetHostPointer(0x%llx) returned null after a "
+                 "successful map", (unsigned long long)kTestVA);
+        mm.UnmapMemory(kTestVA, codeSize);
+        return false;
+    }
     memcpy(hostPtr, guestCode, sizeof(guestCode));
 
-    // 64 KiB stack at the high end of the same canonical window.
-    const uint64_t stackVA = 0x140000000ULL + 0x01000000ULL - pageSize;
-    mm.MapMemory(stackVA, pageSize, MemoryFlags::PAGE_READ | MemoryFlags::PAGE_WRITE,
-                 "conformance_stack");
+    // One page of stack at the high end of the same canonical window.
+    const size_t   stackSize = pageSize;
+    const uint64_t stackVA   = 0x140000000ULL + 0x01000000ULL - stackSize;
+    if (!mm.MapMemory(stackVA, stackSize,
+                      MemoryFlags::PAGE_READ | MemoryFlags::PAGE_WRITE,
+                      "conformance_stack")) {
+        PX5_LOGE(LogCategory::FEX, "Conformance: failed to map guest stack");
+        mm.UnmapMemory(kTestVA, codeSize);
+        return false;
+    }
     void* stackHost = mm.GetHostPointer(stackVA);
+    if (stackHost == nullptr) {
+        PX5_LOGE(LogCategory::FEX, "Conformance: null host pointer for stack");
+        mm.UnmapMemory(kTestVA, codeSize);
+        mm.UnmapMemory(stackVA, stackSize);
+        return false;
+    }
 
     // Guest stacks grow DOWN. The stack pointer handed to FEXCore must be the
     // TOP edge of the mapping, not its bottom: SP = bottom meant the very
     // first host-side guest-stack touch landed one page below the mapping
     // (unmapped) — the 12:34:12 device crash signature.
-    const uint64_t stackTopVA = stackVA + pageSize;
+    //
+    // ExecuteAtHostRip takes a HOST stack top, exactly like the two call
+    // sites in core/emulator.cpp. This used to hand it the guest VA
+    // (stackVA + pageSize) and only worked by accident, because the window
+    // happens to be identity-mapped; it would have broken silently the day
+    // the reservation moved. Derive it from the host pointer instead.
+    const uint64_t stackTopHost =
+        reinterpret_cast<uint64_t>(stackHost) + stackSize;
 
     ExecResult r = ExecuteAtHostRip(reinterpret_cast<uint64_t>(hostPtr),
-                                    stackTopVA);
+                                    stackTopHost);
     mm.UnmapMemory(kTestVA, codeSize);
-    mm.UnmapMemory(stackVA, pageSize);
+    mm.UnmapMemory(stackVA, stackSize);
 
     // v1.26 — STRICT verdict (external review, adopted): started+no-error
     // alone could pass a wrong arithmetic result. The blob performs NO
@@ -952,14 +1079,38 @@ std::string GetEngineCounters() {
     auto& smc = SmcManager::GetInstance();
     auto& mm = MemoryManager::GetInstance();
 
+    // The trap record is written from signal context while execution runs.
+    // Reading it here mid-run was a data race; report 'pending' instead and
+    // read the fields only when no execution is active. The acquire load
+    // pairs with the executor's (seq_cst, hence release) null store, so once
+    // idle is observed, the final published record is fully visible and no
+    // handler can be mid-write (GuestTrapRouter publishes only on the
+    // active executor).
+    const bool execActive =
+        g_execThread.load(std::memory_order_acquire) != nullptr;
+    char trapLine[128];
+    if (execActive) {
+        snprintf(trapLine, sizeof(trapLine),
+                 "guestTraps: count=%llu last=pending (execution active)",
+                 (unsigned long long)g_guestTrapCount.load(std::memory_order_relaxed));
+    } else {
+        (void)g_trapSeq.load(std::memory_order_acquire);   // pairs with publish
+        const GuestTrapInfo t = g_lastGuestTrap;
+        snprintf(trapLine, sizeof(trapLine),
+                 "guestTraps: count=%llu lastSignal=%u lastTrapNo=%u "
+                 "lastGuestRIP=0x%llx",
+                 (unsigned long long)g_guestTrapCount.load(std::memory_order_relaxed),
+                 (unsigned)t.signal, (unsigned)t.trapNo,
+                 (unsigned long long)t.guestRip);
+    }
+
     char buf[512];
     snprintf(buf, sizeof(buf),
              "engine: %s\n"
              "syscalls: total=%llu handled=%llu unhandled=%llu bytesOut=%llu\n"
              "SMC: pagesProtected=%llu faults=%llu invalidations=%llu "
-             "unalignedRepairs=%llu liveProtected=%zu\n"
-             "guestTraps: count=%llu lastSignal=%u lastTrapNo=%u "
-             "lastGuestRIP=0x%llx\n"
+             "unalignedRepairs=%llu liveProtected=%zu unexpectedSiCode=%llu\n"
+             "%s\n"
              "memory: %s\n"
              "guestThreads: lastRun=%s",
              IsInitialized() ? "initialized" : "not initialized",
@@ -972,10 +1123,8 @@ std::string GetEngineCounters() {
              (unsigned long long)smc.CounterInvalidations(),
              (unsigned long long)smc.CounterUnalignedRepairs(),
              smc.LiveProtectedCount(),
-             (unsigned long long)g_guestTrapCount,
-             (unsigned)g_lastGuestTrap.signal,
-             (unsigned)g_lastGuestTrap.trapNo,
-             (unsigned long long)g_lastGuestTrap.guestRip,
+             (unsigned long long)smc.CounterUnexpectedSiCode(),
+             trapLine,
              mm.GetWindowInfoString().c_str(),
              g_execThread.load(std::memory_order_relaxed) ? "active" : "idle");
 

@@ -96,6 +96,12 @@ constexpr uint64_t kSegFlagBlocked    = 1ull << 11;
 // (shadPS4 self_segment_header::GetId).
 constexpr uint32_t kSegIdShift = 20;
 constexpr uint32_t kSegIdMask  = 0xFFFu;
+
+/**
+ * Extracts segment ID from flags (phdr index for Blocked entries).
+ * @param flags SELF segment flags
+ * @return Segment ID (bits 20-31)
+ */
 inline uint32_t SegId(uint64_t flags) {
     return static_cast<uint32_t>((flags >> kSegIdShift) & kSegIdMask);
 }
@@ -106,37 +112,43 @@ constexpr uint64_t kMaxSegments      = 64;
 constexpr uint64_t kMaxSegmentBytes  = 256ull * 1024 * 1024;   // per segment
 constexpr uint64_t kMaxStreamBytes   = 512ull * 1024 * 1024;   // total out
 
+/**
+ * SELF segment metadata.
+ */
 struct SegmentInfo {
-    uint64_t flags;
-    uint64_t fileOffset;
-    uint64_t storedSize;
-    uint64_t memorySize;
+    uint64_t flags;         ///< Segment flags (ordered, encrypted, signed, compressed, blocked)
+    uint64_t fileOffset;    ///< Absolute offset in SELF file
+    uint64_t storedSize;    ///< Stored bytes (compressed size if kSegFlagCompressed)
+    uint64_t memorySize;    ///< Uncompressed size
 };
 
+/**
+ * SELF extraction result with rebuilt ELF image.
+ */
 struct ExtractResult {
-    bool        ok = false;
-    std::string error;              // non-empty when !ok (named reason)
-    // Rebuilt standalone ELF64 image (inner header + phdrs + segment
-    // data; p_offset values point into this buffer). elfOffset stays 0
-    // — the rebuild IS the image, kept whole so the evidence survives.
-    std::vector<uint8_t> elfBytes;
-    uint64_t elfOffset = 0;
+    bool        ok = false;             ///< Whether extraction succeeded
+    std::string error;                  ///< Non-empty when !ok (named reason)
+    std::vector<uint8_t> elfBytes;      ///< Rebuilt standalone ELF64 image
+    uint64_t elfOffset = 0;             ///< Always 0 (rebuild IS the image)
 
-    uint32_t segmentCount       = 0;
-    uint32_t extractedSegments  = 0;
-    uint32_t refusedEncrypted   = 0;
-    uint32_t inflatedSegments   = 0;
-    uint32_t innerPhdrs         = 0;
-    uint64_t innerEntry         = 0;
-    // Raw header facts, filled verbatim from the container: a real dump
-    // whose fields disagree with any assumption must leave its numbers
-    // in the log (the vc29 session's lesson — no evidence, no fix).
-    std::string headerFacts;
-    std::vector<SegmentInfo> segments;
+    uint32_t segmentCount       = 0;    ///< Total SELF segments
+    uint32_t extractedSegments  = 0;    ///< Successfully extracted segments
+    uint32_t refusedEncrypted   = 0;    ///< Encrypted segments (refused)
+    uint32_t inflatedSegments   = 0;    ///< Compressed segments (inflated)
+    uint32_t innerPhdrs         = 0;    ///< Inner ELF program headers
+    uint64_t innerEntry         = 0;    ///< Inner ELF entry point
+    std::string headerFacts;            ///< Raw header facts (evidence)
+    std::vector<SegmentInfo> segments;  ///< Segment metadata
 };
 
-// Extracts the inner ELF from a SELF container image held in memory.
-// Never reads out of bounds; every structural mismatch is a named error.
+/**
+ * Extracts the inner ELF from a SELF container held in memory.
+ * Never reads out of bounds; every structural mismatch is a named error.
+ * Encrypted segments are refused (we have no Sony keys).
+ * @param data Pointer to SELF container data
+ * @param size Size of container in bytes
+ * @return ExtractResult with success/rebuilt ELF or failure/error
+ */
 ExtractResult ExtractInnerElf(const uint8_t* data, size_t size);
 
 } // namespace PX5::SelfExtract

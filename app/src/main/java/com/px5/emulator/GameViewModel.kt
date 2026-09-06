@@ -33,18 +33,35 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    /**
+     * Inserts a game into the database.
+     * @param game Game entity to insert
+     */
     fun insert(game: GameEntity) = viewModelScope.launch {
         repository.insert(game)
     }
 
+    /**
+     * Inserts multiple games into the database.
+     * @param games List of game entities to insert
+     */
     fun insertAll(games: List<GameEntity>) = viewModelScope.launch {
         repository.insertAll(games)
     }
 
+    /**
+     * Toggles a game's favorite status.
+     * @param id Game ID
+     * @param isFavorite true to mark as favorite, false otherwise
+     */
     fun toggleFavorite(id: String, isFavorite: Boolean) = viewModelScope.launch {
         repository.setFavorite(id, isFavorite)
     }
 
+    /**
+     * Deletes a game from the database.
+     * @param id Game ID to delete
+     */
     fun delete(id: String) = viewModelScope.launch {
         repository.deleteById(id)
     }

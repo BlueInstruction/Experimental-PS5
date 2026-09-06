@@ -52,6 +52,7 @@ fun PS5TurnipDriverSheet(
     soundManager: SoundManager,
     fexCoreWrapper: FexCoreWrapper?,
     onImportCustomDriverClick: () -> Unit,
+    onStateChanged: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
@@ -89,6 +90,10 @@ fun PS5TurnipDriverSheet(
         }.getOrDefault("engine unavailable")
     }
 
+    // v1.47: every state change here also bumps the host's driverStateEpoch
+    // so the settings Graphics tab (hidden behind this overlay, no ON_RESUME
+    // on sheet close) re-pulls the engine summary and stops showing a
+    // pre-import snapshot (the 2026-09-05 23:30 device session bug).
     LaunchedEffect(Unit) { refreshSummary() }
 
     // v1.16 — the v1.15 session's second driver complaint: a freshly
@@ -106,6 +111,7 @@ fun PS5TurnipDriverSheet(
                 activeMode = mode
                 scope.launch {
                     if (mode > 0) verifyAndRefresh(mode) else refreshSummary()
+                    onStateChanged()
                 }
             }
         }
@@ -188,6 +194,7 @@ fun PS5TurnipDriverSheet(
                                 activeMode = 0
                                 soundManager.playActivationSound()
                                 verifyAndRefresh(0)
+                                onStateChanged()
                                 busy = false
                             }
                         }
@@ -212,6 +219,7 @@ fun PS5TurnipDriverSheet(
                                 activeMode = idx
                                 soundManager.playActivationSound()
                                 verifyAndRefresh(idx)
+                                onStateChanged()
                                 busy = false
                             }
                         },
@@ -236,6 +244,7 @@ fun PS5TurnipDriverSheet(
                                     activeMode = newMode
                                     soundManager.playActivationSound()
                                     verifyAndRefresh(newMode)
+                                    onStateChanged()
                                     busy = false
                                 }
                             }

@@ -6,67 +6,116 @@
 
 namespace PX5::FexCoreIntegration {
 
-// One guest-visible synchronous trap (ud2/int3/div0/...) that the fault
-// router unwound instead of killing the process. Zeroes reported too.
+/**
+ * Guest synchronous trap information (ud2/int3/div0/...) captured and unwound.
+ */
 struct GuestTrapInfo {
-    bool     fired   = false;
-    uint32_t signal  = 0;    // host signal FEXCore's generated fault raised
-    uint32_t trapNo  = 0;    // x86 trap number FEXCore synthesized (GP/UD/BP...)
-    uint32_t siCode  = 0;    // si_code FEXCore synthesized (ILL_ILLOPN etc.)
-    uint64_t guestRip = 0;   // guest instruction that caused the trap
+    bool     fired   = false;  ///< Whether a trap was captured this run
+    uint32_t signal  = 0;      ///< Host signal FEXCore's generated fault raised
+    uint32_t trapNo  = 0;      ///< x86 trap number FEXCore synthesized (GP/UD/BP...)
+    uint32_t siCode  = 0;      ///< si_code FEXCore synthesized (ILL_ILLOPN etc.)
+    uint64_t guestRip = 0;     ///< Guest instruction that caused the trap
 };
 
-// Honest result of one guest-execution attempt.
+/**
+ * Honest result of one guest execution attempt.
+ */
 struct ExecResult {
-    bool        started   = false;   // FEXCore created and ran a thread
-    bool        exitedCleanly = false; // exit_group captured OR HLT reached
-    uint64_t    exitCode  = 0;       // from GuestSyscalls (when captured)
-    std::string output;              // guest stdout/stderr text
-    double      elapsedMs = 0.0;
-    std::string error;               // non-empty => start/run failure reason
-    GuestTrapInfo guestTrap;         // populated when the guest trapped
+    bool        started   = false;      ///< FEXCore created and ran a thread
+    bool        exitedCleanly = false;  ///< exit_group captured OR HLT reached
+    uint64_t    exitCode  = 0;          ///< From GuestSyscalls (when captured)
+    std::string output;                 ///< Guest stdout/stderr text
+    double      elapsedMs = 0.0;        ///< Execution duration in milliseconds
+    std::string error;                  ///< Non-empty => start/run failure reason
+    GuestTrapInfo guestTrap;            ///< Populated when the guest trapped
 };
 
-// v1.39 — live guest CPU-state accessors (no locks; safe from the syscall
-// bridge on the guest thread itself and from the crash handler).
-// GetLiveGuestState returns false when no guest thread is executing.
+/**
+ * Reads live guest CPU state (RIP, RSP, FS, GS) from the executing thread.
+ * Safe from syscall bridge (on guest thread) and crash handler.
+ * @param rip Output pointer for guest RIP (optional, can be null)
+ * @param rsp Output pointer for guest RSP (optional, can be null)
+ * @param fsBase Output pointer for guest FS base (optional, can be null)
+ * @param gsBase Output pointer for guest GS base (optional, can be null)
+ * @return true if a guest thread is executing, false otherwise
+ */
 bool GetLiveGuestState(uint64_t* rip, uint64_t* rsp,
                        uint64_t* fsBase, uint64_t* gsBase);
-// arch_prctl(ARCH_SET_FS / ARCH_SET_GS) backend: writes the guest-visible
-// segment base into the executing thread's CPUState. Returns false when no
-// guest thread is live (the bridge then reports EINVAL honestly).
+
+/**
+ * Sets guest segment base register (FS or GS) for the live thread.
+ * Backend for arch_prctl(ARCH_SET_FS / ARCH_SET_GS).
+ * @param isFs true for FS, false for GS
+ * @param base New segment base address
+ * @return true if guest thread is live and base was set, false otherwise
+ */
 bool SetLiveGuestSegmentBase(bool isFs, uint64_t base);
 
-bool Initialize();                    // Config -> features -> context -> core
+/**
+ * Initializes FEXCore: Config -> features -> context -> core.
+ * @return true if initialization succeeded, false otherwise
+ */
+bool Initialize();
+
+/**
+ * Shuts down FEXCore, releasing context and clearing all state.
+ */
 void Shutdown();
+
+/**
+ * Returns whether FEXCore has been initialized.
+ * @return true if Initialize() succeeded, false otherwise
+ */
 bool IsInitialized();
 
-// v1.16: rebuild the engine from scratch inside a fork-isolated probe
-// child (Shutdown + Initialize). Removes the fork-inherited multithreaded
-// state that killed both v1.15 execution children at one deterministic PC.
+/**
+ * Rebuilds the engine from scratch in a fork-isolated child (Shutdown + Initialize).
+ * Removes fork-inherited multithreaded state that can cause child crashes.
+ */
 void ResetForChild();
 
-// Execute guest code that is ALREADY mapped inside the PX5 memory window.
-// Both pointers are HOST-side values bridged through MemoryManager.
-// v1.40: initialFsBase pre-sets the guest FSBASE before dispatch — the
-// ORBIS kernel contract. PS5 crt code never issues arch_prctl (Linux is
-// the only guest family that sets TLS that way); its very first block
-// dereferences fs:[...] and expects the kernel to have pointed FS at the
-// thread's TCB already. 0 = leave FSBASE unset (fixture guests).
+/**
+ * Executes guest code already mapped in the PX5 memory window until HLT or exit.
+ * Both pointers are HOST-side values bridged through MemoryManager.
+ * @param hostRip Host pointer to guest entry point
+ * @param hostStackTop Host pointer to top of guest stack
+ * @param initialFsBase Guest FSBASE to set before dispatch (ORBIS contract); 0 = unset
+ * @return ExecResult containing execution outcome
+ */
 ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
                             uint64_t initialFsBase = 0);
 
-// Classic arithmetic conformance blob (kept for the existing UI button).
+/**
+ * Runs classic arithmetic conformance test (mov eax,40; add eax,2; hlt).
+ * @return true if guest blob executed correctly, false otherwise
+ */
 bool RunConformanceTest();
 
+/**
+ * Returns architecture summary string (FEXCore version, x86-64 -> ARM64).
+ * @return Human-readable architecture description
+ */
 std::string GetArchitectureSummary();
+
+/**
+ * Returns syscall statistics string (total/handled/unhandled/bytes).
+ * @return Formatted syscall stats
+ */
 std::string GetSyscallStatsString();
+
+/**
+ * Returns comprehensive engine counters (syscalls, SMC, traps, memory, threads).
+ * @return Multi-line engine diagnostics
+ */
 std::string GetEngineCounters();
 
-// Bridge one FEXCore config override (real FEX option keys, see
-// FEXCore/Source/Interface/Config/Config.json.in). Must be called before
-// engine Initialize(); returns false when the key is unknown or the engine
-// is already live (no silent lies — the caller shows the failure).
+/**
+ * Applies a FEXCore config override (real FEX option keys from Config.json.in).
+ * Must be called before Initialize(); returns false if key unknown or engine live.
+ * @param key FEXCore config key (e.g., "TSOEnabled", "Multiblock")
+ * @param value Config value as string
+ * @return true if override applied or deferred, false if rejected
+ */
 bool ApplyEngineConfigOverride(const std::string& key, const std::string& value);
 
 } // namespace PX5::FexCoreIntegration

@@ -104,20 +104,26 @@ uint64_t GuestPcRing::Seq() {
 }
 
 void GuestPcRing::Format(char* out, size_t outCap) {
+    if (!out || outCap == 0) return;
     const uint64_t seq = g_pcRingSeq.load(std::memory_order_relaxed);
     const uint64_t last = g_pcRingLast.load(std::memory_order_relaxed);
     size_t o = static_cast<size_t>(
         snprintf(out, outCap, "seq=%llu last=0x%llx recent=[",
                  (unsigned long long)seq, (unsigned long long)last));
+    // snprintf returns what WOULD be written; without this clamp a truncated
+    // header pushes o past outCap and the next snprintf gets a negative
+    // "remaining" that wraps to a bogus capacity.
+    if (o > outCap - 1) o = outCap - 1;
     const size_t n = seq < kPcRingSize ? static_cast<size_t>(seq) : kPcRingSize;
     const size_t show = n < 8 ? n : 8;
-    for (size_t i = 0; i < show && o < outCap; ++i) {
+    for (size_t i = 0; i < show && o < outCap - 1; ++i) {
         const uint64_t rip = seq >= (show - i)
             ? g_pcRing[(seq - show + i) % kPcRingSize]
             : 0;
         o += static_cast<size_t>(snprintf(out + o, outCap - o,
                                           "%s0x%llx", i ? "," : "",
                                           (unsigned long long)rip));
+        if (o > outCap - 1) o = outCap - 1;
     }
     if (o < outCap) snprintf(out + o, outCap - o, "]");
 }
@@ -178,11 +184,24 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
     }
 
     case NR_brk: {
-        if (a0 == 0) return 0;               // query before loader sets base
-        MemoryManager::GetInstance().SetProgramBreak(a0);
+        // Linux brk(2) returns the CURRENT break -- the new one on success,
+        // the unchanged one on failure. Returning the requested value
+        // unconditionally (as this did) told the guest allocator it owned a
+        // range that was never mapped; its first store then faulted.
+        uint64_t cur = 0;
+        if (!MemoryManager::GetInstance().SetBrk(a0, cur)) {
+            PX5_LOGW(LogCategory::KERNEL,
+                     "guest brk(0x%llx) refused - break unchanged at 0x%llx",
+                     (unsigned long long)a0, (unsigned long long)cur);
+            // The bridge handled the call (made a decision and answered the
+            // guest); refusal must not hide it from the counters.
+            std::lock_guard<std::mutex> lk(g_stateMutex);
+            g_stats.handledCalls++;
+            return cur;
+        }
         std::lock_guard<std::mutex> lk(g_stateMutex);
         g_stats.handledCalls++;
-        return a0;
+        return cur;
     }
 
     case NR_mmap: {                          // (addr,len,prot,flags,fd,off)
@@ -192,12 +211,14 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
             LogUnimplemented(nr, "mmap(non-fixed/anon)", a0, a1, a3);
             return kErrNoSys;
         }
-        // v1.32 guest ABI policy: MAP_FIXED requests below the window
-        // anchor are mirrored 4 GiB up into the window and the guest
-        // receives the TRANSLATED address (vc32 fixture contract:
-        // mmap(0x49000000) must return 0x149000000, then round-trip a
-        // magic through it). Without the mirror the manager rejects
-        // low VAs and every such guest aborts its own path with -EINVAL.
+        // Guest ABI deviation, applied knowingly: a MAP_FIXED below the
+        // window anchor cannot be given the address it asked for (that
+        // memory belongs to the Android process), so it is relocated 4 GiB
+        // up into the window and the guest receives the TRANSLATED address
+        // as mmap's return value. A guest that honours the return value
+        // works; a guest that hardcodes the low address and ignores the
+        // return value will fault. The alternative -- rejecting every low
+        // MAP_FIXED with -EINVAL -- fails those guests too, and earlier.
         uint64_t addr = a0;
         if (MemoryManager::GetInstance().TranslateLowFixedVa(addr)) {
             PX5_LOGI(LogCategory::KERNEL,
@@ -342,6 +363,19 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
             g_stats.handledCalls++;   // outcome tracked in linker stats
         }
         return gr.ok ? static_cast<uint64_t>(gr.value) : kErrNoSys;
+    }
+
+    case kPx5ImportTrapSyscall: {
+        // PX5 import trap (v1.45): a0 = stub-encoded import index. The
+        // loader redirected every UNDEF STRONG import slot to a 16-byte
+        // guest stub that lands here; the first hit per import is logged
+        // and ledgered by name, and RAX=0 lets the guest continue past
+        // the missing import (the vc45 null-import wall, named).
+        const uint64_t ret =
+            RuntimeLinker::GetInstance().DispatchImportTrap(a0);
+        std::lock_guard<std::mutex> lk(g_stateMutex);
+        g_stats.handledCalls++;
+        return ret;
     }
 
     case NR_futex:                           // single-threaded guests only

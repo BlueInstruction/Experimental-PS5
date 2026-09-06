@@ -112,7 +112,7 @@ if(NOT DEFINED PX5_FEXCORE_ROOT)
     message(FATAL_ERROR
         "PX5_FEXCORE_ROOT is not set. Upstream FEX sources are not vendored "
         "inside this repository — run tools/fetch_fexcore.sh first (see "
-        "AGENT.md), or pass -DPX5_FEXCORE_ROOT=<path-to-FEX-tree>.")
+        "AGENTS.md), or pass -DPX5_FEXCORE_ROOT=<path-to-FEX-tree>.")
 endif()
 if(NOT EXISTS "${PX5_FEXCORE_ROOT}/CMakeLists.txt")
     message(FATAL_ERROR
@@ -180,7 +180,6 @@ add_library(
         gpu/gnm/gnm_selftest.cpp
         gpu/gnm/gnm_submit.cpp
         audio/audio.cpp
-        audio_input_native.cpp
         input/controller.cpp
         filesystem/vfs.cpp
         utils/logger.cpp
@@ -206,14 +205,16 @@ target_compile_features(px5 PRIVATE cxx_std_20)
 # The logger still routes PX5_LOG* macros to Android logcat; no file backend.
 find_library(log-lib log)
 find_library(android-lib android)
-find_library(aaudio-lib aaudio)
+# libaaudio is deliberately NOT linked: nothing in the tree calls AAudio.
+# It was linked while audio/audio.cpp claimed a working "AAudio Low-Latency
+# Stream", which made the link line read as evidence for a feature that did
+# not exist. Re-add it in the same change that first calls AAudio_*.
 
 # z: SELF extractor (segment inflate) — NDK ships libz.
 target_link_libraries(
         px5
         ${log-lib}
         ${android-lib}
-        ${aaudio-lib}
         z
         FEXCore
         FEXCore_Base

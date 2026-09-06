@@ -1,5 +1,3 @@
-import java.io.ByteArrayOutputStream
-
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -10,14 +8,22 @@ plugins {
 // Build identity, stamped into BuildConfig and emitted into the on-device
 // diagnostic stream at every startup — so any pasted log self-identifies
 // the exact APK, commit, and FEXCore pin it came from.
+//
+// Runs an external git process at CONFIGURATION time. With the
+// configuration cache disabled (gradle.properties keeps it off) this is
+// evaluated fresh every build, which the build-identity contract requires:
+// GIT_SHA must name the HEAD this APK was built from. If the configuration
+// cache is ever enabled, move this into a ValueSource first -- a cache hit
+// would otherwise replay a stale SHA into BuildConfig.
+// Same output, same honest "unknown" fallback.
 fun gitSha(): String = try {
-    val out = ByteArrayOutputStream()
-    exec {
-        commandLine("git", "rev-parse", "--short", "HEAD")
-        workingDir = rootProject.projectDir
-        standardOutput = out
-    }
-    out.toString("UTF-8").trim().ifEmpty { "unknown" }
+    val proc = ProcessBuilder("git", "rev-parse", "--short", "HEAD")
+        .directory(rootProject.projectDir)
+        .redirectErrorStream(true)
+        .start()
+    val out = proc.inputStream.bufferedReader().readText().trim()
+    proc.waitFor()
+    if (proc.exitValue() == 0 && out.isNotEmpty()) out else "unknown"
 } catch (_: Throwable) {
     "unknown"   // tarball builds / CI edge cases: honest fallback
 }
@@ -43,8 +49,8 @@ android {
         applicationId = "com.px5.emulator"
         minSdk = 28
         targetSdk = 35
-        versionCode = 44
-        versionName = "1.43"
+        versionCode = 48
+        versionName = "1.47"
 
         buildConfigField("String", "GIT_SHA", "\"${gitSha()}\"")
         buildConfigField("String", "FEXCORE_PIN", "\"${fexCorePin()}\"")
@@ -74,14 +80,14 @@ android {
                 // Upstream FEX sources live OUTSIDE the repository; they are
                 // materialized by tools/fetch_fexcore.sh at a pinned commit.
                 val fexRoot = System.getenv("PX5_FEXCORE_ROOT")
-                    ?: File(rootProject.projectDir, "../../deps/FEX").absolutePath
+                    ?: File(rootProject.projectDir, ".deps/FEX").absolutePath
                 arguments += "-DPX5_FEXCORE_ROOT=$fexRoot"
 
                 // libadrenotools (Turnip loading) — same discipline as FEX.
                 // Optional: when absent, driver switching honestly reports
                 // system-ICD-only mode instead of faking success.
                 val adrenoRoot = System.getenv("PX5_ADRENOTOOLS_ROOT")
-                    ?: File(rootProject.projectDir, "../../deps/adrenotools").absolutePath
+                    ?: File(rootProject.projectDir, ".deps/adrenotools").absolutePath
                 arguments += "-DPX5_ADRENOTOOLS_ROOT=$adrenoRoot"
             }
         }
@@ -143,15 +149,15 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.androidx.navigation.compose)
 
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+
+    // Full icon set (FolderOpen / Memory / BugReport / VolumeUp are absent
+    // from material-icons-core). Versioned by the compose BOM above.
+    implementation(libs.androidx.material.icons.extended)
+
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
-}
-dependencies {
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
-    // Full icon set (FolderOpen / Memory / BugReport / VolumeUp are absent
-    // from material-icons-core).
-    implementation("androidx.compose.material:material-icons-extended")
 }
 

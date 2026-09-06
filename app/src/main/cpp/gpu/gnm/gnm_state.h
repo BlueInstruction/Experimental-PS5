@@ -20,6 +20,7 @@
 #ifndef PX5_GPU_GNM_GNM_STATE_H
 #define PX5_GPU_GNM_GNM_STATE_H
 
+#include <cstddef>   // size_t: used below, previously pulled in only by luck
 #include <cstdint>
 #include <vector>
 

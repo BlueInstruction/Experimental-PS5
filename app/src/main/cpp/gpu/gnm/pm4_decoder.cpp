@@ -165,8 +165,11 @@ size_t Pm4Decoder::Decode(const uint32_t* dwords, size_t dwordCount,
         }
         case kItSetShRegOffset: {
             // Same register space as SET_SH_REG plus an address pair;
-            // milestone-1 stores only the register values, and records the
-            // extra address honestly in the packet trace.
+            // milestone-1 stores only the register values. The address pair
+            // is discarded for now and the packet trace carries no address
+            // field yet — partial semantics, documented as such in
+            // docs/gpu.md (do not call this full SET_SH_REG_OFFSET
+            // coverage in any evidence claim).
             if (bodyNeed >= kBodySetRegMin + 2) {
                 const uint32_t spaceOffset = body[0];
                 for (uint32_t v = 2; v < bodyNeed; ++v) {

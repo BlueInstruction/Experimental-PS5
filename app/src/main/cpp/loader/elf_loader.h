@@ -104,20 +104,42 @@ struct LoadedElfImage {
     uint64_t             relocSkippedOther = 0;      // named-otherwise types
     uint64_t             relocWriteRefused = 0;      // target not in a
                               // writable mapped segment — refused, not done
+    // v1.45 — what happened to the unresolved imports:
+    // relocImportTraps = UNDEF STRONG imports whose slot now points at a
+    // 16-byte trap stub (the named-ledger path, kPx5ImportTrapSyscall);
+    // relocWeakZero = UNDEF WEAK imports explicitly resolved to 0 (ELF
+    // semantics; crt NULL-checks rely on it). unresolvedImports ==
+    // traps + weakZero when every slot write succeeded.
+    uint64_t             relocImportTraps = 0;
+    uint64_t             relocWeakZero = 0;
 
     size_t TotalMemSize() const { return imageHighVa - imageLowVa; }
 };
 
+/**
+ * ELF and SELF container loader for x86-64 guest executables.
+ */
 class ElfLoader {
 public:
-    // Parses + maps a real x86-64 ELF into the guest window.
+    /**
+     * Parses and maps a real x86-64 ELF file into the guest memory window.
+     * @param filePath Filesystem path to the ELF file
+     * @param out Output parameter receiving loaded image metadata
+     * @return true if load succeeded, false otherwise (error in out.error)
+     */
     static bool LoadElfFile(const std::string& filePath, LoadedElfImage& out);
 
-    // Same parse/map work for an ELF image already held in memory — the
-    // path the SELF extractor feeds (its inner ELF never touches disk).
-    // `origin` is only used for logs/errors. `containerSha256Hex` (v1.41)
-    // is the hash of the on-disk file the stream came from when the caller
-    // knows it (SELF path); it is stored verbatim for the evidence layer.
+    /**
+     * Loads an ELF image from memory (used by SELF extractor).
+     * @param data Pointer to ELF data in memory
+     * @param size Size of ELF data in bytes
+     * @param origin Description for logging (e.g., "extracted from foo.self")
+     * @param out Output parameter receiving loaded image metadata
+     * @param containerSha256Hex Optional: hash of on-disk container file
+     * @param fromSelfContainer Whether this ELF came from a SELF container
+     * @param containerSizeBytes On-disk container file size
+     * @return true if load succeeded, false otherwise
+     */
     static bool LoadElfFromMemory(const uint8_t* data, size_t size,
                                   const std::string& origin,
                                   LoadedElfImage& out,
@@ -125,10 +147,13 @@ public:
                                   bool fromSelfContainer = false,
                                   uint64_t containerSizeBytes = 0);
 
-    // SELF containers: parsed by the real extractor (loader/self_extract.cpp).
-    // Unencrypted/fake-signed dumps load their inner ELF for real; segments
-    // that are ENCRYPTED are counted and refused by name — we do not have
-    // Sony keys and will not pretend otherwise.
+    /**
+     * Loads a SELF container (extracts and loads inner ELF).
+     * Unencrypted/fake-signed containers are loaded; encrypted segments are refused.
+     * @param filePath Filesystem path to the SELF container
+     * @param out Output parameter receiving loaded image metadata
+     * @return true if extraction and load succeeded, false otherwise
+     */
     static bool LoadSelf(const std::string& filePath, LoadedElfImage& out);
 };
 

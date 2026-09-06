@@ -306,3 +306,52 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeGetDriverManagerSummary(
     return env->NewStringUTF(
         "driver manager: unavailable on UI-smoke ABI");
 }
+
+// ---------------------------------------------------------------------------
+// Symbols that were MISSING from this stub while FexCoreWrapper.java declared
+// them. Loading the class on an x86_64 device resolved every native method
+// eagerly, so the five gaps below turned into UnsatisfiedLinkError at the
+// first UI action that touched them -- including the settings screen, which
+// calls nativeRunFoundationSelfTestInProcess().
+//
+// A CI step now diffs the exported Java_* symbols of both ABIs, so a future
+// addition to the Java class cannot silently reopen this hole.
+// ---------------------------------------------------------------------------
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadExecutable(
+        JNIEnv*, jobject, jstring) {
+    STUB_LOG("nativeLoadExecutable: guest engine unavailable on UI-smoke ABI");
+    return JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeLoadExecutableIsolated(
+        JNIEnv* env, jobject, jstring) {
+    return env->NewStringUTF(
+        "LOAD FAILED: x86_64 UI-smoke ABI has no guest engine "
+        "(the FEXCore JIT targets x86-64 -> ARM64 and ships in arm64-v8a)");
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeRunExecutionProbe(
+        JNIEnv* env, jobject, jstring, jint) {
+    return env->NewStringUTF(
+        "EXEC FAILED: x86_64 UI-smoke ABI has no guest engine");
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeRunFoundationSelfTestInProcess(
+        JNIEnv* env, jobject) {
+    return env->NewStringUTF(
+        "1. Memory window      SKIPPED (no guest engine on this ABI)\n"
+        "2. Vulkan runtime     see nativeGetVulkanSummary\n"
+        "VERDICT: FAIL - x86_64 UI-smoke ABI cannot run the foundation suite");
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeVerifyDriverSlot(
+        JNIEnv* env, jobject, jint) {
+    return env->NewStringUTF(
+        "driver manager: unavailable on UI-smoke ABI");
+}

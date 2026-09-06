@@ -4,10 +4,11 @@
 #include <cstdint>
 #include <cstddef>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 #include <mutex>
-#include <unordered_map>
+#include <atomic>
 
 namespace PX5 {
 
@@ -70,86 +71,246 @@ namespace MemoryFlags {
 // ---------------------------------------------------------------------------
 class MemoryManager {
 public:
+    /**
+     * Returns the singleton memory manager instance.
+     * @return Reference to the singleton MemoryManager
+     */
     static MemoryManager& GetInstance();
 
+    /**
+     * Reserves the guest memory window at a suitable guest VA anchor.
+     * @param totalMemoryMB Total memory window size in megabytes (default 4096)
+     * @return true if window reservation succeeded, false otherwise
+     */
     bool Initialize(size_t totalMemoryMB = 4096);
+
+    /**
+     * Releases the memory window and clears all allocations.
+     */
     void Shutdown();
 
-    // Returns guest VA (== vaddr on success, 0 on failure).
+    /**
+     * Maps memory at the specified guest virtual address with given protections.
+     * MAP_FIXED-style: pages of existing mappings inside [vaddr, vaddr+size)
+     * leave their old records (split head/tail keep the old flags); the byte
+     * accounting is adjusted by exactly the replaced size.
+     *
+     * @param vaddr Guest virtual address
+     * @param size Region size in bytes
+     * @param flags Protection flags (PAGE_READ | PAGE_WRITE | PAGE_EXEC)
+     * @param tag Optional debug tag for logging
+     * @return Guest VA on success, 0 on failure
+     */
     uint64_t MapMemory(uint64_t vaddr, size_t size, uint32_t flags,
                        const std::string& tag = "");
+
+    /**
+     * Creates a shared memory object (memfd or ASharedMemory).
+     * @param name Optional name for the shared memory
+     * @param size Size in bytes
+     * @return File descriptor on success, -1 on failure
+     */
     int  CreateSharedMemory(const char* name, size_t size);
+
+    /**
+     * Unmaps guest memory, resealing it as PROT_NONE.
+     * @param vaddr Guest virtual address
+     * @param size Region size in bytes
+     * @return true if unmap succeeded, false otherwise
+     */
     bool UnmapMemory(uint64_t vaddr, size_t size);
+
+    /**
+     * Changes protection flags for a mapped guest memory region.
+     * @param vaddr Guest virtual address
+     * @param size Region size in bytes
+     * @param flags New protection flags
+     * @return true if protection change succeeded, false otherwise
+     */
     bool ProtectMemory(uint64_t vaddr, size_t size, uint32_t flags);
 
+    /**
+     * Reads guest memory into a host buffer.
+     * @param vaddr Guest virtual address
+     * @param outBuffer Host buffer to receive data
+     * @param size Bytes to read
+     * @return true if read succeeded, false otherwise
+     */
     bool ReadGuestMemory(uint64_t vaddr, void* outBuffer, size_t size);
+
+    /**
+     * Writes host buffer contents into guest memory.
+     * @param vaddr Guest virtual address
+     * @param inBuffer Host buffer containing data
+     * @param size Bytes to write
+     * @return true if write succeeded, false otherwise
+     */
     bool WriteGuestMemory(uint64_t vaddr, const void* inBuffer, size_t size);
 
-    // NULL when vaddr is outside the managed window or not mapped.
+    /**
+     * Converts guest virtual address to host pointer (NULL if unmapped).
+     * @param vaddr Guest virtual address
+     * @return Host pointer, or nullptr if vaddr is outside window or unmapped
+     */
     void* GetHostPointer(uint64_t vaddr);
+
+    /**
+     * Checks whether a guest address range is validly mapped.
+     * @param vaddr Guest virtual address
+     * @param size Region size in bytes
+     * @return true if the entire range is mapped, false otherwise
+     */
     bool  IsValidAddress(uint64_t vaddr, size_t size) const;
 
-    // Program break for brk(2) emulation.
+    /**
+     * Sets the initial program break base address (called by loader).
+     * @param base Initial program break address
+     */
     void     SetProgramBreak(uint64_t base);
-    uint64_t GrowProgramBreak(intptr_t increment);   // returns new break, 0=fail
 
+    /**
+     * Implements brk(2) syscall: adjusts program break, backing new memory with RW pages.
+     * requested==0 queries current break without changing it.
+     * A shrink releases the brk-backed pages fully above the new break
+     * (records split at the new break; foreign mappings above it are kept).
+     *
+     * @param requested New break address (0 to query)
+     * @param outBreak Output parameter receiving the resulting break address
+     * @return true if request succeeded, false if it cannot be honoured
+     */
+    bool SetBrk(uint64_t requested, uint64_t& outBreak);
+
+    /**
+     * Returns total allocated memory in megabytes.
+     * @return Allocated bytes divided by 1024*1024
+     */
     size_t GetTotalAllocatedMB() const;
 
-    // Real per-mapping answer for FEXCore's QueryGuestExecutableRange.
-    // exec=false in the result is how the host layer says "not executable"
-    // (the decoder then refuses to translate); a range is reported only when
-    // a MAPPED block actually contains the address.
+    /**
+     * Executable mapping information structure for FEXCore decoder queries.
+     */
     struct ExecMapInfo {
-        uint64_t base;
-        size_t   size;
-        bool     exec;
-        bool     writable;
+        uint64_t base;      ///< Base address of the executable region
+        size_t   size;      ///< Size of the region in bytes
+        bool     exec;      ///< Whether the region is executable
+        bool     writable;  ///< Whether the region is writable
     };
+
+    /**
+     * Finds the executable mapping containing the given address.
+     * Returns false (exec=false) if address is not in an executable region.
+     * Signal-safe: reads an atomically published snapshot instead of taking
+     * m_mutex, because the SMC fault handler reaches this call from signal
+     * context (see fexcore_integration.cpp FaultSafeLock notes).
+     * @param vaddr Guest virtual address to query
+     * @param out Output parameter receiving mapping info
+     * @return true if vaddr is in a mapped executable region, false otherwise
+     */
     bool FindExecutableMapping(uint64_t vaddr, ExecMapInfo& out) const;
 
-    // Registration for the code-invalidation notify (see contract above).
-    // Null callback = no consumer yet (foundation tests before FEX init).
+    /**
+     * Code invalidation notification callback type.
+     */
     using CodeInvalidationNotify = std::function<void(uint64_t base, size_t size)>;
+
+    /**
+     * Registers a callback for code invalidation notifications.
+     * Null callback = no consumer yet (e.g., before FEXCore init).
+     * @param fn Callback invoked when code memory is modified
+     */
     void SetCodeInvalidationNotify(CodeInvalidationNotify fn);
 
-    // Human-readable window info for evidence UI (hex numbers pre-formatted).
+    /**
+     * Returns human-readable window information string for diagnostics.
+     * @return Formatted string with guest VA range, size, mapped bytes, block count
+     */
     std::string GetWindowInfoString() const;
 
-    // Guest window anchor (0 before Initialize succeeds). Read-only fact,
-    // safe from any thread after Initialize; used by the loader to base
-    // DYN-style images and by the syscall bridge for low-VA mirroring.
+    /**
+     * Returns the guest window base address (0 before Initialize succeeds).
+     * @return Guest virtual address anchor
+     */
     uint64_t GetGuestBase() const;
-    uint64_t GetGuestEnd() const;   // exclusive
 
-    // v1.32 guest ABI policy: PS5-style guests issue MAP_FIXED mmaps at
-    // low addresses (the vc32 fixture asks 0x49000000 and demands the
-    // bridge return 0x149000000 — the window answer). Any fixed address
-    // below the window anchor is mirrored 4 GiB up into the window:
-    //     translated = va + 0x100000000
-    // Returns true and overwrites `va` when the translation applies and
-    // the result lands inside the window; false leaves `va` untouched
-    // (the caller then sees the manager's honest window rejection).
+    /**
+     * Returns the exclusive end of the guest window.
+     * @return Guest virtual address marking the end (exclusive)
+     */
+    uint64_t GetGuestEnd() const;
+
+    /**
+     * Translates low fixed-address mappings into the guest window (PS5 ABI policy).
+     * Addresses below window anchor are relocated +4 GiB into the window.
+     * @param va Input/output parameter: guest address to translate
+     * @return true if translation applied and result is in window, false otherwise
+     */
     bool TranslateLowFixedVa(uint64_t& va) const;
 
 private:
     MemoryManager() = default;
     ~MemoryManager() = default;
 
-    struct WindowCandidate { uint64_t base; size_t size; };
+    /**
+     * Window candidate structure for guest VA anchor selection.
+     */
+    struct WindowCandidate { uint64_t base; };
+
+    /**
+     * Returns list of guest VA anchor candidates (tried in order).
+     * @return Vector of window candidates to attempt
+     */
     static std::vector<WindowCandidate> WindowCandidates();
+
+    /**
+     * Internal map implementation (caller must hold m_mutex).
+     * @param vaddr Guest virtual address
+     * @param size Region size in bytes
+     * @param flags Protection flags
+     * @param tag Debug tag
+     * @param invalidatedOut Output vector for invalidated exec ranges
+     * @return true if map succeeded, false otherwise
+     */
     bool MapMemoryImpl_Unlocked(uint64_t vaddr, size_t size, uint32_t flags,
                                 const std::string& tag,
                                 std::vector<std::pair<uint64_t, size_t>>* invalidatedOut);
 
+    /**
+     * Memory block tracking structure.
+     */
     struct MemoryBlock { uint64_t va; size_t size; uint32_t flags; std::string tag; };
-    std::unordered_map<uint64_t, MemoryBlock> m_allocations;
 
-    // mutable: logically-const queries (FindExecutableMapping) still lock.
+    /// ORDERED by base VA for range lookups (upper_bound), not key lookups.
+    /// Invariant: records never overlap; MapMemory/ProtectMemory split
+    /// records at range boundaries (SplitBlocksAt_Unlocked) to preserve it.
+    std::map<uint64_t, MemoryBlock> m_allocations;
+
+    /**
+     * Finds the memory block containing the given address (caller holds m_mutex).
+     * @param vaddr Guest virtual address to query
+     * @return Pointer to block containing vaddr, or nullptr if unmapped
+     */
+    const MemoryBlock* FindBlock_Unlocked(uint64_t vaddr) const;
+
+    /**
+     * Splits every record straddling vaLo or vaHi so no record crosses the
+     * range bounds; the clamped middle piece keeps the old flags and its key
+     * is returned (with keys of records already fully inside). Byte
+     * accounting is neutral. (Caller holds m_mutex.)
+     * @param vaLo Low boundary (inclusive)
+     * @param vaHi High boundary (exclusive)
+     * @return Keys of records fully inside [vaLo, vaHi)
+     */
+    std::vector<uint64_t> SplitBlocksAt_Unlocked(uint64_t vaLo, uint64_t vaHi);
+
+    /// mutable: logically-const queries (IsValidAddress) still lock.
+    /// FindExecutableMapping deliberately does NOT: fault handlers reach it,
+    /// and a handler taking this mutex could self-deadlock on a thread that
+    /// faulted while holding it.
     mutable std::mutex m_mutex;
     bool     m_initialized = false;
-    uint64_t m_guestBase   = 0;      // numeric guest anchor
+    uint64_t m_guestBase   = 0;      ///< numeric guest anchor
     uint64_t m_windowSize  = 0;
-    void*    m_hostWindow  = nullptr; // host pointer of m_guestBase
+    void*    m_hostWindow  = nullptr; ///< host pointer of m_guestBase
 
     uint64_t m_programBreak = 0;
     uint64_t m_programBreakLimit = 0;
@@ -157,10 +318,43 @@ private:
     size_t m_allocatedBytes = 0;
     CodeInvalidationNotify m_codeInvalidationNotify;
 
-    // Snapshot helper: collects every mapped EXEC range overlapping
-    // [vaLo, vaHi). Caller holds m_mutex.
+    /**
+     * Collects mapped EXEC ranges overlapping [vaLo, vaHi) (caller holds m_mutex).
+     * @param vaLo Low end of range (inclusive)
+     * @param vaHi High end of range (exclusive)
+     * @param out Output vector receiving overlapping exec ranges
+     */
     void CollectExecOverlaps_Unlocked(uint64_t vaLo, uint64_t vaHi,
                                       std::vector<std::pair<uint64_t, size_t>>& out) const;
+
+    // ---- Signal-safe executable-range snapshot ----------------------------
+    //
+    // FindExecutableMapping is reachable from the SMC fault handler, where
+    // taking m_mutex can self-deadlock (a fault interrupting a thread that
+    // holds it). Instead the query reads this snapshot: writers rebuild it
+    // under m_mutex after every exec-relevant mutation and publish through a
+    // seqlock (odd generation = mid-rebuild); readers retry until the
+    // generation is stable. All fields are atomic, so the read has no data
+    // race; the seqlock pass only guards generation consistency.
+    //
+    // The rebuild masks SIGSEGV/SIGBUS (same discipline as FaultSafeLock in
+    // fexcore_integration.cpp): a handler on the rebuilding thread can then
+    // never spin on a generation its own interrupted thread left odd.
+    struct ExecRange {
+        std::atomic<uint64_t> base{0};
+        std::atomic<uint64_t> end{0};
+        std::atomic<uint32_t> writable{0};
+    };
+    static constexpr size_t kExecSnapshotCap = 128;
+    ExecRange              m_execRanges[kExecSnapshotCap];
+    std::atomic<uint32_t>  m_execRangeCount{0};
+    std::atomic<uint64_t>  m_execSeq{0};          ///< seqlock generation
+    std::atomic<bool>      m_execTruncated{false};
+
+    /**
+     * Rebuilds and publishes the executable-range snapshot (caller holds m_mutex).
+     */
+    void RebuildExecSnapshot_Unlocked();
 };
 
 } // namespace PX5

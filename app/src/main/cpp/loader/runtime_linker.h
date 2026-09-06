@@ -19,6 +19,29 @@
 //   (0..447) and outside the x32 range (0x40000000..0x400003FF), so no
 //   real guest syscall can ever collide with it.
 //
+// THE IMPORT TRAP (v1.45, corrected v1.46)
+//   The vc45 session crashed ~1 s after dispatch and the record blamed
+//   "the null-import wall: PLT#0 -> GOT slot stays 0 -> jmp [0]". The
+//   vc46 device log proved both halves wrong: (a) the crash repeats
+//   BYTE-IDENTICAL with all 815 trap slots installed and ZERO trap hits
+//   and ZERO syscalls — execution never reached any PLT; (b) the file's
+//   first JUMP_SLOT slot (0x4943E0) is never 0 anyway — it holds the
+//   lazy-binding back-pointer 0x2e54c6 (PLT+6, link-time VA, unmapped
+//   once the image is based at 0x140000000). The REAL wall was the
+//   missing ORBIS entry ABI: FEXCore::CreateThread zeroes every GPR, so
+//   _start's first memory access `mov r14d,[rdi]` loaded through RDI=0
+//   (host LDAR [0], si_addr=0) before any call. v1.46 fixes that at
+//   dispatch (fexcore_integration.cpp: RDI = initial SP = argc block).
+//   The trap stays exactly as designed: every UNDEF STRONG import slot
+//   gets a 16-byte guest stub
+//   (mov eax,kPx5ImportTrapSyscall; mov edi,<import index>; syscall; ret)
+//   written by the loader into a dedicated RWX-then-RX guest region.
+//   A call now lands in GuestSyscalls::Dispatch, names the missing import
+//   (dynstr symbol, verbatim — no invented NID mapping), and returns 0 so
+//   the guest keeps running and the next session collects MORE misses
+//   instead of one mystery crash. UNDEF WEAK slots stay 0 (ELF semantics:
+//   weak undefined resolves to null; crt code tests those for NULL).
+//
 // HONEST BOUNDARIES
 //   * The gate executes HLE host functions ONLY. A NID registered as a
 //     guest export is NOT callable through the gate (the host bridge
@@ -45,74 +68,200 @@
 
 namespace PX5 {
 
-// Reserved guest syscall number for the NID gate (see header comment).
-constexpr uint32_t kPx5NidGateSyscall = 0x5C500001u;
+// Reserved guest syscall numbers for the NID gate and the import trap
+// (see header comment; both deliberately outside every real x86-64 range).
+constexpr uint32_t kPx5NidGateSyscall   = 0x5C500001u;
+constexpr uint32_t kPx5ImportTrapSyscall = 0x5C500002u;
 
-// Bionic-native HLE export: receives the guest arguments passed through
-// the gate (a1..a5 land at args[0..4]; argc <= 5 for now — the gate ABI
-// carries five HLE arguments beside the NID) and returns the guest rax.
+/**
+ * Bionic-native HLE export function type.
+ * Receives guest arguments passed through the NID gate (args[0..4] = a1..a5).
+ * @param args Array of guest arguments
+ * @param argc Argument count (currently <= 5)
+ * @return Value to place in guest RAX
+ */
 using HleHostFn = std::function<int64_t(const uint64_t* args, size_t argc)>;
 
+/**
+ * Result of a NID gate dispatch.
+ */
 struct GateResult {
-    bool        ok = false;
-    int64_t     value = 0;   // guest-visible return when ok
-    std::string error;       // named reason when !ok
+    bool        ok = false;      ///< Whether dispatch succeeded
+    int64_t     value = 0;       ///< Guest-visible return when ok
+    std::string error;           ///< Named reason when !ok
 };
 
+/**
+ * NID gate dispatch statistics.
+ */
 struct DispatchStats {
-    uint64_t gateCalls   = 0;  // gate syscalls seen
-    uint64_t resolvedHle = 0;  // dispatched into a bionic HLE function
-    uint64_t guestRouted = 0;  // NID exists but is a guest export (not gate-callable)
-    uint64_t unresolved  = 0;  // NID not registered at all (repeat hits included)
-    uint64_t unresolvedUnique = 0;  // DISTINCT missing NIDs (Vita3K's
-                                    // missing_nids set metric — the
-                                    // per-game HLE gap size)
+    uint64_t gateCalls   = 0;         ///< Gate syscalls seen
+    uint64_t resolvedHle = 0;         ///< Dispatched into bionic HLE function
+    uint64_t guestRouted = 0;         ///< NID exists but is guest export (not gate-callable)
+    uint64_t unresolved  = 0;         ///< NID not registered (repeat hits included)
+    uint64_t unresolvedUnique = 0;    ///< DISTINCT missing NIDs (per-game HLE gap size)
 };
 
+/**
+ * One unresolved strong import redirected into a trap stub (v1.45).
+ * Index in RuntimeLinker's trap table == stub index: the guest stub at
+ * stubVa encodes its own index, and DispatchImportTrap maps it back here.
+ */
+struct ImportTrapEntry {
+    uint64_t    stubVa = 0;      ///< Guest VA of the 16-byte trap stub
+    uint64_t    slotVa = 0;      ///< Guest VA of the GOT/data slot redirected
+    std::string name;            ///< dynstr symbol name, verbatim (may be
+                                 ///< empty when the string table is missing)
+    bool        isPlt = false;   ///< true = DT_JMPREL/JUMP_SLOT, false = RELA
+    uint32_t    symIndex = 0;    ///< dynsym index of the UNDEF symbol
+    bool        slotWritten = false;  ///< false = slot could not be written
+                                     ///< (old content stays, stub never runs)
+};
+
+/**
+ * Loaded module record for addressing and evidence.
+ */
 struct ModuleRecord {
-    std::string name;
-    uint64_t    base    = 0;
-    uint64_t    highVa  = 0;
-    uint64_t    entry   = 0;
-    bool        isSelf  = false;
-    size_t      segmentCount = 0;
+    std::string name;                 ///< Module name (e.g., "eboot.bin")
+    uint64_t    base    = 0;          ///< Base virtual address
+    uint64_t    highVa  = 0;          ///< High virtual address (exclusive)
+    uint64_t    entry   = 0;          ///< Entry point address
+    bool        isSelf  = false;      ///< Whether module came from SELF container
+    size_t      segmentCount = 0;     ///< Number of loaded segments
 };
 
+/**
+ * Runtime linker and NID gate for PS5-style imports bridging to bionic HLE.
+ */
 class RuntimeLinker {
 public:
+    /**
+     * Returns the singleton RuntimeLinker instance.
+     * @return Reference to singleton
+     */
     static RuntimeLinker& GetInstance();
 
-    // Clears modules/exports/stats (per-run teardown, like ResetRun).
+    /**
+     * Clears modules/exports/stats (per-run teardown).
+     */
     void Reset();
 
-    // Records a loaded image in the module registry (evidence + addressing).
+    /**
+     * Records a loaded image in the module registry (evidence + addressing).
+     * @param name Module name
+     * @param base Base virtual address
+     * @param highVa High virtual address (exclusive)
+     * @param entry Entry point address
+     * @param isSelf Whether module came from SELF container
+     * @param segmentCount Number of loaded segments
+     * @return true if registration succeeded, false otherwise
+     */
     bool RegisterModule(const std::string& name, uint64_t base,
                         uint64_t highVa, uint64_t entry, bool isSelf,
                         size_t segmentCount);
 
-    // The bionic-native side of the bridge. Duplicate NIDs fail by name.
+    /**
+     * Registers a bionic-native HLE export callable through the NID gate.
+     * Duplicate NIDs fail by name.
+     * @param library Library name (e.g., "libkernel")
+     * @param nid NID (Name ID)
+     * @param name Symbol name (e.g., "sceKernelOpen")
+     * @param fn Host function to invoke
+     * @return true if registration succeeded; false if fn is null (invalid
+     *         function) OR the NID is already registered (duplicate) —
+     *         callers needing to distinguish the two must check fn first
+     */
     bool RegisterHleExport(const std::string& library, uint64_t nid,
                            const std::string& name, HleHostFn fn);
 
-    // A NID exported by loaded guest code (direct guest-to-guest calls).
-    // Registered for resolution/evidence; NOT gate-callable (see header).
+    /**
+     * Registers a NID exported by loaded guest code (for guest-to-guest calls).
+     * NOT gate-callable (HLE bridge cannot synthesize guest call frame yet).
+     * @param nid NID (Name ID)
+     * @param guestAddr Guest virtual address of export
+     * @param name Symbol name
+     * @return true if registration succeeded, false otherwise
+     */
     bool RegisterGuestExport(uint64_t nid, uint64_t guestAddr,
                              const std::string& name);
 
-    // Gate entry used by GuestSyscalls::Dispatch. Does not hold the
-    // registry mutex while the HLE function runs (re-entry allowed).
+    /**
+     * Dispatches NID gate call from guest (used by GuestSyscalls::Dispatch).
+     * Does not hold mutex while HLE function runs (re-entry allowed).
+     * @param nid NID to dispatch
+     * @param args Guest argument array
+     * @param argc Argument count
+     * @return GateResult with success/value or failure/error
+     */
     GateResult DispatchNid(uint64_t nid, const uint64_t* args, size_t argc);
 
+    /**
+     * Returns dispatch statistics.
+     * @return Reference to DispatchStats
+     */
     const DispatchStats& Stats();
-    std::string GetSummaryString();      // evidence line for reports
-    // v1.42 — the distinct missing-NID list with per-NID hit counts
-    // (bounded). This is the REAL per-game compatibility gap: what the
-    // guest actually asked for that no HLE provides. Counted like
-    // Vita3K's EmuEnvState::missing_nids (modules/module_parent.cpp),
-    // exposed so a device session names the next work item.
+
+    /**
+     * Returns human-readable summary for evidence reports.
+     * @return Summary string
+     */
+    std::string GetSummaryString();
+
+    /**
+     * Returns distinct missing-NID list with per-NID hit counts.
+     * This is the real per-game compatibility gap: what guest asked for that no HLE provides.
+     * @return Formatted missing NIDs summary
+     */
     std::string GetMissingNidsSummary();
+
+    /**
+     * Returns count of distinct missing NIDs.
+     * @return Missing NID count
+     */
     size_t MissingNidCount();
+
+    /**
+     * Installs the import-trap table built by the loader after relocation
+     * processing (v1.45). Replaces any previous table (replace-on-map load
+     * model: one image owns the registry at a time).
+     * @param regionBase Guest VA of the trap-stub region start
+     * @param regionEnd Guest VA one past the trap-stub region
+     * @param entries The trap entries, index-aligned with the stub layout
+     */
+    void SetImportTraps(uint64_t regionBase, uint64_t regionEnd,
+                        std::vector<ImportTrapEntry> entries);
+
+    /**
+     * Handles one import-trap syscall from guest (stub-encoded index in a0).
+     * First hit per index is logged and ledgered; repeats are counted only.
+     * Always returns 0 — the guest keeps running past the missing import.
+     * @param importIndex Stub-encoded import index
+     * @return Value for guest RAX (always 0)
+     */
+    uint64_t DispatchImportTrap(uint64_t importIndex);
+
+    /**
+     * Returns the import-trap ledger summary (counts + hottest imports).
+     * @return Formatted summary string
+     */
+    std::string GetImportTrapSummary();
+
+    /**
+     * Returns count of installed import traps.
+     * @return Trap entry count
+     */
+    size_t ImportTrapCount();
+
+    /**
+     * Returns count of registered modules.
+     * @return Module count
+     */
     size_t ModuleCount();
+
+    /**
+     * Returns count of registered exports (HLE + guest).
+     * @return Export count
+     */
     size_t ExportCount();
 
 private:
@@ -130,22 +279,43 @@ private:
     std::unordered_map<uint64_t, uint32_t> m_missingNids;  // nid -> hits
                                                            // (bounded)
     DispatchStats m_stats;
+
+    // v1.45 — import traps (see header comment). m_trapHits is index-
+    // aligned with m_importTraps; the region bounds let crash reports
+    // and summaries attribute addresses to stubs.
+    std::vector<ImportTrapEntry> m_importTraps;
+    std::vector<uint32_t>        m_trapHits;
+    uint64_t m_trapRegionBase = 0;
+    uint64_t m_trapRegionEnd  = 0;
+    uint64_t m_trapTotalHits  = 0;
+    uint64_t m_trapDistinct   = 0;   ///< distinct imports hit at least once
+    uint64_t m_trapLedgered   = 0;   ///< distinct misses written to the ledger
+    uint64_t m_trapOob        = 0;   ///< out-of-range indices (corrupt guest)
 };
 
 // ---------------------------------------------------------------------------
 // Real ELF64 PT_DYNAMIC reader (bounded; named errors; no guesses).
 // ---------------------------------------------------------------------------
+
+/**
+ * Parsed ELF64 dynamic section information.
+ */
 struct DynamicInfo {
-    bool        ok = false;
-    std::string error;                       // named reason when !ok
-    std::string soname;
-    std::vector<std::string> needed;         // DT_NEEDED strings
-    size_t      dynEntries = 0;              // entries before DT_NULL
-    // Every dynamic tag in the SCE OS-specific range, verbatim.
-    std::vector<std::pair<uint64_t, uint64_t>> sceTags;
-    std::string summary;                     // one evidence line
+    bool        ok = false;                  ///< Whether parse succeeded
+    std::string error;                       ///< Named reason when !ok
+    std::string soname;                      ///< DT_SONAME string
+    std::vector<std::string> needed;         ///< DT_NEEDED strings
+    size_t      dynEntries = 0;              ///< Entries before DT_NULL
+    std::vector<std::pair<uint64_t, uint64_t>> sceTags;  ///< SCE OS-specific tags (0x61000000 range)
+    std::string summary;                     ///< One evidence line
 };
 
+/**
+ * Parses PT_DYNAMIC from an ELF64 image in memory.
+ * @param data Pointer to ELF image data
+ * @param size Size of ELF image in bytes
+ * @return DynamicInfo with parse results
+ */
 DynamicInfo ParseDynamicFromElfImage(const uint8_t* data, size_t size);
 
 } // namespace PX5

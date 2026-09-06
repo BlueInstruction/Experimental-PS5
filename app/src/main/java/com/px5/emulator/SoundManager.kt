@@ -6,14 +6,20 @@ import android.media.MediaPlayer
 import android.media.SoundPool
 import android.util.Log
 
+/**
+ * Sound manager for PS5-style UI audio (navigation, activation, background music).
+ */
 class SoundManager private constructor(private val context: Context) {
 
     private var soundPool: SoundPool? = null
     private var navSoundId: Int = 0
     private var actSoundId: Int = 0
     private var bgPlayer: MediaPlayer? = null
-    
+
+    /** Whether sound effects are enabled. */
     var isSoundEnabled: Boolean = true
+
+    /** Whether background music is enabled (setter starts/stops music). */
     var isBgMusicEnabled: Boolean = true
         set(value) {
             field = value

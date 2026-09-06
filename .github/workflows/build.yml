@@ -12,8 +12,8 @@ jobs:
     name: Build Release APK
     runs-on: ubuntu-latest
     env:
-      PX5_FEXCORE_ROOT: ${{ github.workspace }}/../deps/FEX
-      PX5_ADRENOTOOLS_ROOT: ${{ github.workspace }}/../deps/adrenotools
+      PX5_FEXCORE_ROOT: ${{ github.workspace }}/.deps/FEX
+      PX5_ADRENOTOOLS_ROOT: ${{ github.workspace }}/.deps/adrenotools
 
     steps:
     - name: Checkout
@@ -41,7 +41,14 @@ jobs:
     # denied before Gradle even ran). Re-assert the modes here so the
     # build is immune to that class of damage.
     - name: Re-assert executable bits
-      run: chmod +x gradlew tools/fetch_fexcore.sh tools/fetch_adrenotools.sh
+      run: chmod +x gradlew tools/fetch_fexcore.sh tools/fetch_adrenotools.sh tools/hosttests/run.sh
+
+    # Runs BEFORE the APK build, and deliberately has no toolchain
+    # dependency, so a logic regression is reported in seconds instead of
+    # surviving a green "it compiled" build. Every other workflow in this
+    # repo only compiles; this one executes assertions.
+    - name: Host regression tests (memory ranges + JNI symbol parity)
+      run: ./tools/hosttests/run.sh
 
     - name: Fetch pinned FEXCore sources
       run: ./tools/fetch_fexcore.sh

@@ -217,11 +217,16 @@ ExtractResult ExtractInnerElf(const uint8_t* data, size_t size) {
     }
     // shadPS4 locates the tables at elf_header_pos + e_phoff/e_shoff —
     // the inner ELF's own offsets, relative to where its header sits.
+    // e_phoff is untrusted 64-bit input: innerElfPos + phoff is checked by
+    // SUBTRACTION, never by an addition that can wrap and pass the bounds
+    // test while data+phdrPos+i*stride reads out of bounds.
     const size_t phStride = ehdr.phentsize;
-    const size_t phdrPos = innerElfPos + ehdr.phoff;
-    if (phdrPos + static_cast<size_t>(ehdr.phnum) * phStride > size) {
+    if (ehdr.phoff > static_cast<uint64_t>(size - innerElfPos) ||
+        static_cast<uint64_t>(ehdr.phnum) * phStride >
+            static_cast<uint64_t>(size) - innerElfPos - ehdr.phoff) {
         return bail("inner phdr table out of bounds");
     }
+    const size_t phdrPos = innerElfPos + static_cast<size_t>(ehdr.phoff);
     res.innerPhdrs = ehdr.phnum;
     {
         char b[96];

@@ -371,7 +371,10 @@ void* GpuDriverManager::OpenHostVulkanLibrary(int dlopenMode) {
 
 #ifdef PX5_HAVE_ADRENOTOOLS
     const auto& slot = m_slots[m_active - 1];
-    const std::string& soname =
+    // Own the storage: a const& bound to a conditional-expression temporary
+    // is valid C++ (lifetime-extended) but reads as dangling to static
+    // lifetime analysis, so keep the value in a named local.
+    const std::string soname =
         slot.soname.empty() ? std::string(kCustomDriverSoname) : slot.soname;
     // ROOT CAUSE (2026-08-29 device logs): adrenotools concatenates
     // customDriverDir + customDriverName WITHOUT a separator (pinned fork
@@ -650,6 +653,15 @@ bool GpuDriverManager::PreloadActiveDriverForVerification() {
                      nsErr + ")" +
 #endif
                      "; final proof at first vkCreateInstance";
+    // Conditional arguments live in locals: a preprocessor directive inside a
+    // macro argument list is undefined behavior (cppcheck refuses to expand it).
+#ifdef PX5_HAVE_ADRENOTOOLS
+    const char* sharedNsTag = " | shared-ns: ";
+    const char* sharedNsErr = nsErr.c_str();
+#else
+    const char* sharedNsTag = "";
+    const char* sharedNsErr = "";
+#endif
     PX5_LOGW(LogCategory::GPU,
              "Driver preload via plain dlopen unavailable for '%s' "
              "(INCONCLUSIVE, not a failure verdict — the shared-namespace "
@@ -658,12 +670,7 @@ bool GpuDriverManager::PreloadActiveDriverForVerification() {
              "the designed load is the adrenotools hook at first "
              "vkCreateInstance, proven by the maps check): plain: %s%s%s",
              slot.label.c_str(), plainErr.c_str(),
-#ifdef PX5_HAVE_ADRENOTOOLS
-             " | shared-ns: ", nsErr.c_str()
-#else
-             "", ""
-#endif
-    );
+             sharedNsTag, sharedNsErr);
     return false;
 #endif
 }
