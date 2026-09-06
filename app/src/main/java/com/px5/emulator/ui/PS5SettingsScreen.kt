@@ -63,6 +63,7 @@ private val CATEGORIES = listOf(
 fun PS5SettingsScreen(
     soundManager: SoundManager,
     fexCoreStatus: String,
+    driverStateEpoch: Int = 0,
     fexCoreWrapper: FexCoreWrapper? = null,
     onImportFileClick: () -> Unit = {},
     onImportFolderClick: () -> Unit = {},
@@ -128,6 +129,7 @@ fun PS5SettingsScreen(
             category = selectedCategory,
             soundManager = soundManager,
             fexCoreStatus = fexCoreStatus,
+            driverStateEpoch = driverStateEpoch,
             fexCoreWrapper = fexCoreWrapper,
             onImportFileClick = onImportFileClick,
             onImportFolderClick = onImportFolderClick,
@@ -144,6 +146,7 @@ private fun SettingsPanel(
     category: Int,
     soundManager: SoundManager,
     fexCoreStatus: String,
+    driverStateEpoch: Int,
     fexCoreWrapper: FexCoreWrapper?,
     onImportFileClick: () -> Unit,
     onImportFolderClick: () -> Unit,
@@ -162,7 +165,7 @@ private fun SettingsPanel(
             1 -> generalSection(soundManager,
                     onImportFileClick, onImportFolderClick, onScanGamesClick)
             2 -> graphicsSection(fexCoreWrapper, soundManager,
-                    onOpenTurnipManagerClick)
+                    onOpenTurnipManagerClick, driverStateEpoch)
             3 -> inputSection()
             4 -> audioSection(soundManager)
             5 -> debugSection(fexCoreStatus, fexCoreWrapper, soundManager,
@@ -684,7 +687,8 @@ private fun LazyListScope.debugSection(
 private fun LazyListScope.graphicsSection(
     fexCoreWrapper: FexCoreWrapper?,
     soundManager: SoundManager,
-    onOpenTurnipManagerClick: () -> Unit
+    onOpenTurnipManagerClick: () -> Unit,
+    driverStateEpoch: Int
 ) {
     item {
         val scale = Px5Settings.resScalePct.collectAsState()
@@ -788,7 +792,11 @@ private fun LazyListScope.graphicsSection(
             driverSummary = fexCoreWrapper?.nativeGetDriverManagerSummary()
                 ?: "engine library unavailable"
         }
-        LaunchedEffect(Unit) { pullDriverSummary() }
+        // v1.47: keyed on driverStateEpoch — the manager sheet is an
+        // in-activity overlay (no ON_RESUME on close), so this is the only
+        // path that makes the line follow sheet selects/imports/deletes.
+        // Epoch 0 keeps the first-composition pull.
+        LaunchedEffect(driverStateEpoch) { pullDriverSummary() }
         val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
         androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
             val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->

@@ -401,6 +401,15 @@ fun AppNavigation(
     val coroutineScope = rememberCoroutineScope()
 
     var showTurnipManagerSheet by remember { mutableStateOf(false) }
+    // v1.47: the manager sheet is an IN-ACTIVITY overlay — opening/closing
+    // it never pauses the activity, so the settings screen's ON_RESUME
+    // summary refresh never fires for sheet select/import/delete. The
+    // 2026-09-05 23:30 device session caught the result: the sheet answered
+    // "mode=1 slots=1 driverVerified=yes" while the settings line 13s later
+    // still showed the composition-time "mode=0 slots=0 not-run". Every
+    // driver-state change bumps this epoch; the settings Graphics tab
+    // re-pulls the engine summary whenever it moves.
+    var driverStateEpoch by remember { mutableStateOf(0) }
     var importStatus by remember { mutableStateOf<String?>(null) }
     var importBusy by remember { mutableStateOf(false) }
 
@@ -763,6 +772,7 @@ fun AppNavigation(
                 PS5SettingsScreen(
                     soundManager = soundManager,
                     fexCoreStatus = fexCoreStatus,
+                    driverStateEpoch = driverStateEpoch,
                     fexCoreWrapper = fexCoreWrapper,
                     onImportFileClick = {
                         importFileLauncher.launch(arrayOf("*/*"))
@@ -820,7 +830,11 @@ fun AppNavigation(
                     onImportCustomDriverClick = {
                         driverLauncher.launch(arrayOf("*/*"))
                     },
-                    onDismiss = { showTurnipManagerSheet = false }
+                    onStateChanged = { driverStateEpoch++ },
+                    onDismiss = {
+                        showTurnipManagerSheet = false
+                        driverStateEpoch++  // final sync even if no change event fired
+                    }
                 )
             }
         }
