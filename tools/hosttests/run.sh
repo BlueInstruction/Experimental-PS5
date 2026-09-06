@@ -66,6 +66,18 @@ echo "[hosttests] building pm4_stream_test (M5 gate)"
 echo "[hosttests] running pm4_stream_test (M5 gate)"
 "$OUT/pm4_stream_test"
 
+echo "[hosttests] building gpu_ir_test (M6 gate)"
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
+    -I"$SHIM" -I"$CPP" \
+    -o "$OUT/gpu_ir_test" \
+    "$ROOT/tools/hosttests/gpu_ir_test.cpp" \
+    "$CPP/gpu/ir/gpu_ir.cpp" \
+    "$CPP/gpu/gnm/pm4_decoder.cpp" \
+    "$CPP/gpu/gnm/gnm_state.cpp"
+
+echo "[hosttests] running gpu_ir_test (M6 gate)"
+"$OUT/gpu_ir_test"
+
 echo "[hosttests] running JNI symbol parity check"
 python3 "$ROOT/tools/check_jni_symbols.py"
 

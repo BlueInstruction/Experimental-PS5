@@ -8,7 +8,7 @@
 
 | Tier | Where | Proves | Examples |
 |---|---|---|---|
-| T1 host tests | `tools/hosttests/run.sh` (no device needed) | logic correctness, ABI parity, deterministic decode | `import_trap_test`, `memory_range_test`, JNI parity (45/45 symbols), pm4 stream test (M5) |
+| T1 host tests | `tools/hosttests/run.sh` (no device needed) | logic correctness, ABI parity, deterministic decode | `import_trap_test`, `memory_range_test`, JNI parity (45/45 symbols), pm4 stream test (M5), GPU IR lowering (M6) |
 | T2 device evidence | `px5_main.log` + event stream from a real run | behaviour on ARM64 hardware | driver preload via SHARED namespace, GPU proof PASS, crash reports with `pc=` |
 | T3 readback/pixel proof | offscreen render + readback | the render path produces specific bytes | M7 gate, M8 gate |
 
@@ -76,6 +76,7 @@ verification.
 | Guest memory ranges | `memory_range_test.cpp` | T1 | exists, PASS |
 | JNI symbol-name parity | source-level name check, 45 symbols × 2 ABIs (`tools/check_jni_symbols.py`) | T1 | exists, PASS — names only; signatures and built-library exports are NOT checked here |
 | PM4 stream decode | `pm4_stream_test.cpp` | T1 | exists, PASS (12/12 packets, 0 stream errors) |
+| GPU IR lowering | `gpu_ir_test.cpp` | T1 | exists, PASS (5/5 ops, 0 unexpected drops) |
 | CPU fixtures (9) | `docs/cpu.md` table | T1+T2 | M1 deliverable — BLOCKED on device (see cpu.md) |
 | Vulkan readback | self-contained proof → readback | T2→T3 | proof exists; readback = M7 deliverable |
 | Shader compile | reference pattern compare | T3 | M8 deliverable |
