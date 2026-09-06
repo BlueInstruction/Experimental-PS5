@@ -101,12 +101,23 @@ record that has itself fallen out of the bounded journal lowers
 nothing, like any record past the window) plus eviction-proof
 cumulative named/carried counters.
 
-## M7 — Vulkan Backend — **GATED** (infrastructure ahead of the gate)
+## M7 — Vulkan Backend — **GATED** (T1 core locked, device gate run pending)
 
 Gate: the M7 chain — instance → device → queue → image → clear →
 submit → fence → READBACK with expected pixels — passes on device
 (T3). Ahead of the gate (NOT the gate): real instance/device/swapchain
-on Adreno 750, fork-safe self-contained clear-submit proof. `frames=0`
+on Adreno 750, fork-safe self-contained clear-submit proof, and now
+(v1.53) the backend layer itself: `gpu/vulkan_backend.h/.cpp` plans a
+`GpuOpList` into an ordered Vulkan command sequence (barrier → clear →
+submit boundary; pipeline-needing ops deferred by kind, counted, never
+guessed), locked on host by `tools/hosttests/vulkan_backend_test.cpp`
+(M7-T1 — includes the float→UNORM byte rule the readback compares
+against), and `VulkanGpuDevice::RunM7ClearReadbackProof` wires the full
+chain — synthetic one-Clear IR list (labelled: proves the BACKEND, not
+the decoder) → planner → submit → fence → `vkCmdCopyImageToBuffer` →
+exact-pixel verify + SHA-256 — into the foundation suite (step 8b).
+The gate run itself needs the device: until a real session logs
+`pixels 4096/4096 match` from that proof, M7 stays GATED. `frames=0`
 in every session = gate unmet. `driverVerified=yes` is explicitly NOT
 this milestone's evidence.
 
