@@ -42,7 +42,12 @@ struct BankInfo {
 
 class GnmState {
 public:
-    static constexpr uint32_t kConfigSize  = 0x1000;  // 0x2000..0x2FFF
+    // Bank extents (public GCN split). The four ranges MUST stay
+    // disjoint: WriteRegister/ReadRegister resolve an address to the
+    // FIRST containing bank, so an overlap silently reroutes writes into
+    // the wrong bank (kConfigSize used to claim ..0x2FFF, swallowing the
+    // whole SH range at 0x2C00 — the pm4_stream_test caught it).
+    static constexpr uint32_t kConfigSize  = 0x0C00;  // 0x2000..0x2BFF
     static constexpr uint32_t kUConfigSize = 0x1000;  // 0x3000..0x3FFF
     static constexpr uint32_t kShSize      = 0x0400;  // 0x2C00..0x2FFF
     static constexpr uint32_t kContextSize = 0x3000;  // 0x28000..0x2AFFF
