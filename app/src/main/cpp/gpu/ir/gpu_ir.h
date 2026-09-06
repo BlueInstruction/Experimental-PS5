@@ -34,8 +34,18 @@
 // Platform-independent C++: no Android headers, no Vulkan headers;
 // unit-runnable on host (tools/hosttests/gpu_ir_test.cpp, the M6 gate)
 // and inside both ABIs.
+//
+// VULKAN GUARD, one sanctioned exemption: the M7 Vulkan backend TU
+// (gpu/vulkan_device.cpp) is the ONE place where Vulkan code and GPU IR
+// meet — IR in, Vulkan out, exactly the docs/gpu.md layer chain this
+// header's comment promises ("The Vulkan backend (M7) executes that
+// list"). That TU defines PX5_GPU_BACKEND_CONSUMER before including
+// anything. Every other context keeps the guard armed: if the IR
+// definition itself ever needs a Vulkan header, or an unrelated layer
+// pulls IR and Vulkan together, the #error still fires.
 
-#if defined(VULKAN_H_) || defined(VULKAN_CORE_H_)
+#if (defined(VULKAN_H_) || defined(VULKAN_CORE_H_)) && \
+    !defined(PX5_GPU_BACKEND_CONSUMER)
 #error "GPU IR must not see Vulkan headers — layer contract, docs/gpu.md"
 #endif
 

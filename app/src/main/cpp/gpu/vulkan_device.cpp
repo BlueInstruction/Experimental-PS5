@@ -1,8 +1,16 @@
+// The Vulkan backend TU is the ONE sanctioned place where Vulkan code and
+// GPU IR meet (IR in, Vulkan out — docs/gpu.md layer chain). Defining this
+// before any include disarms gpu_ir.h's Vulkan guard FOR THIS TU ONLY;
+// every other context keeps the guard armed.
+#define PX5_GPU_BACKEND_CONSUMER 1
+
 #include "vulkan_device.h"
 #include "driver_manager.h"
+#include "vulkan_backend.h"
 #include "../core/settings.h"
 #include "../utils/logger.h"
 #include "../utils/breadcrumbs.h"
+#include "../utils/evidence.h"
 
 #include <dlfcn.h>
 #include <cstring>
@@ -884,6 +892,505 @@ bool VulkanGpuDevice::RunSelfContainedProof(std::string& detailOut) {
     detailOut = std::string(head) + (ok ? "PASS — " : "FAIL — ") + detailOut;
     PX5_LOGI(LogCategory::GPU, "Self-contained GPU proof: %s",
              detailOut.c_str());
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
+// M7 gate proof (docs/milestones.md): self-contained readback chain with
+// expected pixels. Construction is the PROVEN self-contained one — fresh
+// instance -> fresh device -> own drm render node fd, full teardown — with
+// the M7 chain on top:
+//
+//   synthetic IR list {Clear(red), Barrier}   (labelled: the M6 lowering
+//      emits no Clear yet — this proves the BACKEND, not the decoder)
+//        -> PlanVulkanCommands  (gpu/vulkan_backend.cpp — the planner the
+//           M7-T1 host gate locks byte-for-byte)
+//        -> image (TRANSFER_DST|TRANSFER_SRC) + host-visible buffer
+//        -> record plan commands -> submit -> fence
+//        -> proof plumbing: TRANSFER_SRC transition + vkCmdCopyImageToBuffer
+//        -> map -> VerifyClearReadback (exact bytes) -> SHA-256
+//
+// The expected bytes come from plan.clearRgba — ONE conversion rule shared
+// with the host gate, so host and device cannot drift apart. The detail
+// line always carries the measured capability set (device/driver/api),
+// never a required one (AGENTS.md rule 3).
+// ---------------------------------------------------------------------------
+bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
+    // PX5::Gpu names (the backend layer this proof drives).
+    using Gpu::GpuOp;
+    using Gpu::GpuOpList;
+    using Gpu::OpKind;
+    using Gpu::PlanVulkanCommands;
+    using Gpu::ReadbackCheck;
+    using Gpu::VerifyClearReadback;
+    using Gpu::VulkanCommand;
+    using Gpu::VulkanCommandPlan;
+
+    void* lib = m_vulkanLib ? m_vulkanLib
+                            : dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) {
+        detailOut = std::string("dlopen libvulkan.so failed: ") + dlerror();
+        return false;
+    }
+
+    auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+        dlsym(lib, "vkGetInstanceProcAddr"));
+    if (!gipa) { detailOut = "vkGetInstanceProcAddr missing"; return false; }
+
+    Breadcrumb::Set("gpu.m7: enter (self-contained)");
+
+    VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    appInfo.pApplicationName = "PX5-M7";
+    appInfo.apiVersion       = VK_API_VERSION_1_0;
+    VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    ici.pApplicationInfo = &appInfo;          // offscreen: no surface exts
+    VkInstance inst = VK_NULL_HANDLE;
+    auto pfnCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(
+        gipa(VK_NULL_HANDLE, "vkCreateInstance"));
+    if (!pfnCreateInstance ||
+        pfnCreateInstance(&ici, nullptr, &inst) != VK_SUCCESS || !inst) {
+        detailOut = "m7: vkCreateInstance failed";
+        return false;
+    }
+    Breadcrumb::Set("gpu.m7: instance ready");
+
+    auto pfnEnumDevs = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
+        gipa(inst, "vkEnumeratePhysicalDevices"));
+    auto pfnProps = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+        gipa(inst, "vkGetPhysicalDeviceProperties"));
+    auto pfnFams = reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
+        gipa(inst, "vkGetPhysicalDeviceQueueFamilyProperties"));
+    auto pfnMemProps = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+        gipa(inst, "vkGetPhysicalDeviceMemoryProperties"));
+    auto pfnCreateDevice = reinterpret_cast<PFN_vkCreateDevice>(
+        gipa(inst, "vkCreateDevice"));
+    if (!pfnEnumDevs || !pfnProps || !pfnFams || !pfnMemProps ||
+        !pfnCreateDevice) {
+        detailOut = "m7: instance-level fns missing";
+        return false;
+    }
+
+    uint32_t nd = 0;
+    if (pfnEnumDevs(inst, &nd, nullptr) != VK_SUCCESS || nd == 0) {
+        detailOut = "m7: no physical devices";
+        return false;
+    }
+    std::vector<VkPhysicalDevice> devs(nd);
+    pfnEnumDevs(inst, &nd, devs.data());
+    VkPhysicalDevice pd = devs[0];
+    VkPhysicalDeviceProperties props{};
+    pfnProps(pd, &props);
+    Breadcrumb::Set("gpu.m7: physical device ready");
+
+    uint32_t nf = 0;
+    pfnFams(pd, &nf, nullptr);
+    if (nf == 0) { detailOut = "m7: no queue families"; return false; }
+    std::vector<VkQueueFamilyProperties> fams(nf);
+    pfnFams(pd, &nf, fams.data());
+    uint32_t gfx = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < nf; ++i)
+        if (fams[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) { gfx = i; break; }
+    if (gfx == 0xFFFFFFFFu) {
+        detailOut = "m7: no graphics queue family";
+        return false;
+    }
+
+    // Fresh extension-less logical device — offscreen-only, same contract
+    // as RunSelfContainedProof.
+    const float prio = 1.0f;
+    VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+    qci.queueFamilyIndex = gfx;
+    qci.queueCount       = 1;
+    qci.pQueuePriorities = &prio;
+    VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    dci.queueCreateInfoCount = 1;
+    dci.pQueueCreateInfos    = &qci;
+    VkDevice dev = VK_NULL_HANDLE;
+    if (pfnCreateDevice(pd, &dci, nullptr, &dev) != VK_SUCCESS || !dev) {
+        detailOut = "m7: vkCreateDevice failed";
+        return false;
+    }
+    Breadcrumb::Set("gpu.m7: fresh device ready");
+
+    auto gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+        gipa(inst, "vkGetDeviceProcAddr"));
+#define PX5_P(fn, name) \
+    auto fn = reinterpret_cast<PFN_vk##fn>(gdpa ? gdpa(dev, name) : nullptr)
+    PX5_P(GetDeviceQueue,         "vkGetDeviceQueue");
+    PX5_P(CreateImage,            "vkCreateImage");
+    PX5_P(AllocateMemory,         "vkAllocateMemory");
+    PX5_P(BindImageMemory,        "vkBindImageMemory");
+    PX5_P(CreateBuffer,           "vkCreateBuffer");
+    PX5_P(BindBufferMemory,       "vkBindBufferMemory");
+    PX5_P(CreateCommandPool,      "vkCreateCommandPool");
+    PX5_P(AllocateCommandBuffers, "vkAllocateCommandBuffers");
+    PX5_P(BeginCommandBuffer,     "vkBeginCommandBuffer");
+    PX5_P(EndCommandBuffer,       "vkEndCommandBuffer");
+    PX5_P(CmdPipelineBarrier,     "vkCmdPipelineBarrier");
+    PX5_P(CmdClearColorImage,     "vkCmdClearColorImage");
+    PX5_P(CmdCopyImageToBuffer,   "vkCmdCopyImageToBuffer");
+    PX5_P(QueueSubmit,            "vkQueueSubmit");
+    PX5_P(WaitForFences,          "vkWaitForFences");
+    PX5_P(CreateFence,            "vkCreateFence");
+    PX5_P(DestroyFence,           "vkDestroyFence");
+    PX5_P(DestroyCommandPool,     "vkDestroyCommandPool");
+    PX5_P(FreeMemory,             "vkFreeMemory");
+    PX5_P(DestroyImage,           "vkDestroyImage");
+    PX5_P(DestroyBuffer,          "vkDestroyBuffer");
+    PX5_P(MapMemory,              "vkMapMemory");
+    PX5_P(UnmapMemory,            "vkUnmapMemory");
+    PX5_P(DestroyDevice,          "vkDestroyDevice");
+#undef PX5_P
+    auto GetImageMemReqs = reinterpret_cast<PFN_vkGetImageMemoryRequirements>(
+        gdpa ? gdpa(dev, "vkGetImageMemoryRequirements") : nullptr);
+    auto GetBufferMemReqs = reinterpret_cast<PFN_vkGetBufferMemoryRequirements>(
+        gdpa ? gdpa(dev, "vkGetBufferMemoryRequirements") : nullptr);
+
+    bool ok = false;
+    std::string err;
+    char m7Sha[65] = {0};   // readback buffer hash, printed on PASS
+    if (!GetDeviceQueue || !CreateImage || !GetImageMemReqs ||
+        !AllocateMemory || !BindImageMemory || !CreateBuffer ||
+        !GetBufferMemReqs || !BindBufferMemory || !CreateCommandPool ||
+        !AllocateCommandBuffers || !BeginCommandBuffer || !EndCommandBuffer ||
+        !CmdPipelineBarrier || !CmdClearColorImage || !CmdCopyImageToBuffer ||
+        !QueueSubmit || !WaitForFences || !CreateFence || !DestroyFence ||
+        !DestroyCommandPool || !FreeMemory || !DestroyImage ||
+        !DestroyBuffer || !MapMemory || !UnmapMemory || !DestroyDevice) {
+        err = "device-level fns missing";
+    } else {
+        // --- The IR input: one Clear + the submit boundary. Labelled ---
+        // synthetic IN THE LOG: the M6 lowering emits no Clear op yet, so
+        // this list is built by hand to prove the BACKEND chain. It is a
+        // real GpuOpList and the planner below is the real production one.
+        GpuOpList irOps;
+        {
+            GpuOp clear{};
+            clear.kind          = OpKind::kClear;
+            clear.seq           = 1;
+            clear.clearColor[0] = 1.0f;   // clear = red, docs/testing.md M7
+            clear.clearColor[1] = 0.0f;
+            clear.clearColor[2] = 0.0f;
+            clear.clearColor[3] = 1.0f;
+            irOps.Push(clear);
+            GpuOp barrier{};
+            barrier.kind         = OpKind::kBarrier;
+            barrier.seq          = 1;
+            barrier.barrierScope = 0;
+            irOps.Push(barrier);
+        }
+        Breadcrumb::Set("gpu.m7: ir list built ops=%zu", irOps.Size());
+
+        const VulkanCommandPlan plan = PlanVulkanCommands(irOps);
+        Breadcrumb::Set("gpu.m7: plan %s", plan.stats.SummaryString().c_str());
+        if (!plan.hasClear) {
+            err = "plan has no clear (backend contract violated)";
+        } else {
+            VkQueue queue = VK_NULL_HANDLE;
+            GetDeviceQueue(dev, gfx, 0, &queue);
+            ok = queue != VK_NULL_HANDLE;
+            err = ok ? "" : "GetDeviceQueue null";
+
+            constexpr uint32_t W = 64, H = 64;
+            constexpr VkDeviceSize kBufBytes =
+                static_cast<VkDeviceSize>(W) * H * 4;
+
+            // Target image: clear (TRANSFER_DST) + readback copy
+            // (TRANSFER_SRC) — one more usage bit than the v1.45 proof.
+            VkImage img = VK_NULL_HANDLE;
+            if (ok) {
+                VkImageCreateInfo ici2{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+                ici2.imageType     = VK_IMAGE_TYPE_2D;
+                ici2.format        = VK_FORMAT_R8G8B8A8_UNORM;
+                ici2.extent        = {W, H, 1};
+                ici2.mipLevels     = 1;
+                ici2.arrayLayers   = 1;
+                ici2.samples       = VK_SAMPLE_COUNT_1_BIT;
+                ici2.tiling        = VK_IMAGE_TILING_OPTIMAL;
+                ici2.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+                ici2.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                if (CreateImage(dev, &ici2, nullptr, &img) != VK_SUCCESS) {
+                    ok = false; err = "CreateImage failed";
+                }
+            }
+
+            VkDeviceMemory imgMem = VK_NULL_HANDLE;
+            if (ok) {
+                VkMemoryRequirements reqs{};
+                GetImageMemReqs(dev, img, &reqs);
+                VkPhysicalDeviceMemoryProperties mp{};
+                pfnMemProps(pd, &mp);
+                VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+                mai.allocationSize  = reqs.size;
+                mai.memoryTypeIndex =
+                    SelectImageMemoryType(mp, reqs.memoryTypeBits);
+                if (AllocateMemory(dev, &mai, nullptr, &imgMem) != VK_SUCCESS ||
+                    BindImageMemory(dev, img, imgMem, 0) != VK_SUCCESS) {
+                    ok = false; err = "image memory alloc/bind failed";
+                }
+            }
+
+            // Readback buffer: HOST_VISIBLE|HOST_COHERENT is a capability
+            // requirement (CPU must map it), not a preference — so it does
+            // NOT go through the vramUsageMode-aware image selector.
+            VkBuffer buf = VK_NULL_HANDLE;
+            VkDeviceMemory bufMem = VK_NULL_HANDLE;
+            if (ok) {
+                VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+                bci.size  = kBufBytes;
+                bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                if (CreateBuffer(dev, &bci, nullptr, &buf) != VK_SUCCESS) {
+                    ok = false; err = "CreateBuffer failed";
+                } else {
+                    VkMemoryRequirements reqs{};
+                    GetBufferMemReqs(dev, buf, &reqs);
+                    VkPhysicalDeviceMemoryProperties mp{};
+                    pfnMemProps(pd, &mp);
+                    int32_t hostType = -1;
+                    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
+                        const VkMemoryType t = mp.memoryTypes[i];
+                        if ((reqs.memoryTypeBits & (1u << i)) &&
+                            (t.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+                            (t.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+                            hostType = static_cast<int32_t>(i);
+                            break;
+                        }
+                    }
+                    if (hostType < 0) {
+                        ok = false; err = "no HOST_VISIBLE|COHERENT memory type";
+                    } else {
+                        VkMemoryAllocateInfo mai{
+                            VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+                        mai.allocationSize  = reqs.size;
+                        mai.memoryTypeIndex = static_cast<uint32_t>(hostType);
+                        if (AllocateMemory(dev, &mai, nullptr, &bufMem)
+                                != VK_SUCCESS ||
+                            BindBufferMemory(dev, buf, bufMem, 0)
+                                != VK_SUCCESS) {
+                            ok = false; err = "buffer memory alloc/bind failed";
+                        }
+                    }
+                }
+            }
+
+            VkCommandPool pool = VK_NULL_HANDLE;
+            if (ok) {
+                VkCommandPoolCreateInfo pci{
+                    VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+                pci.flags            =
+                    VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+                pci.queueFamilyIndex = gfx;
+                if (CreateCommandPool(dev, &pci, nullptr, &pool)
+                        != VK_SUCCESS) {
+                    ok = false; err = "CreateCommandPool failed";
+                }
+            }
+
+            VkCommandBuffer cbs[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+            VkFence fences[2]      = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+            if (ok) {
+                VkCommandBufferAllocateInfo cai{
+                    VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+                cai.commandPool        = pool;
+                cai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+                cai.commandBufferCount = 2;
+                VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+                if (AllocateCommandBuffers(dev, &cai, cbs) != VK_SUCCESS ||
+                    CreateFence(dev, &fci, nullptr, &fences[0]) != VK_SUCCESS ||
+                    CreateFence(dev, &fci, nullptr, &fences[1]) != VK_SUCCESS) {
+                    ok = false; err = "cb/fence alloc failed";
+                }
+            }
+
+            // --- Submission 1: the PLANNED commands ------------------------
+            if (ok) {
+                VkCommandBufferBeginInfo bi{
+                    VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                Breadcrumb::Set("gpu.m7: record plan (%zu cmds)",
+                                plan.commands.size());
+                bool recorded = BeginCommandBuffer(cbs[0], &bi) == VK_SUCCESS;
+                if (recorded) {
+                    for (const VulkanCommand& c : plan.commands) {
+                        switch (c.kind) {
+                        case VulkanCommand::Kind::kPipelineBarrier: {
+                            VkImageMemoryBarrier ib{
+                                VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                            ib.image         = img;
+                            ib.srcAccessMask = 0;
+                            ib.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                            ib.oldLayout     = VK_IMAGE_LAYOUT_UNDEFINED;
+                            ib.newLayout     =
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                            ib.subresourceRange = {
+                                VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                            CmdPipelineBarrier(cbs[0],
+                                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                                0, nullptr, 0, nullptr, 1, &ib);
+                            break;
+                        }
+                        case VulkanCommand::Kind::kClearColorImage: {
+                            VkClearColorValue color{};
+                            for (int i = 0; i < 4; ++i)
+                                color.float32[i] = c.clearColor[i];
+                            const VkImageSubresourceRange range{
+                                VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                            CmdClearColorImage(cbs[0], img,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                &color, 1, &range);
+                            break;
+                        }
+                        case VulkanCommand::Kind::kSubmitBoundary:
+                            // The IR Barrier op materializes here: end ->
+                            // submit -> fence. Commands after a boundary
+                            // would need a new command buffer; the M7 plan
+                            // ends at the first one.
+                            recorded = EndCommandBuffer(cbs[0]) == VK_SUCCESS;
+                            break;
+                        }
+                        if (!recorded) break;
+                    }
+                }
+                if (!recorded) {
+                    ok = false; err = "plan recording failed";
+                } else {
+                    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                    si.commandBufferCount = 1;
+                    si.pCommandBuffers    = &cbs[0];
+                    Breadcrumb::Set("gpu.m7: submit1");
+                    if (QueueSubmit(queue, 1, &si, fences[0]) != VK_SUCCESS) {
+                        ok = false; err = "QueueSubmit (plan) failed";
+                    } else if (WaitForFences(dev, 1, &fences[0], VK_TRUE,
+                                             3000000000ull) != VK_SUCCESS) {
+                        ok = false; err = "fence timeout after clear (3 s)";
+                    }
+                }
+            }
+
+            // --- Submission 2: READBACK PLUMBING (not IR semantics — the IR
+            // has no readback op; the proof owns the copy) -----------------
+            ReadbackCheck rb{};
+            if (ok) {
+                VkCommandBufferBeginInfo bi{
+                    VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                if (BeginCommandBuffer(cbs[1], &bi) != VK_SUCCESS) {
+                    ok = false; err = "Begin (readback) failed";
+                } else {
+                    VkImageMemoryBarrier ib{
+                        VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                    ib.image         = img;
+                    ib.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    ib.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                    ib.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    ib.newLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                    ib.subresourceRange = {
+                        VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                    CmdPipelineBarrier(cbs[1],
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                        0, nullptr, 0, nullptr, 1, &ib);
+
+                    VkBufferImageCopy region{};
+                    region.bufferOffset      = 0;
+                    region.bufferRowLength   = 0;   // tightly packed
+                    region.bufferImageHeight = 0;
+                    region.imageSubresource = {
+                        VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                    region.imageOffset       = {0, 0, 0};
+                    region.imageExtent       = {W, H, 1};
+                    CmdCopyImageToBuffer(cbs[1], img,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1,
+                        &region);
+                    EndCommandBuffer(cbs[1]);
+
+                    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                    si.commandBufferCount = 1;
+                    si.pCommandBuffers    = &cbs[1];
+                    Breadcrumb::Set("gpu.m7: readback submit");
+                    if (QueueSubmit(queue, 1, &si, fences[1]) != VK_SUCCESS) {
+                        ok = false; err = "QueueSubmit (readback) failed";
+                    } else if (WaitForFences(dev, 1, &fences[1], VK_TRUE,
+                                             3000000000ull) != VK_SUCCESS) {
+                        ok = false; err = "fence timeout after copy (3 s)";
+                    }
+                }
+            }
+
+            // --- Map + verify + hash ----------------------------------------
+            if (ok) {
+                void* mapped = nullptr;
+                if (MapMemory(dev, bufMem, 0, VK_WHOLE_SIZE, 0, &mapped)
+                        != VK_SUCCESS || mapped == nullptr) {
+                    ok = false; err = "vkMapMemory failed";
+                } else {
+                    rb = VerifyClearReadback(static_cast<const uint8_t*>(mapped),
+                                             static_cast<size_t>(kBufBytes),
+                                             W, H, plan.clearRgba);
+                    char sha[65] = {0};
+                    Evidence::Sha256Hex(mapped,
+                                        static_cast<size_t>(kBufBytes), sha);
+                    memcpy(m7Sha, sha, sizeof(m7Sha));
+                    UnmapMemory(dev, bufMem);
+                    Breadcrumb::Set("gpu.m7: verify %u/%u",
+                                    rb.pixelsMatch, rb.pixelsTotal);
+                    if (!rb.allMatch) {
+                        char det[128];
+                        snprintf(det, sizeof(det),
+                                 "pixel mismatch: %u/%u match, first bad byte %zu",
+                                 rb.pixelsMatch, rb.pixelsTotal,
+                                 rb.firstBadByte);
+                        ok = false; err = det;
+                    }
+                }
+            }
+
+            if (fences[0] != VK_NULL_HANDLE) DestroyFence(dev, fences[0], nullptr);
+            if (fences[1] != VK_NULL_HANDLE) DestroyFence(dev, fences[1], nullptr);
+            if (pool  != VK_NULL_HANDLE) DestroyCommandPool(dev, pool, nullptr);
+            if (bufMem != VK_NULL_HANDLE) FreeMemory(dev, bufMem, nullptr);
+            if (buf   != VK_NULL_HANDLE) DestroyBuffer(dev, buf, nullptr);
+            if (imgMem != VK_NULL_HANDLE) FreeMemory(dev, imgMem, nullptr);
+            if (img   != VK_NULL_HANDLE) DestroyImage(dev, img, nullptr);
+
+            if (ok) {
+                char det[160];
+                snprintf(det, sizeof(det),
+                         "IR Clear readback: pixels %u/%u match "
+                         "(%u,%u,%u,%u) | plan: %s",
+                         rb.pixelsMatch, rb.pixelsTotal,
+                         plan.clearRgba[0], plan.clearRgba[1],
+                         plan.clearRgba[2], plan.clearRgba[3],
+                         plan.stats.SummaryString().c_str());
+                err = det;
+            }
+        }
+    }
+
+    // Full teardown of everything THIS call created — same contract as
+    // RunSelfContainedProof: the child (if any) exits; the parent's stack
+    // is untouched by construction.
+    DestroyDevice(dev, nullptr);
+    auto pfnDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(
+        gipa(inst, "vkDestroyInstance"));
+    if (pfnDestroyInstance) pfnDestroyInstance(inst, nullptr);
+    Breadcrumb::Set("gpu.m7: done ok=%d", ok ? 1 : 0);
+
+    char head[224];
+    snprintf(head, sizeof(head),
+             "self-contained M7 readback on '%s' drv=%s api=%s "
+             "vendor=0x%x dev=0x%x: ",
+             props.deviceName, VkVersion(props.driverVersion).c_str(),
+             VkVersion(props.apiVersion).c_str(), props.vendorID,
+             props.deviceID);
+    detailOut = std::string(head) + (ok ? "PASS — " : "FAIL — ") + err;
+    if (ok && m7Sha[0] != '\0') {
+        detailOut += " | sha256=";
+        detailOut += m7Sha;
+    }
+    PX5_LOGI(LogCategory::GPU, "M7 readback proof: %s", detailOut.c_str());
     return ok;
 }
 

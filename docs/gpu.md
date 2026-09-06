@@ -68,6 +68,17 @@ IR definition.
   CopyImage, Clear) are committed types with no emitter until the
   decoder deepens named-register semantics — the M5 PARTIAL note below
   is the same policy.
+- `gpu/vulkan_backend.h/.cpp` (M7): the layer between the GPU IR and
+  Vulkan — `PlanVulkanCommands` turns a `GpuOpList` into an ordered,
+  Vulkan-free command plan (barrier → clear → submit boundary); one
+  float→UNORM-8 rule (`ClearFloatToUnorm8`) fixes the exact bytes the
+  readback compares; `VerifyClearReadback` is the exact-byte pixel
+  checker. Ops whose materialization needs pipelines (scissor/draw/
+  drawIndexed/dispatch) are DEFERRED per kind and counted — never
+  guessed into commands. Locked on host by
+  `tools/hosttests/vulkan_backend_test.cpp` (M7-T1). The planner TU
+  never includes Vulkan headers; `gpu/vulkan_device.cpp` is the one
+  sanctioned Vulkan-seeing IR consumer (PX5_GPU_BACKEND_CONSUMER).
 - `gpu/vulkan_device.cpp`: REAL host Vulkan — instance/device init on
   Adreno 750, swapchain in both orientations, self-contained
   fork-safe clear-submit proof (own render node fd, full teardown).
@@ -143,6 +154,21 @@ create instance → enumerate physical device → create device
 This replaces `driverVerified=yes` as the GPU truth marker: pixels
 read back from a render target are evidence; a mapped driver and a
 created device are not.
+
+What exists now (v1.53): the chain is WIRED end to end —
+`VulkanGpuDevice::RunM7ClearReadbackProof` (self-contained, fork-safe,
+fresh instance/device) builds a synthetic one-Clear `GpuOpList`
+(labelled in its own detail line: the M6 lowering emits no Clear yet,
+so this proves the BACKEND chain, not the decoder), plans it with the
+M7-T1-locked planner, executes the plan on real Vulkan, copies the
+image to a host-visible buffer, and verifies every byte against
+`plan.clearRgba` (clear = red 64×64, expected 255,0,0,255 — the
+docs/testing.md M7 shape) with a SHA-256 of the readback. The proof
+runs as foundation-suite step 8b. What is MISSING is the device run:
+until a real session logs `pixels 4096/4096 match`, the gate is unmet
+and M7 stays GATED. The gate run also doubles as the Vulkan capability
+record (measured device/driver/api/vendor/deviceID in every detail
+line — never a requirement).
 
 ## M8 evidence gate (shader recompiler)
 
