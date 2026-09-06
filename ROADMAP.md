@@ -4,6 +4,13 @@
 > implementation, runtime validation, and measurable compatibility
 > progress.
 
+> **Canonical plan (2026-09-06):** the milestone contract M0-M11 with
+> per-milestone evidence gates now lives in `docs/milestones.md`
+> (architecture: `docs/architecture.md`, cpu: `docs/cpu.md`,
+> gpu: `docs/gpu.md`, evidence rules: `docs/testing.md`). The phase
+> table below is retained for history; where the two disagree, the
+> docs/ contract wins.
+
 ## Core Development Phases
 
 | Phase | Component | Description | Status |
