@@ -358,13 +358,18 @@ FexCoreIntegration::ExecResult Emulator::ExecuteLoadedGuest() {
     m_running.store(true);
     // v1.41 — the dispatch is on the record before it happens: RIP/SP/FS
     // land in the ledger chained to the bound image hash.
+    // v1.47 — rdi records the value ExecuteAtHostRip ACTUALLY installs in
+    // the guest RDI (the host-window pointer of the initial SP, see the
+    // RDI=hostStackTop store in fexcore_integration.cpp), not a re-derived
+    // guest VA. Identity mapping makes the two numerically equal today;
+    // if that ever stops holding, this ledger line names the truth.
     Evidence::AppendLedger(
         "dispatch enter rip=0x%llx sp=0x%llx fs_base=0x%llx rdi=0x%llx "
         "abi=orbis-start",
         (unsigned long long)m_image.entryPoint,
         (unsigned long long)initialSpVa,
         (unsigned long long)guestFsBase,
-        (unsigned long long)initialSpVa);
+        (unsigned long long)(uintptr_t)spHost);
     res = FexCoreIntegration::ExecuteAtHostRip(reinterpret_cast<uint64_t>(ripHost),
                                                reinterpret_cast<uint64_t>(spHost),
                                                guestFsBase);

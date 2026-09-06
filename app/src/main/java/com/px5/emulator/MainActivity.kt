@@ -738,6 +738,12 @@ fun AppNavigation(
                     PX5EventLog.exception("driverImport", e)
                 }
                 launch(Dispatchers.Main) {
+                    // v1.47: the import finished AFTER the sheet's ON_RESUME
+                    // observer already fired (picker resume beats the IO
+                    // coroutine), so the only bump that carries the
+                    // post-import truth is this one — nativeRegisterDriverSlot
+                    // and DriverSlotStore.append are done by now.
+                    driverStateEpoch++
                     Toast.makeText(context, resultMsg, Toast.LENGTH_LONG).show()
                 }
             }

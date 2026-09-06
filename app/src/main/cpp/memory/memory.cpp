@@ -610,7 +610,7 @@ void MemoryManager::RebuildExecSnapshot_Unlocked() {
         // Logged after publication: outside the masked window, and the
         // snapshot readers never touch the logger.
         PX5_LOGE(LogCategory::MEMORY,
-                 "Exec-range snapshot truncated at %zu entries: "
+                 "Exec-range snapshot truncated at %u entries: "
                  "executable queries beyond the cap answer 'not found'",
                  n);
     }

@@ -129,13 +129,18 @@ uint64_t SlotValue(uint64_t va) {
 
 } // namespace
 
-int main() {
-    Evidence::SetLedgerPath("/tmp/px5_import_trap_test_ledger.log");
-    // The ledger path is a fixed HOST file shared across runs — on a
-    // persistent runner it accumulates stale lines and the flood-
-    // discipline check (count occurrences) fails on yesterday's events.
-    // CI never saw this (fresh VM per run); every run owns its file now.
-    if (FILE* trunc = fopen("/tmp/px5_import_trap_test_ledger.log", "w")) {
+int main(int argc, char** argv) {
+    // Per-run ledger path: run.sh passes $OUT/import_trap_ledger.log so
+    // concurrent and successive runs never share a file. The /tmp default
+    // stays for direct invocation. Either way the file is truncated here —
+    // every run owns its events, the flood-discipline check counts only
+    // THIS run's misses. Assertions below read THIS path, never a literal:
+    // a hardcoded read would validate yesterday's stale file instead.
+    const char* ledgerPath = argc > 1
+        ? argv[1]
+        : "/tmp/px5_import_trap_test_ledger.log";
+    Evidence::SetLedgerPath(ledgerPath);
+    if (FILE* trunc = fopen(ledgerPath, "w")) {
         fclose(trunc);
     }
     auto& mm = MemoryManager::GetInstance();
@@ -208,7 +213,7 @@ int main() {
         std::string::npos, "hit counts attach to the right name");
 
     printf("\nEvidence ledger:\n");
-    FILE* f = fopen("/tmp/px5_import_trap_test_ledger.log", "r");
+    FILE* f = fopen(ledgerPath, "r");
     chk(f != nullptr, "ledger file exists");
     if (f) {
         char buf[16384] = {};

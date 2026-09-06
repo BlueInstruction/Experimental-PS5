@@ -286,10 +286,28 @@ void RuntimeLinker::SetImportTraps(uint64_t regionBase, uint64_t regionEnd,
     m_trapOob       = 0;
 }
 
+namespace {
+// dynstr bytes are UNTRUSTED: a control character inside an import name
+// would forge log and ledger records ('\n' opens a new record mid-name,
+// a quote closes the quoting the format promises). Every consumer of a
+// trap name for display or evidence goes through this — printable bytes
+// pass verbatim, control bytes degrade to '?'.
+std::string SanitizeImportName(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (char c : in) {
+        const auto uc = static_cast<unsigned char>(c);
+        out.push_back((uc < 0x20 || uc == 0x7f) ? '?' : c);
+    }
+    return out;
+}
+} // namespace
+
 uint64_t RuntimeLinker::DispatchImportTrap(uint64_t importIndex) {
     std::string name;
     bool firstHit = false;
     bool ledger = false;
+    uint64_t distinctSnapshot = 0;
     {
         std::lock_guard<std::mutex> lk(m_mutex);
         if (importIndex >= m_importTraps.size()) {
@@ -317,7 +335,11 @@ uint64_t RuntimeLinker::DispatchImportTrap(uint64_t importIndex) {
         }
         ++hits;
         ++m_trapTotalHits;
-        name = e.name;
+        name = SanitizeImportName(e.name);
+        // Same lock, same snapshot: the log below must carry the distinct
+        // count THIS hit produced, not whatever a concurrent trap lands on
+        // after the lock is released.
+        distinctSnapshot = m_trapDistinct;
     }
     // Evidence + logging outside m_mutex (AppendLedger fsyncs; the HLE
     // gate path may re-enter the registry).
@@ -326,7 +348,7 @@ uint64_t RuntimeLinker::DispatchImportTrap(uint64_t importIndex) {
                  "IMPORT-TRAP hit idx=%llu name='%s' — missing import "
                  "called by guest, RAX=0 returned (hit #%llu distinct)",
                  (unsigned long long)importIndex, name.c_str(),
-                 (unsigned long long)m_trapDistinct);
+                 (unsigned long long)distinctSnapshot);
         if (ledger) {
             Evidence::AppendLedger("import miss idx=%llu name='%s'",
                                    (unsigned long long)importIndex,
@@ -365,8 +387,9 @@ std::string RuntimeLinker::GetImportTrapSummary() {
     char one[128];
     for (size_t i = 0; i < show; ++i) {
         const auto& e = m_importTraps[items[i].first];
+        const std::string safe = SanitizeImportName(e.name);
         snprintf(one, sizeof(one), " '%s'(x%u)",
-                 e.name.c_str(), items[i].second);
+                 safe.c_str(), items[i].second);
         out += one;
     }
     return out;

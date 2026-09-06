@@ -40,7 +40,7 @@ architecture, even when it works.
 │ relocs,  │ brk,     │ TLS/FSBASE,  │ / unsupported — each  │
 │ imports  │ protect  │ ORBIS ABI    │ with its own test     │
 ├──────────┴──────────┴──────────────┴───────────────────────┤
-│ gpu: PM4 decoder → GpuState → GPU IR → Vulkan backend      │
+│ gpu: PM4 decoder → GnmState → GPU IR → Vulkan backend      │
 │      (driver_manager + libadrenotools = host DRIVER        │
 │       infrastructure only — it is not the renderer)        │
 ├────────────────────────────────────────────────────────────┤
@@ -53,17 +53,17 @@ architecture, even when it works.
 
 | Concern | Owner | Explicitly NOT owned by |
 |---|---|---|
-| x86-64 → ARM64 translation | FEXCore (vendored, `deps/FEX`) | PX5 kernel logic must never leak into FEXCore |
+| x86-64 → ARM64 translation | FEXCore (fetched, `.deps/FEX`) | PX5 kernel logic must never leak into FEXCore |
 | PS5 execution environment | PX5 (`app/src/main/cpp/`) | FEXCore knows nothing about PS5 |
 | Driver import / linker namespace | `gpu/driver_manager.cpp`, libadrenotools | It proves a driver MAPS; it does not render |
-| GPU command semantics | `gpu/gnm/` decoder + GpuState | Not Vulkan code |
+| GPU command semantics | `gpu/gnm/` decoder + GnmState | Not Vulkan code |
 | Host GPU submission | `gpu/vulkan_device.cpp` | No PM4 knowledge allowed there |
 
 ## Data paths (the only legal flows)
 
 ```
 CPU:  SELF file → loader → guest memory → FEXCore → ARM64 host
-GPU:  guest PM4 stream → PM4 decoder → GpuState → PX5 GPU IR
+GPU:  guest PM4 stream → PM4 decoder → GnmState → PX5 GPU IR
         → Vulkan backend → Adreno → framebuffer → videoout → Surface
 HLE:  guest libSce* call → NID gate (syscall trap) → HLE function
         → structured result → guest registers
@@ -76,7 +76,7 @@ HLE:  guest libSce* call → NID gate (syscall trap) → HLE function
 | Android frontend | working shell | daily device use |
 | Driver import + namespace load | working on device | `driverVerified=yes`, Turnip v26.3.0-R4, 2026-09-05 screenshots |
 | Host Vulkan init + swapchain + clear-submit proof | works on device | self-contained GPU proof PASS |
-| PM4 decoder → GpuState | started (11 packet semantics) | `pm4_decoder.cpp`, host tests |
+| PM4 decoder → GnmState | started (11 packet semantics, partial) | `pm4_decoder.cpp` + synthetic `gnm_selftest` only — the committed stream test is pending (M5 deliverable, not in `run.sh` yet) |
 | GPU IR | absent | — |
 | IR-driven Vulkan rendering | absent | `frames=0` in every session |
 | SELF/ELF loader, runtime linker | real code, unvalidated past load | load path blocked behind CPU dispatch fault |

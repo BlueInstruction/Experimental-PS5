@@ -167,7 +167,9 @@ public:
      * @param nid NID (Name ID)
      * @param name Symbol name (e.g., "sceKernelOpen")
      * @param fn Host function to invoke
-     * @return true if registration succeeded, false if NID duplicate
+     * @return true if registration succeeded; false if fn is null (invalid
+     *         function) OR the NID is already registered (duplicate) —
+     *         callers needing to distinguish the two must check fn first
      */
     bool RegisterHleExport(const std::string& library, uint64_t nid,
                            const std::string& name, HleHostFn fn);

@@ -53,7 +53,7 @@ echo "[hosttests] building import_trap_test"
     -lz
 
 echo "[hosttests] running import_trap_test"
-"$OUT/import_trap_test"
+"$OUT/import_trap_test" "$OUT/import_trap_ledger.log"
 
 echo "[hosttests] running JNI symbol parity check"
 python3 "$ROOT/tools/check_jni_symbols.py"

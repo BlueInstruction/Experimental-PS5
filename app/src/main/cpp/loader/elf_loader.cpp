@@ -154,6 +154,20 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
         return;
     }
     if (relaEnt == 0) relaEnt = sizeof(Elf64RelaRaw);
+    // x86-64 ABI: Elf64_Rela is exactly 24 bytes. A different DT_RELAENT or
+    // a DT_RELASZ that is not a whole entry count is malformed metadata —
+    // stepping such a table with any stride invents relocations. Refuse
+    // before either relocation table is processed or pend is collected.
+    if (relaEnt != sizeof(Elf64RelaRaw) || (relaSz % relaEnt) != 0) {
+        PX5_LOGE(LogCategory::LOADER,
+                 "REL: DT_RELAENT=%llu / DT_RELASZ=%llu malformed "
+                 "(expected ent=%zu, size divisible by ent) — refusing to "
+                 "relocate, image stays as linked",
+                 (unsigned long long)relaEnt, (unsigned long long)relaSz,
+                 sizeof(Elf64RelaRaw));
+        out.dynProcessed = true;
+        return;
+    }
     const size_t relaCount = relaSz / relaEnt;
     out.relaVa = loadBase + relaVa;
     out.relaEntries = relaCount;
@@ -457,12 +471,25 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
                 // Stubs written so far are unreachable garbage in a mapped
                 // region — no slot points at them, the registry stays empty.
                 traps.clear();
+            } else if (!memRef.ProtectMemory(stubBase, stubBytes,
+                                             MemoryFlags::PAGE_READ |
+                                                 MemoryFlags::PAGE_EXEC)) {
+                // RX hardening IS the second half of the two-phase
+                // discipline: without it the guest can rewrite its own trap
+                // stubs. Publish an unfenced install never — refuse, slots
+                // stay as linked, registry stays empty.
+                PX5_LOGE(LogCategory::LOADER,
+                         "IMPORT-TRAPS: RX protect FAILED for "
+                         "[0x%llx..0x%llx] — install refused, slots stay "
+                         "as linked, registry stays empty",
+                         (unsigned long long)stubBase,
+                         (unsigned long long)(stubBase + stubBytes));
+                Evidence::AppendLedger(
+                    "import traps FAILED rx-protect region=0x%llx count=%zu"
+                    " — install refused",
+                    (unsigned long long)stubBase, pend.size());
+                traps.clear();
             } else {
-                // Two-phase discipline: drop W once the stubs are written, so
-                // a guest bug cannot corrupt its own trap table.
-                memRef.ProtectMemory(stubBase, stubBytes,
-                                     MemoryFlags::PAGE_READ |
-                                         MemoryFlags::PAGE_EXEC);
                 // Point the slots at the stubs.
                 // v1.46 — every write is read back and verified. The vc46
                 // session left slotsWritten=815 as a blind memcpy count;

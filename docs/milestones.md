@@ -17,9 +17,12 @@ FEXCore executes deterministic x86-64 fixtures on the ARM64 device.
 Gate: the nine fixtures in docs/cpu.md pass deterministically with
 logged register results and exit codes.
 Blocker (named): SIGSEGV si_addr=0x4 at ExecuteThread entry, in-process
-and isolated, since v1.15. Next step: capture the symbolized PC
-(v1.21+ crash reports + `scripts/symbolize_px5.py` + CI symbols
-artifact), fix the named fault.
+and isolated, since v1.15. v1.24 symbolized that crash
+(`pc=libpx5.so+0x3809e4`, null GDT/LDT segment arrays) and fixed it;
+v1.25 (IS64BIT_MODE), v1.40 (FSBASE before entry) and v1.46 (ORBIS
+entry ABI) each exposed the next stage. Next step: re-run the fixture
+suite on device (vc48+) and resolve any new fault with
+`tools/symbolize_px5.py` + CI symbols artifact.
 Existing: FEXCore integration (1207-line wrapper), GDT/LDT install,
 FSBASE, auxv, ORBIS entry ABI at dispatch (vc47), 9-byte conformance
 blob, in-process probe.
@@ -67,16 +70,16 @@ committed stream fixtures + expected-sequence test.
 
 ## M6 — GPU IR — **ABSENT**
 
-Gate: GpuState + draw records lower to a committed IR op list
+Gate: GnmState + draw records lower to a committed IR op list
 (SetRenderTarget … Barrier) with a lower-to-IR host test. No Vulkan
 types may appear in IR definitions (keeps GNM decoupled from Vulkan).
 
-## M7 — Vulkan Backend — **INFRASTRUCTURE AHEAD OF GATE**
+## M7 — Vulkan Backend — **GATED** (infrastructure ahead of the gate)
 
 Gate: the M7 chain — instance → device → queue → image → clear →
 submit → fence → READBACK with expected pixels — passes on device
-(T3). Existing ahead of the gate: real instance/device/swapchain on
-Adreno 750, fork-safe self-contained clear-submit proof. `frames=0`
+(T3). Ahead of the gate (NOT the gate): real instance/device/swapchain
+on Adreno 750, fork-safe self-contained clear-submit proof. `frames=0`
 in every session = gate unmet. `driverVerified=yes` is explicitly NOT
 this milestone's evidence.
 
@@ -111,11 +114,11 @@ here may start before M10.
 ```
 M1 (device CPU gate) ──► M2 validate ──► M4 lifecycle ──► M10
 M3 advances with M2/M4 tests
-M5 ──► M6 ──► M7 gate ──► M8 ──► M9 frame        (host-side chain,
-                                                  independent of M1)
+M5 ──► M6 (host-side) ──► M7 gate (ON DEVICE, T3) ──► M8 ──► M9 frame
 M10 requires M1-M9 all PASS; M11 requires M10.
 ```
 
-The GPU chain (M5-M7) is deliberately device-independent and is the
-correct workstream while the M1 blocker is under investigation — the
-two never block each other until M10.
+The GPU chain (M5-M7) is deliberately independent of the M1 CPU
+blocker — M5 and M6 run entirely host-side, while M7's readback gate
+still requires the device. This is the correct workstream while M1 is
+under investigation; the two never block each other until M10.

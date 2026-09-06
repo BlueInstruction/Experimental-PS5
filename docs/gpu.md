@@ -10,10 +10,11 @@
 ```
 guest PM4 stream (dwords in guest memory)
   ↓  pm4_decoder.cpp        — bytes → structured packets
-GpuCommand { opcode, payload }
+PacketRecord trace (bounded)  +  GnmState  ← current, existing types
   ↓  gnm_state.cpp          — packets → device state
-GpuState  (register banks, index type, instances, draw/dispatch records)
-  ↓  gpu IR (M6, to be built)          — state + records → render ops
+GnmState (register banks, index type, instances, draw/dispatch records)
+  ↓  GPU IR (M6, to be built — planned types: GpuCommand/GpuState-shaped
+     render ops)          — state + records → render ops
 SetRenderTarget / SetViewport / SetScissor / BindPipeline /
 BindResource / Draw / Dispatch / CopyImage / Clear / Barrier
   ↓  vulkan_backend (M7)     — render ops → Vulkan
@@ -24,13 +25,22 @@ Adreno (proprietary ICD or imported Turnip) → framebuffer
 Android Surface
 ```
 
+Naming note: `GpuCommand { opcode, payload }` in earlier drafts of this
+diagram is a PLANNED M6 abstraction. Today the decoder writes
+`GnmState` and an optional bounded `PacketRecord` trace — those are the
+only GPU types that exist; do not code against the planned names yet.
+
 ## What exists today (honest)
 
 - `gpu/gnm/pm4_packet.h` + `pm4_decoder.cpp`: type-3 header decode,
-  named opcodes, and full semantics for SET_CONFIG_REG /
+  named opcodes, PARTIAL semantics for SET_CONFIG_REG /
   SET_CONTEXT_REG / SET_UCONFIG_REG / SET_SH_REG / SET_SH_REG_OFFSET,
   INDEX_TYPE, NUM_INSTANCES, DRAW_INDEX_AUTO, DRAW_INDEX_2,
-  DISPATCH_DIRECT, NOP. Unknown opcodes are counted and body-skipped
+  DISPATCH_DIRECT, NOP. Partial means: SET_SH_REG_OFFSET discards its
+  address pair today, and DRAW_INDEX_2 records neither the
+  index-buffer address nor the max-index field — the register and
+  draw-record state IS written, the rest is deferred and must not be
+  claimed as covered. Unknown opcodes are counted and body-skipped
   by length — never silently ignored. Errors land in
   `DecodeStats.streamErrors` (bounded error list with offsets).
 - `gpu/gnm/gnm_state.cpp`: register banks with
@@ -60,7 +70,7 @@ Android Surface
 
 Host-side, deterministic: a fixed PM4 test stream with known packet
 count and opcodes decodes to the exact expected structured sequence —
-`N packets in, N/ N records out, 0 unexpected stream errors`, register
+`N packets in, N/N records out, 0 unexpected stream errors`, register
 banks hold the written values, draw records carry the right
 count/indexed/instances fields. Target test file:
 `tools/hosttests/pm4_stream_test.cpp` (to be added with the stream
@@ -89,8 +99,10 @@ copied; ownership of every layer stays in this document's terms.
 ## Milestone order (why command-processor first)
 
 PM4 decode → GPU IR → Vulkan clears/draws offscreen → THEN shaders.
-The command path without shaders already yields real GPU evidence
-(clear = red, triangle from a host-built pipeline = green, test
-texture = known pattern, all readback-verified) and de-risks the
-hardest integration (Adreno + Turnip behaviour) before shader
-complexity stacks on top.
+Once the command path exists without shaders, it is DESIGNED to yield
+the first real GPU evidence gates — clear = red, triangle from a
+host-built pipeline = green, test texture = known pattern, each
+readback-compared (these are the planned M7/M8 evidence gates, NOT
+current results — today's code clears an image and nothing more). That
+de-risks the hardest integration (Adreno + Turnip behaviour) before
+shader complexity stacks on top.

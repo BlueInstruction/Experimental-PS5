@@ -18,7 +18,10 @@ T1 without T2 is "logic is right". T2 without T3 is "it runs" — never
 ## Milestone PASS format (mandatory shape)
 
 Every milestone completion is reported in this exact form, so the
-repository stays auditable instead of becoming a set of claims:
+repository stays auditable instead of becoming a set of claims. The
+block below is an ILLUSTRATIVE example of the format only — none of
+its lines is current status (M1, M5 and M7 are all unmet today; see
+`docs/milestones.md`):
 
 ```
 M1 PASS
@@ -71,7 +74,7 @@ verification.
 | SELF container extract | `runtime_linker_selftest` / `self_extract_selftest` | T1 | exists |
 | Runtime linker + NID gate | `import_trap_test.cpp` | T1 | exists, PASS |
 | Guest memory ranges | `memory_range_test.cpp` | T1 | exists, PASS |
-| JNI ABI parity | hosttests JNI check (45 symbols × 2 ABIs) | T1 | exists, PASS |
+| JNI symbol-name parity | source-level name check, 45 symbols × 2 ABIs (`tools/check_jni_symbols.py`) | T1 | exists, PASS — names only; signatures and built-library exports are NOT checked here |
 | PM4 stream decode | `pm4_stream_test.cpp` | T1 | M5 deliverable |
 | CPU fixtures (9) | `docs/cpu.md` table | T1+T2 | M1 deliverable — BLOCKED on device (see cpu.md) |
 | Vulkan readback | self-contained proof → readback | T2→T3 | proof exists; readback = M7 deliverable |
@@ -89,5 +92,7 @@ verification.
    per-stage heartbeat, evidence-first crash dumps — all existing
    patterns to keep).
 4. A layer may advance on T1 alone only when its integration is
-   host-side by design (M5-M7 GPU chain, M8 decoder), and must say so
-   in the milestone entry.
+   host-side by design AND its gate does not demand more: M5-M6 only.
+   M7 requires on-device T2 evidence and its T3 readback gate; M8's
+   decoder is host-side but its gate requires T3 readback too. Each
+   milestone entry must say which tiers its own gate names.
