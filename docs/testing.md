@@ -75,7 +75,7 @@ verification.
 | Runtime linker + NID gate | `import_trap_test.cpp` | T1 | exists, PASS |
 | Guest memory ranges | `memory_range_test.cpp` | T1 | exists, PASS |
 | JNI symbol-name parity | source-level name check, 45 symbols × 2 ABIs (`tools/check_jni_symbols.py`) | T1 | exists, PASS — names only; signatures and built-library exports are NOT checked here |
-| PM4 stream decode | `pm4_stream_test.cpp` | T1 | M5 deliverable |
+| PM4 stream decode | `pm4_stream_test.cpp` | T1 | exists, PASS (12/12 packets, 0 stream errors) |
 | CPU fixtures (9) | `docs/cpu.md` table | T1+T2 | M1 deliverable — BLOCKED on device (see cpu.md) |
 | Vulkan readback | self-contained proof → readback | T2→T3 | proof exists; readback = M7 deliverable |
 | Shader compile | reference pattern compare | T3 | M8 deliverable |

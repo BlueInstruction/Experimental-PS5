@@ -76,7 +76,7 @@ HLE:  guest libSce* call → NID gate (syscall trap) → HLE function
 | Android frontend | working shell | daily device use |
 | Driver import + namespace load | working on device | `driverVerified=yes`, Turnip v26.3.0-R4, 2026-09-05 screenshots |
 | Host Vulkan init + swapchain + clear-submit proof | works on device | self-contained GPU proof PASS |
-| PM4 decoder → GnmState | started (11 packet semantics, partial) | `pm4_decoder.cpp` + synthetic `gnm_selftest` only — the committed stream test is pending (M5 deliverable, not in `run.sh` yet) |
+| PM4 decoder → GnmState | **M5 PASS** (12/12 packets, T1) | `tools/hosttests/pm4_stream_test.cpp` in `run.sh`; SET_SH_REG_OFFSET/DRAW_INDEX_2 semantics partial by design (see docs/gpu.md) |
 | GPU IR | absent | — |
 | IR-driven Vulkan rendering | absent | `frames=0` in every session |
 | SELF/ELF loader, runtime linker | real code, unvalidated past load | load path blocked behind CPU dispatch fault |

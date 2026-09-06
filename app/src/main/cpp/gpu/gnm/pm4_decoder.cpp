@@ -164,16 +164,16 @@ size_t Pm4Decoder::Decode(const uint32_t* dwords, size_t dwordCount,
             break;
         }
         case kItSetShRegOffset: {
-            // Same register space as SET_SH_REG plus an address pair;
-            // milestone-1 stores only the register values. The address pair
-            // is discarded for now and the packet trace carries no address
-            // field yet — partial semantics, documented as such in
-            // docs/gpu.md (do not call this full SET_SH_REG_OFFSET
-            // coverage in any evidence claim).
+            // Same register space as SET_SH_REG plus an address pair
+            // (body[1]=addrLo, body[2]=addrHi in the public GCN layout).
+            // Milestone-1 stores only the register VALUES: the address pair
+            // is discarded — both dwords, not one — and the packet trace
+            // carries no address field yet. Partial semantics, documented as
+            // such in docs/gpu.md; the pm4_stream_test locks this contract.
             if (bodyNeed >= kBodySetRegMin + 2) {
                 const uint32_t spaceOffset = body[0];
-                for (uint32_t v = 2; v < bodyNeed; ++v) {
-                    state.WriteRegister(kShRegBase + spaceOffset + (v - 2),
+                for (uint32_t v = 3; v < bodyNeed; ++v) {
+                    state.WriteRegister(kShRegBase + spaceOffset + (v - 3),
                                         body[v]);
                 }
             } else {

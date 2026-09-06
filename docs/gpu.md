@@ -66,15 +66,21 @@ only GPU types that exist; do not code against the planned names yet.
   decoder → shader IR → SPIR-V. Starting shaders before the command
   path is the failure mode this plan forbids.
 
-## M5 evidence gate (PM4 decoder)
+## M5 evidence gate (PM4 decoder) — **MET**
 
 Host-side, deterministic: a fixed PM4 test stream with known packet
 count and opcodes decodes to the exact expected structured sequence —
 `N packets in, N/N records out, 0 unexpected stream errors`, register
 banks hold the written values, draw records carry the right
-count/indexed/instances fields. Target test file:
-`tools/hosttests/pm4_stream_test.cpp` (to be added with the stream
-fixtures).
+count/indexed/instances fields.
+
+Status: `tools/hosttests/pm4_stream_test.cpp` IS that gate and it
+passes — `M5 PASS: 12 packets decoded, 12/12 expected opcodes, 0
+unexpected stream errors` (wired into `tools/hosttests/run.sh`). The
+gate run exposed two real defects that are now fixed: the
+SET_SH_REG_OFFSET handler discarded only ONE address dword instead of
+the pair, and GnmState's CONFIG bank range overlapped the entire SH
+range, silently rerouting every SH write into CONFIG.
 
 ## M7 evidence gate (Vulkan backend, on device)
 

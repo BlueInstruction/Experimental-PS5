@@ -59,14 +59,19 @@ dispatch), TLS/FSBASE/GDT-LDT install, ORBIS entry ABI, syscall
 dispatcher with reserved NID-gate numbers, sce_kernel_hle foundation,
 loud-fail unknown-NID policy.
 
-## M5 — PM4 Decoder — **STARTED**
+## M5 — PM4 Decoder — **PASS** (pm4_stream_test.cpp, T1)
 
 Gate: fixed PM4 test stream decodes to the exact expected structured
-sequence (`pm4_stream_test.cpp`, T1) — counts, opcodes, register
-banks, draw/dispatch records.
-Existing: type-3 decode, 11 packet semantics with GnmState writes,
-unknown-opcode accounting, bounded stream errors. Missing: the
-committed stream fixtures + expected-sequence test.
+sequence (`tools/hosttests/pm4_stream_test.cpp`) — counts, opcodes,
+register banks, draw/dispatch records. Evidence: `M5 PASS — 12 packets
+decoded, 12/12 expected opcodes, 0 unexpected stream errors`
+(deterministic, host-side; wired into `tools/hosttests/run.sh`).
+Existing: type-3 decode, 11 packet semantics with GnmState writes
+(SET_SH_REG_OFFSET discards its address pair; DRAW_INDEX_2 records
+count/initiator only — both partial by design), unknown-opcode
+accounting, bounded stream errors. The gate run also caught and fixed
+a real GnmState defect: the CONFIG bank size overlapped the SH range,
+so every SH write was rerouted into the CONFIG bank.
 
 ## M6 — GPU IR — **ABSENT**
 
