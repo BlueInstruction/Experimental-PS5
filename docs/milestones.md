@@ -95,8 +95,11 @@ draws/dispatches/named writes now share an event-seq stamp, dispatches
 are journaled (not last-wins), and the scissor pair (PA_SC_SCREEN_
 SCISSOR_TL/BR, context offsets 0xC/0xD per Kyty + RPCSX) is journaled
 by name with eviction-safe pairing (a BR record carries its write-time
-TL value, so the bounded journal can never lose the pair) plus
-eviction-proof cumulative named/carried counters.
+TL value, so TL eviction from the bounded journal cannot corrupt the
+lowered box for as long as the BR record itself remains retained; a BR
+record that has itself fallen out of the bounded journal lowers
+nothing, like any record past the window) plus eviction-proof
+cumulative named/carried counters.
 
 ## M7 — Vulkan Backend — **GATED** (infrastructure ahead of the gate)
 

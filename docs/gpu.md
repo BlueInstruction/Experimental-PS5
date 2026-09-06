@@ -117,7 +117,7 @@ EXACT expected op sequence — kinds, order, payloads, provenance
 asserted.
 
 Status: `tools/hosttests/gpu_ir_test.cpp` IS that gate and it passes —
-it prints the mandated four-line PASS block (docs/testing.md shape):
+it prints the mandated five-line PASS block (docs/testing.md shape):
 `M6 PASS` / `GPU IR:` / `5 ops lowered` / `5/5 expected ops` /
 `0 unexpected lowering drops` (wired into `tools/hosttests/run.sh`).
 The gate locks, among the rest:
@@ -127,8 +127,9 @@ verbatim-carry (count/instances/indexTypeRaw/initiatorRaw) for
 Draw/DrawIndexed/Dispatch, one submit-boundary
 Barrier only on a non-empty list (seq = last EMITTED op),
 unmapped-write accounting (4/7 writes
-lower to nothing and say so), journal-eviction pairing (a BR write >64
-named writes after its TL still lowers the correct box), and
+lower to nothing and say so), journal-eviction pairing (a BR write whose
+TL entry already fell out of the bounded journal still lowers the
+correct box), and
 drop-counting on a full list.
 
 ## M7 evidence gate (Vulkan backend, on device)

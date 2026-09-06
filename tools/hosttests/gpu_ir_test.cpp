@@ -13,7 +13,9 @@
 //      (#error on Vulkan headers); this section locks the runtime honesty
 //      counters instead: named/carried/unmapped register-write accounting;
 //   4. bounded list — capacity rejections are counted, never silent;
-//   5. Reset — an emptied state lowers to an empty list, no barrier.
+//   5. journal eviction — a scissor BR whose TL entry was evicted still
+//      lowers the write-time pair; cumulative accounting stays exact;
+//   6. Reset — an emptied state lowers to an empty list, no barrier.
 //
 // Platform-independent: builds with tools/hosttests/run.sh, no device.
 
@@ -308,7 +310,7 @@ int main() {
     GpuOpList evOps;
     const LowerStats evStats = LowerGnmStateToIR(ev, evOps);
     chk(evStats.scissorOps == 1, "eviction: exactly one SetScissor emitted");
-    if (evStats.scissorOps == 1 && !evOps.Empty()) {
+    if (evStats.scissorOps == 1 && evOps.Size() >= 2) {
         const GpuOp& evSc = evOps.Ops()[0];
         chk(evSc.xMin == 3 && evSc.yMin == 10 && evSc.xMax == 512 &&
                 evSc.yMax == 80,
@@ -317,7 +319,7 @@ int main() {
                 evOps.Ops()[1].seq == evSc.seq,
             "eviction: barrier seq = last emitted op (the scissor)");
     } else {
-        chk(false, "eviction payload assertions (op missing)");
+        chk(false, "eviction payload assertions (ops missing)");
     }
     chk(ev.NamedWritesTotal() == 72,
         "eviction accounting: 72 named writes total (TL + 70 + BR)");

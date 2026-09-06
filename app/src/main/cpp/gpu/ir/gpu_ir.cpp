@@ -101,10 +101,11 @@ LowerStats LowerGnmStateToIR(const GnmState& state, GpuOpList& out) {
                      });
 
     // ---- walk the timeline ------------------------------------------------
-    // Scissor TL corner: from the BR record's write-time pairing (exact even
-    // when the TL journal entry was evicted), falling back to the last TL
-    // record seen in the journal, else the register reset value (0).
-    uint32_t lastSeenTL = 0;
+    // Scissor TL corner: from the BR record's write-time pairing. The
+    // pairing is exact even when the TL journal entry was evicted, because
+    // pairedValid comes from the durable written_ mask, which eviction
+    // never clears; when it is false, no TL was ever written in this
+    // state's lifetime and the register reset value (0) is honest.
     uint64_t lastEmittedSeq = 0;
 
     auto push = [&](const GpuOp& op) {
@@ -122,12 +123,12 @@ LowerStats LowerGnmStateToIR(const GnmState& state, GpuOpList& out) {
         case EntryKind::kNamedWrite: {
             const auto& w = writes[e.index];
             if (w.absoluteAddress == PX5::Gnm::kRegPaScScreenScissorTL) {
-                // Consumed through pairing; a TL record alone emits nothing
-                // and must NOT advance the barrier's last-emitted seq.
-                lastSeenTL = w.value;
+                // Consumed through pairing (the BR record carries the
+                // write-time TL); a TL record alone emits nothing and must
+                // NOT advance the barrier's last-emitted seq.
             } else if (w.absoluteAddress ==
                        PX5::Gnm::kRegPaScScreenScissorBR) {
-                const uint32_t tl = w.pairedValid ? w.pairedValue : lastSeenTL;
+                const uint32_t tl = w.pairedValid ? w.pairedValue : 0;
                 GpuOp op;
                 op.kind = OpKind::kSetScissor;
                 op.seq = w.seq;
