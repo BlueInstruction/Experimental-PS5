@@ -74,8 +74,10 @@ enum class OpKind : uint32_t {
 const char* OpKindName(OpKind kind);
 
 // ---------------------------------------------------------------------------
-// One IR op. Plain POD, no union (no UB), no Vulkan. Most fields are zero
-// for any given op; the "read by" comment per field names its ops.
+// One IR op. Plain aggregate with default member initializers (no union, no
+// UB, no Vulkan; the initializers are the safety feature — every field has a
+// defined value for every op). Most fields are zero for any given op; the
+// "read by" comment per field names its ops.
 // ---------------------------------------------------------------------------
 struct GpuOp {
     OpKind    kind = OpKind::kBarrier;
@@ -95,6 +97,9 @@ struct GpuOp {
     // Read by kDrawIndexed: raw guest INDEX_TYPE dword (host decode is the
     // backend's business; the IR carries the guest encoding untouched).
     uint32_t  indexTypeRaw = 0;
+    // Read by kDraw / kDrawIndexed: raw DRAW_INITIATOR dword from the draw
+    // packet, carried verbatim (part of the verbatim-payload contract).
+    uint32_t  initiatorRaw = 0;
 
     // Read by kDispatch: grid dims.
     uint32_t  gridX = 0, gridY = 0, gridZ = 0;
@@ -180,17 +185,21 @@ struct LowerStats {
 //   1. Timeline: draws, dispatches and journaled named-register writes
 //      merge in `seq` order (each log is strictly seq-ascending; see
 //      GnmState).
-//   2. PA_SC_SCREEN_SCISSOR_TL write  -> updates the pending box (xMin/yMin),
-//      emits nothing by itself.
-//      PA_SC_SCREEN_SCISSOR_BR write -> updates the pending box (xMax/yMax)
-//      AND emits one kSetScissor (one op per BR write; a TL write with no
-//      following BR never emits).
+//   2. PA_SC_SCREEN_SCISSOR_BR write -> one kSetScissor, whose TL corner is
+//      the TL value effective at write time (the journal record pairs it —
+//      journal eviction cannot lose the pair) and whose BR corner is the
+//      record's own value. A TL write emits nothing by itself (it is
+//      consumed through the pairing). A BR with no TL ever written lowers
+//      with the register reset value (0,0) — honest hardware behaviour.
 //   3. VGT_DMA_INDEX_TYPE write -> carriedRegisterWrites (no op; the value
-//      already lives in every draw record's indexTypeRaw).
-//   4. DrawRecord -> kDraw or kDrawIndexed (indexed flag), payload verbatim.
+//      already lives in every draw record's indexTypeRaw). Accounting is
+//      cumulative (GnmState counters), immune to journal eviction.
+//   4. DrawRecord -> kDraw or kDrawIndexed (indexed flag), payload verbatim
+//      (count/instances/indexTypeRaw/initiatorRaw).
 //   5. DispatchRecord -> kDispatch.
 //   6. If and only if the list is non-empty afterwards: exactly one
-//      kBarrier (submit boundary, barrierScope=0, seq = last emitted seq).
+//      kBarrier (submit boundary, barrierScope=0, seq = last EMITTED seq —
+//      non-emitting named writes never advance it).
 //   7. List-full rejections count in droppedOps and never abort the walk.
 LowerStats LowerGnmStateToIR(const PX5::Gnm::GnmState& state, GpuOpList& out);
 

@@ -26,8 +26,9 @@ Android Surface
 ```
 
 Naming note: the M6 op list lives in `gpu/ir/gpu_ir.h` (`GpuOp`,
-`OpKind`, `GpuOpList`, `LowerGnmStateToIR`). It is COMMITTED — the M7
-backend is built against these types. One addition to the earlier draft
+`OpKind`, `GpuOpList`, `LowerGnmStateToIR`). The vocabulary is COMMITTED
+— the M7 backend is to be built against these types (nothing consumes
+them on device yet; `frames=0` stands). One addition to the earlier draft
 list: `DrawIndexed` is its own op (GnmState records indexed draws via
 DRAW_INDEX_2; a single "Draw" would erase a real distinction the guest
 stream carries). A header-level guard rejects any Vulkan include in the
@@ -116,13 +117,19 @@ EXACT expected op sequence — kinds, order, payloads, provenance
 asserted.
 
 Status: `tools/hosttests/gpu_ir_test.cpp` IS that gate and it passes —
-`M6 PASS: 5 ops lowered, 5/5 expected ops, 0 unexpected lowering drops`
-(wired into `tools/hosttests/run.sh`). The gate locks, among the rest:
+it prints the mandated four-line PASS block (docs/testing.md shape):
+`M6 PASS` / `GPU IR:` / `5 ops lowered` / `5/5 expected ops` /
+`0 unexpected lowering drops` (wired into `tools/hosttests/run.sh`).
+The gate locks, among the rest:
 SetScissor box decode (X[15:0] Y[31:16] of the TL/BR pair), mid-stream
 state-change interleaving between draws (the seq timeline), payload
-verbatim-carry for Draw/DrawIndexed/Dispatch, one submit-boundary
-Barrier only on a non-empty list, unmapped-write accounting (4/7 writes
-lower to nothing and say so), and drop-counting on a full list.
+verbatim-carry (count/instances/indexTypeRaw/initiatorRaw) for
+Draw/DrawIndexed/Dispatch, one submit-boundary
+Barrier only on a non-empty list (seq = last EMITTED op),
+unmapped-write accounting (4/7 writes
+lower to nothing and say so), journal-eviction pairing (a BR write >64
+named writes after its TL still lowers the correct box), and
+drop-counting on a full list.
 
 ## M7 evidence gate (Vulkan backend, on device)
 

@@ -80,10 +80,20 @@ public:
     // whose semantics the model can name today (the scissor pair and
     // VGT_DMA_INDEX_TYPE; addresses from pm4_packet.h). Everything else is
     // tracked in the banks + written-mask accounting only.
+    //
+    // Eviction-safe pairing: the journal is bounded (drop-oldest), but a
+    // PA_SC_SCREEN_SCISSOR_BR record carries the TL bank value effective at
+    // write time (pairedValue/pairedValid), so the lowering can emit the
+    // correct scissor box even when the matching TL entry was evicted by
+    // later named writes. Cumulative named/carried counters
+    // (NamedWritesTotal/CarriedWritesTotal) survive eviction too, so the
+    // lowering's honesty accounting stays exact for any stream length.
     struct RegWriteRecord {
         uint64_t seq = 0;
         uint32_t absoluteAddress = 0;
         uint32_t value = 0;
+        uint32_t pairedValue = 0;   // BR records: TL bank value at write time
+        bool     pairedValid = false;
     };
 
     GnmState();
@@ -119,6 +129,11 @@ public:
     const std::vector<RegWriteRecord>& NamedWriteLog() const {
         return named_write_log_;
     }
+    // Cumulative named-write accounting (immune to journal eviction):
+    // every write to a named address, and the INDEX_TYPE subset whose
+    // semantics are carried inside draw payloads.
+    uint64_t NamedWritesTotal()  const { return named_write_total_; }
+    uint64_t CarriedWritesTotal() const { return carried_write_total_; }
     uint32_t LastDispatchDims(uint32_t* y, uint32_t* z) const;
 
     // ---- Bank introspection (diagnostics) ---------------------------------
@@ -142,6 +157,8 @@ private:
     uint32_t num_instances_ = 0;
     uint32_t dispatch_x_ = 0, dispatch_y_ = 0, dispatch_z_ = 0;
     uint64_t seq_counter_ = 0;   // monotonic event counter (draws/dispatches/named writes)
+    uint64_t named_write_total_ = 0;   // cumulative, eviction-proof
+    uint64_t carried_write_total_ = 0; // INDEX_TYPE subset of the above
     std::vector<DrawRecord> draw_log_;
     std::vector<DispatchRecord> dispatch_log_;
     std::vector<RegWriteRecord> named_write_log_;

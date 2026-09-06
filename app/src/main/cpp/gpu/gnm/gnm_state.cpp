@@ -44,7 +44,11 @@ bool GnmState::WriteRegister(uint32_t absoluteAddress, uint32_t value) {
             // Named-register journal: the only writes whose semantics the
             // model names today. Bounded, drop-oldest; each entry carries
             // the shared event seq so the GPU-IR lowering can interleave
-            // state changes with draws/dispatches exactly.
+            // state changes with draws/dispatches exactly. BR records also
+            // carry the TL bank value effective at write time, so journal
+            // eviction can never lose the scissor pair (bot-review P1);
+            // the cumulative counters below keep the honesty accounting
+            // exact for any stream length.
             if (absoluteAddress == kRegPaScScreenScissorTL ||
                 absoluteAddress == kRegPaScScreenScissorBR ||
                 absoluteAddress == kRegVgtDmaIndexType) {
@@ -52,6 +56,17 @@ bool GnmState::WriteRegister(uint32_t absoluteAddress, uint32_t value) {
                 w.seq = ++seq_counter_;
                 w.absoluteAddress = absoluteAddress;
                 w.value = value;
+                ++named_write_total_;
+                if (absoluteAddress == kRegPaScScreenScissorBR) {
+                    const size_t tlIdx =
+                        kRegPaScScreenScissorTL - kContextRegBase;
+                    w.pairedValue =
+                        banks_[static_cast<size_t>(RegSpace::kContext)][tlIdx];
+                    w.pairedValid = written_[static_cast<size_t>(
+                        RegSpace::kContext)][tlIdx];
+                } else if (absoluteAddress == kRegVgtDmaIndexType) {
+                    ++carried_write_total_;
+                }
                 named_write_log_.push_back(w);
                 if (named_write_log_.size() > kMaxNamedWriteLog) {
                     named_write_log_.erase(named_write_log_.begin());
@@ -129,6 +144,8 @@ void GnmState::Reset() {
     num_instances_ = 0;
     dispatch_x_ = dispatch_y_ = dispatch_z_ = 0;
     seq_counter_ = 0;
+    named_write_total_ = 0;
+    carried_write_total_ = 0;
     draw_log_.clear();
     dispatch_log_.clear();
     named_write_log_.clear();

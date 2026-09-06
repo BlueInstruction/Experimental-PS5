@@ -9,6 +9,7 @@
 #include "gpu/ir/gpu_ir.h"
 
 #include <algorithm>
+#include <cstdio>
 
 #include "gpu/gnm/pm4_packet.h"
 
@@ -100,46 +101,46 @@ LowerStats LowerGnmStateToIR(const GnmState& state, GpuOpList& out) {
                      });
 
     // ---- walk the timeline ------------------------------------------------
-    // Pending scissor box: TL write updates xMin/yMin, BR write updates
-    // xMax/yMax and emits. Defaults are the guest's unwritten values (0).
-    uint32_t scMinX = 0, scMinY = 0, scMaxX = 0, scMaxY = 0;
-    uint64_t lastSeq = 0;
+    // Scissor TL corner: from the BR record's write-time pairing (exact even
+    // when the TL journal entry was evicted), falling back to the last TL
+    // record seen in the journal, else the register reset value (0).
+    uint32_t lastSeenTL = 0;
+    uint64_t lastEmittedSeq = 0;
 
     auto push = [&](const GpuOp& op) {
         if (out.Push(op)) {
             ++stats.opsEmitted;
-        } else {
-            ++stats.droppedOps;
+            lastEmittedSeq = op.seq;
+            return true;
         }
+        ++stats.droppedOps;
+        return false;
     };
 
     for (const TimelineEntry& e : timeline) {
-        lastSeq = e.seq;
         switch (e.kind) {
         case EntryKind::kNamedWrite: {
             const auto& w = writes[e.index];
-            GpuOp op;
-            op.seq = w.seq;
             if (w.absoluteAddress == PX5::Gnm::kRegPaScScreenScissorTL) {
-                scMinX = w.value & 0xFFFFu;
-                scMinY = (w.value >> 16) & 0xFFFFu;
+                // Consumed through pairing; a TL record alone emits nothing
+                // and must NOT advance the barrier's last-emitted seq.
+                lastSeenTL = w.value;
             } else if (w.absoluteAddress ==
                        PX5::Gnm::kRegPaScScreenScissorBR) {
-                scMaxX = w.value & 0xFFFFu;
-                scMaxY = (w.value >> 16) & 0xFFFFu;
+                const uint32_t tl = w.pairedValid ? w.pairedValue : lastSeenTL;
+                GpuOp op;
                 op.kind = OpKind::kSetScissor;
-                op.xMin = scMinX;
-                op.yMin = scMinY;
-                op.xMax = scMaxX;
-                op.yMax = scMaxY;
+                op.seq = w.seq;
+                op.xMin = tl & 0xFFFFu;
+                op.yMin = (tl >> 16) & 0xFFFFu;
+                op.xMax = w.value & 0xFFFFu;
+                op.yMax = (w.value >> 16) & 0xFFFFu;
                 ++stats.scissorOps;
                 push(op);
-            } else if (w.absoluteAddress ==
-                       PX5::Gnm::kRegVgtDmaIndexType) {
-                // Carried: every Draw/DrawIndexed payload already holds this
-                // value via DrawRecord.indexTypeRaw.
-                ++stats.carriedRegisterWrites;
             }
+            // kRegVgtDmaIndexType: carried — every Draw/DrawIndexed payload
+            // already holds this value via DrawRecord.indexTypeRaw. Counted
+            // below from the eviction-proof cumulative counter.
             break;
         }
         case EntryKind::kDraw: {
@@ -151,6 +152,7 @@ LowerStats LowerGnmStateToIR(const GnmState& state, GpuOpList& out) {
             op.count = d.count;
             op.instances = d.instances;
             op.indexTypeRaw = d.indexTypeRaw;
+            op.initiatorRaw = d.initiator;
             if (d.indexed) ++stats.drawIndexedOps; else ++stats.drawOps;
             push(op);
             break;
@@ -172,18 +174,22 @@ LowerStats LowerGnmStateToIR(const GnmState& state, GpuOpList& out) {
     }
 
     // Unmapped accounting: every register write that was neither journaled
-    // (named) nor absent. The journal IS the named set, so:
-    //   unmapped = total writes - journaled writes.
+    // (named) nor absent. The journal IS the named set, but it is bounded —
+    // the cumulative GnmState counters survive eviction, so the split stays
+    // exact for any stream length:
+    //   unmapped = total writes - named writes (cumulative)
+    //   carried  = INDEX_TYPE writes (cumulative)
     const uint64_t totalWrites = state.TotalRegisterWrites();
-    const uint64_t journaled = writes.size();
+    const uint64_t namedTotal = state.NamedWritesTotal();
     stats.unmappedRegisterWrites =
-        (totalWrites >= journaled) ? (totalWrites - journaled) : 0;
+        (totalWrites >= namedTotal) ? (totalWrites - namedTotal) : 0;
+    stats.carriedRegisterWrites = state.CarriedWritesTotal();
 
     // ---- submit boundary --------------------------------------------------
     if (!out.Empty()) {
         GpuOp barrier;
         barrier.kind = OpKind::kBarrier;
-        barrier.seq = lastSeq;
+        barrier.seq = lastEmittedSeq;
         barrier.barrierScope = 0;
         ++stats.barrierOps;
         push(barrier);

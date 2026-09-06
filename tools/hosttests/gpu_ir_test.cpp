@@ -155,13 +155,15 @@ int main() {
         const GpuOp& draw = ops.Ops()[1];
         chk(draw.kind == OpKind::kDraw && draw.count == kAutoCount &&
                 draw.instances == kInstances &&
-                draw.indexTypeRaw == kIndexTypeRaw,
-            "Draw carries count/instances/indexTypeRaw verbatim");
+                draw.indexTypeRaw == kIndexTypeRaw &&
+                draw.initiatorRaw == kInitiator,
+            "Draw carries count/instances/indexTypeRaw/initiator verbatim");
         const GpuOp& di2 = ops.Ops()[2];
         chk(di2.kind == OpKind::kDrawIndexed && di2.count == kDi2Count &&
                 di2.instances == kInstances &&
-                di2.indexTypeRaw == kIndexTypeRaw,
-            "DrawIndexed carries count/instances/indexTypeRaw verbatim");
+                di2.indexTypeRaw == kIndexTypeRaw &&
+                di2.initiatorRaw == kInitiator,
+            "DrawIndexed carries count/instances/indexTypeRaw/initiator");
         const GpuOp& disp = ops.Ops()[3];
         chk(disp.kind == OpKind::kDispatch && disp.gridX == kDispX &&
                 disp.gridY == kDispY && disp.gridZ == kDispZ,
@@ -170,7 +172,7 @@ int main() {
         chk(barrier.kind == OpKind::kBarrier && barrier.barrierScope == 0,
             "exactly one submit-boundary Barrier, scope 0");
         chk(ops.Ops()[4].seq == ops.Ops()[3].seq,
-            "Barrier provenance seq = last timeline event");
+            "Barrier provenance seq = last EMITTED op (dispatch here)");
         // Provenance chain (packet offsets derived from the fixture stream):
         // NOP@0(2), ctx@2(3), ctx@5(3), cfg@8(3), sh@11(5), idx@16(2),
         // inst@18(2), auto@20(3), di2@23(6), dispatch@29(4).
@@ -206,7 +208,7 @@ int main() {
     printf("  %s\n", ls.SummaryString().c_str());
 
     // ==== Section 2: interleaving ==========================================
-    printf("\nInterleaving (draw, scissor change, draw, dispatch, draw):\n");
+    printf("\nInterleaving (scissor, draw, scissor change, dispatch, draw):\n");
     state.Reset();
     stats.Reset();
     errors.clear();
@@ -271,11 +273,72 @@ int main() {
     chk(small.Size() == 2, "cap-2 list holds exactly 2 ops");
     chk(ls3.droppedOps == 2, "2 ops rejected and counted (3 draws -> 2 push fails incl. barrier)");
     chk(ls3.opsEmitted == 2, "opsEmitted counts only accepted ops");
-    chk(small.Ops()[0].kind == OpKind::kDraw &&
-            small.Ops()[1].kind == OpKind::kDraw,
-            "the two accepted ops are the first draws, order kept");
+    if (small.Size() == 2) {
+        chk(small.Ops()[0].kind == OpKind::kDraw &&
+                small.Ops()[1].kind == OpKind::kDraw,
+                "the two accepted ops are the first draws, order kept");
+    } else {
+        chk(false, "capacity payload assertions (op list incomplete)");
+    }
 
-    // ==== Section 5: Reset ==================================================
+    // ==== Section 5: journal eviction (pairing + accounting) ================
+    // The bot-review P1 scenario: >64 named writes between a scissor TL and
+    // its BR evict the TL journal entry. The BR record's write-time pairing
+    // must still lower the CORRECT box, and the cumulative named/carried
+    // counters must keep the honesty split exact.
+    printf("\nJournal eviction (TL evicted, BR pairs from write-time bank):\n");
+    GnmState ev;
+    constexpr uint32_t kEvTL = 0x000A0003u;   // TL: x=3, y=10
+    constexpr uint32_t kEvBR = 0x00500200u;   // BR: x=512, y=80
+    ev.WriteRegister(PX5::Gnm::kRegPaScScreenScissorTL, kEvTL);
+    for (uint32_t i = 0; i < 70; ++i) {
+        // 70 named writes (INDEX_TYPE) push the TL entry past the 64 cap.
+        ev.WriteRegister(PX5::Gnm::kRegVgtDmaIndexType, i);
+    }
+    chk(ev.NamedWriteLog().size() == 64,
+        "journal is bounded at 64 (eviction happened)");
+    bool tlEvicted = true;
+    for (const auto& w : ev.NamedWriteLog()) {
+        if (w.absoluteAddress == PX5::Gnm::kRegPaScScreenScissorTL) {
+            tlEvicted = false;
+        }
+    }
+    chk(tlEvicted, "the TL journal entry was evicted by the 70 writes");
+    ev.WriteRegister(PX5::Gnm::kRegPaScScreenScissorBR, kEvBR);
+    GpuOpList evOps;
+    const LowerStats evStats = LowerGnmStateToIR(ev, evOps);
+    chk(evStats.scissorOps == 1, "eviction: exactly one SetScissor emitted");
+    if (evStats.scissorOps == 1 && !evOps.Empty()) {
+        const GpuOp& evSc = evOps.Ops()[0];
+        chk(evSc.xMin == 3 && evSc.yMin == 10 && evSc.xMax == 512 &&
+                evSc.yMax == 80,
+            "eviction: BR still pairs with the write-time TL (not 0,0)");
+        chk(evOps.Ops()[1].kind == OpKind::kBarrier &&
+                evOps.Ops()[1].seq == evSc.seq,
+            "eviction: barrier seq = last emitted op (the scissor)");
+    } else {
+        chk(false, "eviction payload assertions (op missing)");
+    }
+    chk(ev.NamedWritesTotal() == 72,
+        "eviction accounting: 72 named writes total (TL + 70 + BR)");
+    chk(ev.CarriedWritesTotal() == 70,
+        "eviction accounting: 70 carried INDEX_TYPE writes");
+    chk(evStats.carriedRegisterWrites == 70,
+        "eviction: carried counter immune to journal eviction");
+    // Total register writes = 72 named + 0 unmapped; the split stays exact.
+    chk(evStats.unmappedRegisterWrites == 0,
+        "eviction: no named write misreported as unmapped");
+    // BR with no TL ever written: lowers with the register reset value.
+    GnmState noTL;
+    noTL.WriteRegister(PX5::Gnm::kRegPaScScreenScissorBR, 0x000100C8u);
+    GpuOpList noTLOps;
+    const LowerStats noTLStats = LowerGnmStateToIR(noTL, noTLOps);
+    chk(noTLStats.scissorOps == 1 && !noTLOps.Empty() &&
+            noTLOps.Ops()[0].xMin == 0 && noTLOps.Ops()[0].yMin == 0 &&
+            noTLOps.Ops()[0].xMax == 200 && noTLOps.Ops()[0].yMax == 1,
+        "BR with no TL ever written lowers with reset-value TL (0,0)");
+
+    // ==== Section 6: Reset ==================================================
     printf("\nReset:\n");
     state.Reset();
     GpuOpList ops3;

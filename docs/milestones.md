@@ -94,7 +94,9 @@ ops. The M6 gate run also deepened the state model it lowers from:
 draws/dispatches/named writes now share an event-seq stamp, dispatches
 are journaled (not last-wins), and the scissor pair (PA_SC_SCREEN_
 SCISSOR_TL/BR, context offsets 0xC/0xD per Kyty + RPCSX) is journaled
-by name.
+by name with eviction-safe pairing (a BR record carries its write-time
+TL value, so the bounded journal can never lose the pair) plus
+eviction-proof cumulative named/carried counters.
 
 ## M7 — Vulkan Backend — **GATED** (infrastructure ahead of the gate)
 
