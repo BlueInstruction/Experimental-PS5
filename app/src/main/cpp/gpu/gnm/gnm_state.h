@@ -52,8 +52,13 @@ public:
     static constexpr uint32_t kShSize      = 0x0400;  // 0x2C00..0x2FFF
     static constexpr uint32_t kContextSize = 0x3000;  // 0x28000..0x2AFFF
 
-    // Bounded history of recent draw records (most recent last).
+    // Bounded history of recent records (most recent last). The event
+    // sequence number (seq) is stamped at record time and shared across
+    // draws, dispatches and the named-write journal, so downstream lowering
+    // (GPU IR, M6) can restore the guest's event order exactly.
     static constexpr size_t kMaxDrawLog = 64;
+    static constexpr size_t kMaxDispatchLog = 32;
+    static constexpr size_t kMaxNamedWriteLog = 64;
 
     struct DrawRecord {
         uint32_t packetOffset;   // dword offset of the draw packet in its cb
@@ -62,6 +67,23 @@ public:
         uint32_t instances;      // current VGT_NUM_INSTANCES
         uint32_t indexTypeRaw;   // current INDEX_TYPE dword
         bool     indexed;        // true for DRAW_INDEX_2-style packets
+        uint64_t seq = 0;        // event-sequence stamp (GnmState-owned)
+    };
+
+    struct DispatchRecord {
+        uint64_t seq = 0;        // event-sequence stamp (GnmState-owned)
+        uint32_t packetOffset = 0;
+        uint32_t x = 0, y = 0, z = 0;
+    };
+
+    // Journal entry for NAMED register writes — the only register writes
+    // whose semantics the model can name today (the scissor pair and
+    // VGT_DMA_INDEX_TYPE; addresses from pm4_packet.h). Everything else is
+    // tracked in the banks + written-mask accounting only.
+    struct RegWriteRecord {
+        uint64_t seq = 0;
+        uint32_t absoluteAddress = 0;
+        uint32_t value = 0;
     };
 
     GnmState();
@@ -81,13 +103,22 @@ public:
     void SetIndexTypeRaw(uint32_t raw)  { index_type_raw_ = raw; }
     void SetNumInstances(uint32_t n)    { num_instances_ = n; }
     void RecordDraw(const DrawRecord& r);
-    void RecordDispatch(uint32_t x, uint32_t y, uint32_t z);
+    // packetOffset: dword offset of the dispatch packet in its cb (0 when
+    // the caller has no provenance — the older two-argument form).
+    void RecordDispatch(uint32_t x, uint32_t y, uint32_t z,
+                        uint32_t packetOffset = 0);
 
     uint64_t DrawCalls()      const { return draw_calls_; }
     uint64_t Dispatches()     const { return dispatches_; }
     uint32_t IndexTypeRaw()   const { return index_type_raw_; }
     uint32_t NumInstances()   const { return num_instances_; }
     const std::vector<DrawRecord>& DrawLog() const { return draw_log_; }
+    const std::vector<DispatchRecord>& DispatchLog() const {
+        return dispatch_log_;
+    }
+    const std::vector<RegWriteRecord>& NamedWriteLog() const {
+        return named_write_log_;
+    }
     uint32_t LastDispatchDims(uint32_t* y, uint32_t* z) const;
 
     // ---- Bank introspection (diagnostics) ---------------------------------
@@ -110,7 +141,10 @@ private:
     uint32_t index_type_raw_ = 0;
     uint32_t num_instances_ = 0;
     uint32_t dispatch_x_ = 0, dispatch_y_ = 0, dispatch_z_ = 0;
+    uint64_t seq_counter_ = 0;   // monotonic event counter (draws/dispatches/named writes)
     std::vector<DrawRecord> draw_log_;
+    std::vector<DispatchRecord> dispatch_log_;
+    std::vector<RegWriteRecord> named_write_log_;
 };
 
 } // namespace PX5::Gnm

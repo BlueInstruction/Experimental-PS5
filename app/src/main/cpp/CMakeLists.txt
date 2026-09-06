@@ -55,6 +55,7 @@ if(ANDROID_ABI STREQUAL "x86_64")
             px5
             SHARED
             stub/ui_smoke_stub.cpp
+            gpu/ir/gpu_ir.cpp
             gpu/vulkan_device.cpp
             gpu/driver_manager.cpp
             gpu/gnm/gnm_state.cpp
@@ -173,6 +174,7 @@ add_library(
         loader/self_fixtures.cpp
         loader/runtime_linker.cpp
         loader/runtime_linker_selftest.cpp
+        gpu/ir/gpu_ir.cpp
         gpu/vulkan_device.cpp
         gpu/driver_manager.cpp
         gpu/gnm/gnm_state.cpp

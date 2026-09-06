@@ -73,11 +73,28 @@ accounting, bounded stream errors. The gate run also caught and fixed
 a real GnmState defect: the CONFIG bank size overlapped the SH range,
 so every SH write was rerouted into the CONFIG bank.
 
-## M6 — GPU IR — **ABSENT**
+## M6 — GPU IR — **PASS** (gpu_ir_test.cpp, T1)
 
 Gate: GnmState + draw records lower to a committed IR op list
 (SetRenderTarget … Barrier) with a lower-to-IR host test. No Vulkan
 types may appear in IR definitions (keeps GNM decoupled from Vulkan).
+Status: `gpu/ir/gpu_ir.h` commits the full op vocabulary (SetRenderTarget,
+SetViewport, SetScissor, BindPipeline, BindResource, Draw, DrawIndexed,
+Dispatch, CopyImage, Clear, Barrier — plain POD payloads, header guard
+rejects Vulkan includes) and `gpu/ir/gpu_ir.cpp` lowers
+`LowerGnmStateToIR` over GnmState's event-seq timeline. Evidence:
+`M6 PASS — 5 ops lowered, 5/5 expected ops, 0 unexpected lowering drops`
+(deterministic, host-side; wired into `tools/hosttests/run.sh`). Honest
+scope: the lowering emits SetScissor / Draw / DrawIndexed / Dispatch /
+Barrier — the ops the state model can back with named semantics; the
+remaining vocabulary ops are committed types with no emitter until the
+decoder deepens named-register semantics (same policy as M5's PARTIAL
+notes), and unmapped register writes are counted, never guessed into
+ops. The M6 gate run also deepened the state model it lowers from:
+draws/dispatches/named writes now share an event-seq stamp, dispatches
+are journaled (not last-wins), and the scissor pair (PA_SC_SCREEN_
+SCISSOR_TL/BR, context offsets 0xC/0xD per Kyty + RPCSX) is journaled
+by name.
 
 ## M7 — Vulkan Backend — **GATED** (infrastructure ahead of the gate)
 

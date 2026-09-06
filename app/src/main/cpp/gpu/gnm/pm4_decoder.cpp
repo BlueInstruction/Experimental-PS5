@@ -228,7 +228,8 @@ size_t Pm4Decoder::Decode(const uint32_t* dwords, size_t dwordCount,
         }
         case kItDispatchDirect: {
             if (bodyNeed >= kBodyDispatch) {
-                state.RecordDispatch(body[0], body[1], body[2]);
+                state.RecordDispatch(body[0], body[1], body[2],
+                                     static_cast<uint32_t>(i));
                 ++stats.dispatches;
             }
             break;

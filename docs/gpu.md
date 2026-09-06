@@ -12,11 +12,11 @@ guest PM4 stream (dwords in guest memory)
   ↓  pm4_decoder.cpp        — bytes → structured packets
 PacketRecord trace (bounded)  +  GnmState  ← current, existing types
   ↓  gnm_state.cpp          — packets → device state
-GnmState (register banks, index type, instances, draw/dispatch records)
-  ↓  GPU IR (M6, to be built — planned types: GpuCommand/GpuState-shaped
-     render ops)          — state + records → render ops
+GnmState (register banks, index type, instances, draw/dispatch records,
+          event-seq timeline, named-write journal)
+  ↓  gpu/ir/gpu_ir.cpp      — state + records → render ops  (M6, PASS)
 SetRenderTarget / SetViewport / SetScissor / BindPipeline /
-BindResource / Draw / Dispatch / CopyImage / Clear / Barrier
+BindResource / Draw / DrawIndexed / Dispatch / CopyImage / Clear / Barrier
   ↓  vulkan_backend (M7)     — render ops → Vulkan
 VkInstance → VkPhysicalDevice → VkDevice → VkQueue → images → submit
   ↓
@@ -25,10 +25,13 @@ Adreno (proprietary ICD or imported Turnip) → framebuffer
 Android Surface
 ```
 
-Naming note: `GpuCommand { opcode, payload }` in earlier drafts of this
-diagram is a PLANNED M6 abstraction. Today the decoder writes
-`GnmState` and an optional bounded `PacketRecord` trace — those are the
-only GPU types that exist; do not code against the planned names yet.
+Naming note: the M6 op list lives in `gpu/ir/gpu_ir.h` (`GpuOp`,
+`OpKind`, `GpuOpList`, `LowerGnmStateToIR`). It is COMMITTED — the M7
+backend is built against these types. One addition to the earlier draft
+list: `DrawIndexed` is its own op (GnmState records indexed draws via
+DRAW_INDEX_2; a single "Draw" would erase a real distinction the guest
+stream carries). A header-level guard rejects any Vulkan include in the
+IR definition.
 
 ## What exists today (honest)
 
@@ -44,8 +47,26 @@ only GPU types that exist; do not code against the planned names yet.
   by length — never silently ignored. Errors land in
   `DecodeStats.streamErrors` (bounded error list with offsets).
 - `gpu/gnm/gnm_state.cpp`: register banks with
-  `WriteRegister/ReadRegister` (written-bit tracking), draw and
-  dispatch records, `Reset`.
+  `WriteRegister/ReadRegister` (written-bit tracking), draw and dispatch
+  records, `Reset`. Since M6: every record carries an event-sequence
+  number (`seq`) stamped at record time and shared across draws,
+  dispatches and the named-write journal, so the IR lowering restores
+  the guest's event order exactly; dispatches are journaled (bounded
+  log, most recent last), not just last-dims-wins.
+- `gpu/ir/gpu_ir.cpp` (M6): the lowering `LowerGnmStateToIR` — GnmState
+  → ordered, bounded `GpuOp` list. Emits `SetScissor` (from the
+  journaled PA_SC_SCREEN_SCISSOR_TL/BR writes — public PS4/PS5 RE
+  consensus: context packet offsets 0xC/0xD, X[15:0] Y[31:16]; Kyty and
+  RPCSX agree), `Draw`/`DrawIndexed` (draw records, payload verbatim),
+  `Dispatch` (dispatch records), and exactly one submit-boundary
+  `Barrier` when the list is non-empty. Register writes with no named
+  semantics are COUNTED (`LowerStats.unmappedRegisterWrites`), never
+  turned into guessed ops; INDEX_TYPE writes are accounted as carried
+  (the value lives inside every draw payload). The remaining vocabulary
+  ops (SetRenderTarget, SetViewport, BindPipeline, BindResource,
+  CopyImage, Clear) are committed types with no emitter until the
+  decoder deepens named-register semantics — the M5 PARTIAL note below
+  is the same policy.
 - `gpu/vulkan_device.cpp`: REAL host Vulkan — instance/device init on
   Adreno 750, swapchain in both orientations, self-contained
   fork-safe clear-submit proof (own render node fd, full teardown).
@@ -58,10 +79,13 @@ only GPU types that exist; do not code against the planned names yet.
 
 ## What does NOT exist (do not fake it)
 
-- GPU IR: no intermediate representation between GpuState and Vulkan.
-  The decoder currently stops at state records.
 - IR-driven rendering: nothing turns a decoded draw into VkPipeline +
   vkCmdDraw. Any framebuffer content today is host-clear only.
+- IR ops without evidence: SetRenderTarget / SetViewport / BindPipeline /
+  BindResource / CopyImage / Clear exist as committed TYPES only. The
+  lowering emits none of them, because no named register semantics back
+  them yet — emitting them from raw bank dwords would be inventing
+  semantics, which this layer forbids.
 - Shader recompiler: absent by design until M8 — PS5 shader binary →
   decoder → shader IR → SPIR-V. Starting shaders before the command
   path is the failure mode this plan forbids.
@@ -81,6 +105,24 @@ gate run exposed two real defects that are now fixed: the
 SET_SH_REG_OFFSET handler discarded only ONE address dword instead of
 the pair, and GnmState's CONFIG bank range overlapped the entire SH
 range, silently rerouting every SH write into CONFIG.
+
+## M6 evidence gate (GPU IR) — **MET**
+
+Host-side, deterministic (docs/testing.md: M5-M6 may pass on T1 alone —
+the lowering's integration is host-side by design): a fixed PM4 stream
+decodes into GnmState, then `LowerGnmStateToIR` lowers that state to the
+EXACT expected op sequence — kinds, order, payloads, provenance
+(seq/packetOffset), honesty counters and bounded-capacity behavior all
+asserted.
+
+Status: `tools/hosttests/gpu_ir_test.cpp` IS that gate and it passes —
+`M6 PASS: 5 ops lowered, 5/5 expected ops, 0 unexpected lowering drops`
+(wired into `tools/hosttests/run.sh`). The gate locks, among the rest:
+SetScissor box decode (X[15:0] Y[31:16] of the TL/BR pair), mid-stream
+state-change interleaving between draws (the seq timeline), payload
+verbatim-carry for Draw/DrawIndexed/Dispatch, one submit-boundary
+Barrier only on a non-empty list, unmapped-write accounting (4/7 writes
+lower to nothing and say so), and drop-counting on a full list.
 
 ## M7 evidence gate (Vulkan backend, on device)
 

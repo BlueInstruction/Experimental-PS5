@@ -117,6 +117,17 @@ constexpr uint32_t kContextRegBase = 0x28000;
 // beyond raw storage (all context-space addresses, public GCN names).
 constexpr uint32_t kRegVgtDmaIndexType = 0x28A7C;  // INDEX_TYPE writes here
 
+// Screen scissor pair (context space). SOURCES (same bar as above — public
+// RE consensus, no invented constants): KytyPS5 (PS5, this repo's cited M8
+// research reference) defines PA_SC_SCREEN_SCISSOR_TL/BR at context packet
+// offsets 0xC/0xD with X[15:0] / Y[31:16] per dword; RPCSX (PS4) names the
+// same pair at its 0xA00C/0xA00D (0xA000-space + 0xC/0xD). Absolute
+// addresses follow this file's convention: kContextRegBase + packet offset.
+constexpr uint32_t kCtxOffPaScScreenScissorTL = 0xC;
+constexpr uint32_t kCtxOffPaScScreenScissorBR = 0xD;
+constexpr uint32_t kRegPaScScreenScissorTL = kContextRegBase + kCtxOffPaScScreenScissorTL;
+constexpr uint32_t kRegPaScScreenScissorBR = kContextRegBase + kCtxOffPaScScreenScissorBR;
+
 // Known high-confidence context-space packet offsets (what SET_CONTEXT_REG
 // body[0] holds for the register above).
 constexpr uint32_t kCtxOffVgtDmaIndexType = kRegVgtDmaIndexType - kContextRegBase;

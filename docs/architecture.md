@@ -69,7 +69,7 @@ HLE:  guest libSce* call → NID gate (syscall trap) → HLE function
         → structured result → guest registers
 ```
 
-## Current honest layer status (2026-09-06, vc48)
+## Current honest layer status (2026-09-06, vc51)
 
 | Layer | Status | Evidence |
 |---|---|---|
@@ -77,7 +77,7 @@ HLE:  guest libSce* call → NID gate (syscall trap) → HLE function
 | Driver import + namespace load | working on device | `driverVerified=yes`, Turnip v26.3.0-R4, 2026-09-05 screenshots |
 | Host Vulkan init + swapchain + clear-submit proof | works on device | self-contained GPU proof PASS |
 | PM4 decoder → GnmState | **M5 PASS** (12/12 packets, T1) | `tools/hosttests/pm4_stream_test.cpp` in `run.sh`; SET_SH_REG_OFFSET/DRAW_INDEX_2 semantics partial by design (see docs/gpu.md) |
-| GPU IR | absent | — |
+| GPU IR | **M6 PASS** (5/5 ops, T1) | `tools/hosttests/gpu_ir_test.cpp` in `run.sh`; vocabulary committed in `gpu/ir/gpu_ir.h`, Vulkan-free by header guard |
 | IR-driven Vulkan rendering | absent | `frames=0` in every session |
 | SELF/ELF loader, runtime linker | real code, unvalidated past load | load path blocked behind CPU dispatch fault |
 | Guest memory model | real code | `tools/hosttests/memory_range_test.cpp` |
