@@ -12,13 +12,16 @@
 //      stream): every emitted op maps to its honest disposition —
 //      deferred-by-kind for pipeline-needing ops, one submit boundary;
 //   3. a synthetic one-Clear IR list — the exact command sequence the M7
-//      device proof plans: barrier + clear, payload and seq carried;
+//      device proof plans: barrier + clear, payload and per-op seq carried;
+//   3b. the planner's safety paths — reserved barrier scopes and unknown
+//      op kinds are counted as unknownOps and NEVER guessed into commands;
 //   4. last-clear-wins readback expectation (ordered clears);
 //   5. a mixed draw/clear list — executable commands and deferred counts
 //      coexist, nothing guessed;
 //   6. the empty list lowers to an empty plan;
 //   7. VerifyClearReadback — full match, single-byte mismatch attribution,
-//      unusable-input guards.
+//      unusable-input guards (null buffer, null expectation, zero/oversized
+//      dimensions, short buffer).
 //
 // Platform-independent: builds with tools/hosttests/run.sh, no device, no
 // Vulkan headers — vulkan_backend.h keeps the plan Vulkan-free on purpose.
@@ -34,6 +37,7 @@
 #include "gpu/gnm/pm4_packet.h"
 #include "gpu/ir/gpu_ir.h"
 #include "gpu/vulkan_backend.h"
+#include "m6_gate_fixture.h"
 
 using PX5::Gpu::BackendPlanStats;
 using PX5::Gpu::ClearFloatToUnorm8;
@@ -83,38 +87,8 @@ bool RgbaEquals(const uint8_t a[4], const uint8_t b[4]) {
     return a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3];
 }
 
-// ---- the M6 gate stream (same fixture gpu_ir_test.cpp locks) --------------
-constexpr uint32_t kScTL = 0x00050002u;   // TL: x=2, y=5
-constexpr uint32_t kScBR = 0x01400100u;   // BR: x=256, y=320
-constexpr uint32_t kConfigA = 0x11110001u;
-constexpr uint32_t kShA = 0x33330001u, kShB = 0x33330002u, kShC = 0x33330003u;
-constexpr uint32_t kIndexTypeRaw = 0x2u;
-constexpr uint32_t kInstances = 4u;
-constexpr uint32_t kAutoCount = 36u;
-constexpr uint32_t kInitiator = 0x6u;
-constexpr uint32_t kDi2Count = 300u;
-constexpr uint32_t kDispX = 8u, kDispY = 4u, kDispZ = 2u;
-
-std::vector<uint32_t> BuildM6GateStream() {
-    std::vector<uint32_t> s;
-    auto push = [&](uint32_t op, uint32_t bodyCount,
-                    std::initializer_list<uint32_t> body,
-                    uint32_t shaderType = 0) {
-        s.push_back(Type3Header::Encode(op, bodyCount, shaderType));
-        for (uint32_t d : body) s.push_back(d);
-    };
-    push(kItNop, 1, {0x0});
-    push(kItSetContextReg, 2, {kCtxOffPaScScreenScissorTL, kScTL});
-    push(kItSetContextReg, 2, {kCtxOffPaScScreenScissorBR, kScBR});
-    push(kItSetConfigReg, 2, {0x10, kConfigA});
-    push(kItSetShReg, 4, {0x0C, kShA, kShB, kShC});
-    push(kItIndexType, 1, {kIndexTypeRaw});
-    push(kItNumInstances, 1, {kInstances});
-    push(kItDrawIndexAuto, 2, {kAutoCount, kInitiator});
-    push(kItDrawIndex2, 5, {0x1FF, 0x0, 0x1000, kDi2Count, kInitiator});
-    push(kItDispatchDirect, 3, {kDispX, kDispY, kDispZ}, /*shaderType=*/1);
-    return s;
-}
+// ---- the M6 gate stream (the shared fixture m6_gate_fixture.h locks) ------
+using px5test::BuildM6GateStream;
 
 GpuOp MakeClear(uint64_t seq, float r, float g, float b, float a) {
     GpuOp op{};
@@ -152,7 +126,8 @@ int main() {
         {0.25f,  64,  "0.25 -> 64"},
         {0.08f,  20,  "0.08 -> 20 (the suite's teal-blue R)"},
         {0.72f,  184, "0.72 -> 184 (its G)"},
-        {0.7f,   179, "0.7 -> 179 (0.7f*255.0f rounds to exactly 178.5f)"},
+        {0.7f,   178, "0.7 -> 178 (double-exact: 0.7f is 178.499997 in "
+                      "double, truncation is flag/FMA-independent)"},
         {std::numeric_limits<float>::quiet_NaN(), 0,
          "NaN clamps -> 0 (deterministic, never garbage)"},
     };
@@ -201,7 +176,7 @@ int main() {
     printf("\nSynthetic one-Clear list (M7 device proof's IR input):\n");
     GpuOpList oneClear;
     oneClear.Push(MakeClear(7u, 1.0f, 0.0f, 0.0f, 1.0f));
-    oneClear.Push(MakeBarrier(7u));
+    oneClear.Push(MakeBarrier(8u));   // distinct seq: provenance is per-op
     const VulkanCommandPlan planClear = PlanVulkanCommands(oneClear);
     chk(StatsInvariant(planClear.stats), "planClear honesty invariant holds");
     chk(planClear.stats.opsReceived == 2 && planClear.stats.clearOps == 1 &&
@@ -211,11 +186,11 @@ int main() {
         "2 ops in -> 1 clear + 1 boundary, 0 deferred, 0 unknown");
     chk(planClear.commands.size() == 3,
         "planClear = 3 commands (barrier, clear, submit boundary)");
-    bool seqOk = planClear.commands.size() == 3;
-    for (const VulkanCommand& c : planClear.commands)
-        seqOk = seqOk && c.seq == 7u;
-    chk(seqOk, "every command carries its GpuOp's seq (provenance)");
     if (planClear.commands.size() == 3) {
+        chk(planClear.commands[0].seq == 7u && planClear.commands[1].seq == 7u,
+            "both clear-derived commands carry the Clear op's seq (7)");
+        chk(planClear.commands[2].seq == 8u,
+            "the boundary command carries the Barrier op's seq (8)");
         chk(planClear.commands[0].kind ==
                 VulkanCommand::Kind::kPipelineBarrier &&
             planClear.commands[1].kind ==
@@ -233,6 +208,36 @@ int main() {
     const uint8_t expectRed[4] = {255, 0, 0, 255};
     chk(planClear.hasClear && RgbaEquals(planClear.clearRgba, expectRed),
         "readback expectation = RGBA8 bytes (255,0,0,255)");
+
+    // ==== Section 3b: the planner's safety paths ===========================
+    // Both branches exist in PlanVulkanCommands but nothing above feeds
+    // them: barrierScope != 0 (reserved in the IR) and op kinds with no
+    // named materialization (including kOpKindCount, never a valid op).
+    // A regression that turns either branch into guessed commands must
+    // fail HERE, not on a device.
+    printf("\nPlanner safety (unknown ops are counted, never guessed):\n");
+    GpuOpList reserved;
+    GpuOp scopedBarrier{};
+    scopedBarrier.kind         = OpKind::kBarrier;
+    scopedBarrier.seq          = 9u;
+    scopedBarrier.barrierScope = 3u;   // reserved scope bits: no semantics
+    reserved.Push(scopedBarrier);
+    GpuOp unknownKind{};
+    unknownKind.kind = OpKind::kOpKindCount;   // never valid from the lowering
+    unknownKind.seq  = 10u;
+    reserved.Push(unknownKind);
+    const VulkanCommandPlan planReserved = PlanVulkanCommands(reserved);
+    chk(StatsInvariant(planReserved.stats),
+        "planReserved honesty invariant holds (2 = 0+0+0+2)");
+    chk(planReserved.stats.opsReceived == 2 &&
+            planReserved.stats.unknownOps == 2 &&
+            planReserved.stats.clearOps == 0 &&
+            planReserved.stats.boundaryOps == 0 &&
+            planReserved.stats.DeferredTotal() == 0,
+        "reserved scope + unknown kind -> 2 unknownOps, counted by kind");
+    chk(planReserved.commands.empty(),
+        "unknown ops emit ZERO commands (never guessed)");
+    chk(!planReserved.hasClear, "no readback expectation from unknown ops");
 
     // ==== Section 4: last clear wins =======================================
     printf("\nTwo ordered clears (expectation = the LAST one):\n");
@@ -330,6 +335,18 @@ int main() {
                                                 expectRed);
     chk(zeroDim.pixelsTotal == 0 && !zeroDim.allMatch,
         "zero width reports 0 pixels checked");
+
+    ReadbackCheck nullExp =
+        VerifyClearReadback(buf.data(), buf.size(), W, H, nullptr);
+    chk(nullExp.pixelsTotal == 0 && !nullExp.allMatch,
+        "null expectation reports 0 pixels checked (no deref, no crash)");
+
+    // Dimension pairs whose byte count wraps a 32-bit pixel counter must
+    // be rejected as unusable, not truncated into a bogus check.
+    ReadbackCheck hugeDim = VerifyClearReadback(buf.data(), buf.size(),
+                                                0x10000u, 0x10000u, expectRed);
+    chk(hugeDim.pixelsTotal == 0 && !hugeDim.allMatch,
+        "2^16 x 2^16 pixels (overflows uint32 count) reports 0 pixels");
 
     // 2x2 hand-checked buffer, mismatch on the A channel of the last pixel.
     const uint8_t tiny[16] = {10, 20, 30, 40,  10, 20, 30, 40,

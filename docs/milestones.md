@@ -107,7 +107,7 @@ Gate: the M7 chain — instance → device → queue → image → clear →
 submit → fence → READBACK with expected pixels — passes on device
 (T3). Ahead of the gate (NOT the gate): real instance/device/swapchain
 on Adreno 750, fork-safe self-contained clear-submit proof, and now
-(v1.53) the backend layer itself: `gpu/vulkan_backend.h/.cpp` plans a
+(v1.54) the backend layer itself: `gpu/vulkan_backend.h/.cpp` plans a
 `GpuOpList` into an ordered Vulkan command sequence (barrier → clear →
 submit boundary; pipeline-needing ops deferred by kind, counted, never
 guessed), locked on host by `tools/hosttests/vulkan_backend_test.cpp`

@@ -155,7 +155,7 @@ This replaces `driverVerified=yes` as the GPU truth marker: pixels
 read back from a render target are evidence; a mapped driver and a
 created device are not.
 
-What exists now (v1.53): the chain is WIRED end to end —
+What exists now (v1.54): the chain is WIRED end to end —
 `VulkanGpuDevice::RunM7ClearReadbackProof` (self-contained, fork-safe,
 fresh instance/device) builds a synthetic one-Clear `GpuOpList`
 (labelled in its own detail line: the M6 lowering emits no Clear yet,

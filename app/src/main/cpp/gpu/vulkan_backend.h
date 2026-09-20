@@ -125,10 +125,16 @@ struct VulkanCommandPlan {
 };
 
 // float -> UNORM-8: clamp to [0,1] (NaN clamps to 0), scale by 255, round
-// half up, truncate. Deterministic by contract: the device readback and
-// this conversion MUST agree byte-for-byte, so the rule lives here and
-// nowhere else. IEEE-754 single-precision makes the float expression
-// (f * 255.0f + 0.5f) exact and compiler-independent for every float input.
+// half up, truncate. The in-range scale is computed in DOUBLE where every
+// intermediate is exactly representable, so the result is compiler- and
+// flag-independent BY CONSTRUCTION (a float-only expression would
+// double-round differently with and without FMA contraction).
+// Scope of the byte-exact contract with the device: Vulkan lets an
+// implementation round a scaled value that sits exactly halfway between
+// two UNORM levels either way, so fractional clear colors may legitimately
+// read back one level off this rule. The M7 device proof therefore clears
+// with exact 0.0/1.0 channels only — tie-free by construction — and the
+// rule lives here and nowhere else so host and device cannot drift.
 uint8_t ClearFloatToUnorm8(float f);
 
 // The M7 planner: GpuOpList -> ordered VulkanCommandPlan. Does not mutate

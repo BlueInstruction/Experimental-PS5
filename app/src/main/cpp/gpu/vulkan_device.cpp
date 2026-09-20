@@ -954,6 +954,17 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
     }
     Breadcrumb::Set("gpu.m7: instance ready");
 
+    // Every failure AFTER this point must destroy `inst` before returning —
+    // the self-test can run this proof repeatedly in one process, so an
+    // early return that leaks the instance (and its loader/ICD state)
+    // accumulates. Route each post-instance failure through destroyInst().
+    auto destroyInst = [&inst, &gipa]() {
+        if (auto p = reinterpret_cast<PFN_vkDestroyInstance>(
+                gipa(inst, "vkDestroyInstance"))) {
+            p(inst, nullptr);
+        }
+    };
+
     auto pfnEnumDevs = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
         gipa(inst, "vkEnumeratePhysicalDevices"));
     auto pfnProps = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
@@ -967,12 +978,14 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
     if (!pfnEnumDevs || !pfnProps || !pfnFams || !pfnMemProps ||
         !pfnCreateDevice) {
         detailOut = "m7: instance-level fns missing";
+        destroyInst();
         return false;
     }
 
     uint32_t nd = 0;
     if (pfnEnumDevs(inst, &nd, nullptr) != VK_SUCCESS || nd == 0) {
         detailOut = "m7: no physical devices";
+        destroyInst();
         return false;
     }
     std::vector<VkPhysicalDevice> devs(nd);
@@ -984,7 +997,11 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
 
     uint32_t nf = 0;
     pfnFams(pd, &nf, nullptr);
-    if (nf == 0) { detailOut = "m7: no queue families"; return false; }
+    if (nf == 0) {
+        detailOut = "m7: no queue families";
+        destroyInst();
+        return false;
+    }
     std::vector<VkQueueFamilyProperties> fams(nf);
     pfnFams(pd, &nf, fams.data());
     uint32_t gfx = 0xFFFFFFFFu;
@@ -992,6 +1009,7 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
         if (fams[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) { gfx = i; break; }
     if (gfx == 0xFFFFFFFFu) {
         detailOut = "m7: no graphics queue family";
+        destroyInst();
         return false;
     }
 
@@ -1008,6 +1026,7 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
     VkDevice dev = VK_NULL_HANDLE;
     if (pfnCreateDevice(pd, &dci, nullptr, &dev) != VK_SUCCESS || !dev) {
         detailOut = "m7: vkCreateDevice failed";
+        destroyInst();
         return false;
     }
     Breadcrumb::Set("gpu.m7: fresh device ready");
@@ -1039,6 +1058,7 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
     PX5_P(DestroyBuffer,          "vkDestroyBuffer");
     PX5_P(MapMemory,              "vkMapMemory");
     PX5_P(UnmapMemory,            "vkUnmapMemory");
+    PX5_P(DeviceWaitIdle,         "vkDeviceWaitIdle");
     PX5_P(DestroyDevice,          "vkDestroyDevice");
 #undef PX5_P
     auto GetImageMemReqs = reinterpret_cast<PFN_vkGetImageMemoryRequirements>(
@@ -1047,6 +1067,7 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
         gdpa ? gdpa(dev, "vkGetBufferMemoryRequirements") : nullptr);
 
     bool ok = false;
+    bool submitted = false;   // any QueueSubmit reached the queue
     std::string err;
     char m7Sha[65] = {0};   // readback buffer hash, printed on PASS
     if (!GetDeviceQueue || !CreateImage || !GetImageMemReqs ||
@@ -1262,9 +1283,12 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
                     Breadcrumb::Set("gpu.m7: submit1");
                     if (QueueSubmit(queue, 1, &si, fences[0]) != VK_SUCCESS) {
                         ok = false; err = "QueueSubmit (plan) failed";
-                    } else if (WaitForFences(dev, 1, &fences[0], VK_TRUE,
-                                             3000000000ull) != VK_SUCCESS) {
-                        ok = false; err = "fence timeout after clear (3 s)";
+                    } else {
+                        submitted = true;
+                        if (WaitForFences(dev, 1, &fences[0], VK_TRUE,
+                                         3000000000ull) != VK_SUCCESS) {
+                            ok = false; err = "fence timeout after clear (3 s)";
+                        }
                     }
                 }
             }
@@ -1304,17 +1328,26 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
                     CmdCopyImageToBuffer(cbs[1], img,
                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1,
                         &region);
-                    EndCommandBuffer(cbs[1]);
-
-                    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-                    si.commandBufferCount = 1;
-                    si.pCommandBuffers    = &cbs[1];
-                    Breadcrumb::Set("gpu.m7: readback submit");
-                    if (QueueSubmit(queue, 1, &si, fences[1]) != VK_SUCCESS) {
-                        ok = false; err = "QueueSubmit (readback) failed";
-                    } else if (WaitForFences(dev, 1, &fences[1], VK_TRUE,
+                    if (EndCommandBuffer(cbs[1]) != VK_SUCCESS) {
+                        // Recording did not finish — submitting an
+                        // unended command buffer is undefined. Report it.
+                        ok = false; err = "End (readback) failed";
+                    } else {
+                        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                        si.commandBufferCount = 1;
+                        si.pCommandBuffers    = &cbs[1];
+                        Breadcrumb::Set("gpu.m7: readback submit");
+                        if (QueueSubmit(queue, 1, &si, fences[1])
+                                != VK_SUCCESS) {
+                            ok = false; err = "QueueSubmit (readback) failed";
+                        } else {
+                            submitted = true;
+                            if (WaitForFences(dev, 1, &fences[1], VK_TRUE,
                                              3000000000ull) != VK_SUCCESS) {
-                        ok = false; err = "fence timeout after copy (3 s)";
+                                ok = false;
+                                err = "fence timeout after copy (3 s)";
+                            }
+                        }
                     }
                 }
             }
@@ -1347,6 +1380,16 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
                 }
             }
 
+            // If any submit reached the queue, make sure the device is idle
+            // before tearing down: a fence timeout leaves work in flight, and
+            // destroying fences/pool/memory under pending work is a Vulkan
+            // lifetime violation the driver can answer with a crash. On the
+            // success paths the fences were already waited, so this returns
+            // immediately; on failure paths it is what makes teardown legal.
+            // Return ignored: the outcome is already recorded and the objects
+            // must be destroyed either way.
+            if (submitted && DeviceWaitIdle) (void)DeviceWaitIdle(dev);
+
             if (fences[0] != VK_NULL_HANDLE) DestroyFence(dev, fences[0], nullptr);
             if (fences[1] != VK_NULL_HANDLE) DestroyFence(dev, fences[1], nullptr);
             if (pool  != VK_NULL_HANDLE) DestroyCommandPool(dev, pool, nullptr);
@@ -1371,16 +1414,20 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
 
     // Full teardown of everything THIS call created — same contract as
     // RunSelfContainedProof: the child (if any) exits; the parent's stack
-    // is untouched by construction.
-    DestroyDevice(dev, nullptr);
+    // is untouched by construction. DestroyDevice is guarded: if
+    // vkGetDeviceProcAddr never resolved it, calling it would be a null
+    // function-pointer call — a crash during the foundation self-test
+    // instead of the recorded FAIL.
+    if (DestroyDevice) DestroyDevice(dev, nullptr);
     auto pfnDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(
         gipa(inst, "vkDestroyInstance"));
     if (pfnDestroyInstance) pfnDestroyInstance(inst, nullptr);
     Breadcrumb::Set("gpu.m7: done ok=%d", ok ? 1 : 0);
 
-    char head[224];
+    char head[320];
     snprintf(head, sizeof(head),
-             "self-contained M7 readback on '%s' drv=%s api=%s "
+             "self-contained M7 readback (synthetic IR: proves the BACKEND, "
+             "not the decoder) on '%s' drv=%s api=%s "
              "vendor=0x%x dev=0x%x: ",
              props.deviceName, VkVersion(props.driverVersion).c_str(),
              VkVersion(props.apiVersion).c_str(), props.vendorID,

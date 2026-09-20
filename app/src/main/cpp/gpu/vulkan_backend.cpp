@@ -11,11 +11,16 @@ namespace PX5::Gpu {
 uint8_t ClearFloatToUnorm8(float f) {
     // NaN fails both comparisons in the "normal" path, so it is caught by
     // the first branch: !(NaN > 0.0f) is true -> 0. Negative clamps to 0,
-    // anything >= 1 clamps to 255, and the in-range path is the contracted
-    // round-half-up scale.
+    // anything >= 1 clamps to 255.
     if (!(f > 0.0f)) return 0u;
     if (f >= 1.0f) return 255u;
-    return static_cast<uint8_t>(f * 255.0f + 0.5f);
+    // In-range scale computed in DOUBLE, never in float: every intermediate
+    // here is exactly representable (|f*255| <= 255 needs <= 9 mantissa bits
+    // before the point; f itself carries <= 24), so no rounding AND no FMA
+    // contraction can change the result — the rule is compiler-independent
+    // by construction, not by assumption (a float-only `f*255.0f + 0.5f`
+    // double-rounds differently with and without -ffp-contract).
+    return static_cast<uint8_t>(static_cast<double>(f) * 255.0 + 0.5);
 }
 
 void BackendPlanStats::Reset() { *this = BackendPlanStats{}; }
@@ -112,17 +117,23 @@ ReadbackCheck VerifyClearReadback(const uint8_t* data, size_t size,
                                   const uint8_t expectedRgba[4]) {
     ReadbackCheck out;
 
-    const uint64_t need =
-        static_cast<uint64_t>(width) * static_cast<uint64_t>(height) * 4ull;
-    if (data == nullptr || width == 0 || height == 0 ||
-        static_cast<uint64_t>(size) < need) {
+    // Checked arithmetic: width*height (and its byte count) must fit the
+    // field widths they are stored in BEFORE any traversal — a wrapped
+    // multiplication would let an undersized buffer pass the guard and the
+    // loop would walk past `data`. pixelsTotal is uint32, so the pixel
+    // count itself must fit 32 bits; pixels <= 2^32-1 then cannot overflow
+    // the *4ull byte count.
+    const uint64_t pixels =
+        static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+    if (data == nullptr || expectedRgba == nullptr || width == 0 ||
+        height == 0 || pixels > 0xFFFFFFFFull ||
+        pixels * 4ull > static_cast<uint64_t>(size)) {
         // Unusable input reports itself as zero pixels checked — never as
         // a pass, never as a guessed partial count.
         return out;
     }
 
-    const size_t pixelCount =
-        static_cast<size_t>(width) * static_cast<size_t>(height);
+    const size_t pixelCount = static_cast<size_t>(pixels);
     out.pixelsTotal = static_cast<uint32_t>(pixelCount);
 
     for (size_t p = 0; p < pixelCount; ++p) {
