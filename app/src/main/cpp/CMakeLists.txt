@@ -122,9 +122,40 @@ if(NOT EXISTS "${PX5_FEXCORE_ROOT}/CMakeLists.txt")
         "source tree. Run tools/fetch_fexcore.sh first.")
 endif()
 
+# ----------------------------------------------------------------------------
+# ARMv8.0-A host baseline (REQUIRED — build-defect guard, vc57)
+# ----------------------------------------------------------------------------
+# FEX's CMake defaults to TUNE_CPU="native": on an aarch64 cross build it
+# runs Scripts/aarch64_fit_native.py against the BUILD HOST's /proc/cpuinfo
+# and then Scripts/NeedDisabledSVE.py, which CRASHES (TypeError, exit=1) on
+# any x86_64 CI runner (no "Features" line in an x86 cpuinfo). FEX treats
+# that non-zero exit as "bugged SVE platform" and FORCES AARCH64_CPU to
+# "cortex-a78" (CMakeLists.txt:510) — so the whole FEXCore JIT was compiled
+# -mcpu=cortex-a78 = ARMv8.2-A + LSE + RCPC. Every SDM below 8-series
+# without LSE then SIGILLs on the first std::atomic refcount increment:
+#   SIGILL pc=libpx5.so+0x1a6f50  ldadd x8, x8, [x25]
+#   __libcpp_atomic_refcount_increment inside
+#   FEXCore::CPU::SharedCodeBufferManager::AllocateNew (InitializeCompiler).
+# Pinning TUNE_CPU="none" skips FEX's tuning entirely: NDK's armv8-a
+# baseline lowers atomics to outline helpers (__aarch64_*) that runtime-
+# check HWCAP — LL/SC on v8.0 hosts, LSE on v8.1+. One binary serves all
+# Snapdragon generations.
+set(TUNE_CPU "none" CACHE STRING "PX5: force ARMv8.0 baseline — no build-host tuning" FORCE)
+set(TUNE_ARCH "generic" CACHE STRING "PX5: generic arch baseline" FORCE)
+
 list(APPEND CMAKE_MODULE_PATH ${PX5_FEXCORE_ROOT}/Data/CMake)
 add_subdirectory(${PX5_FEXCORE_ROOT}
                  ${CMAKE_CURRENT_BINARY_DIR}/fex)
+
+# Build-defect guard: if anything ever re-enables FEX host tuning, refuse to
+# configure rather than silently shipping an LSE-requiring binary again.
+if(NOT TUNE_CPU STREQUAL "none")
+    message(FATAL_ERROR
+        "PX5: TUNE_CPU='${TUNE_CPU}' is forbidden. Android ships one binary for "
+        "all Snapdragon generations and must keep the ARMv8.0 host baseline "
+        "(outline atomics). FEX's native tuning resolved to -mcpu=cortex-a78 "
+        "on CI and SIGILL'd every pre-LSE SoC at libpx5.so+0x1a6f50.")
+endif()
 
 # ----------------------------------------------------------------------------
 # Disable FEX targets we don't need on Android
