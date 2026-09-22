@@ -99,6 +99,21 @@ public:
     bool RunSelfContainedProof(std::string& detailOut);
 
     /**
+     * M7 gate proof (docs/milestones.md): the readback chain with expected
+     * pixels. Self-contained and fork-safe by the same construction as
+     * RunSelfContainedProof (fresh instance -> device -> own drm context),
+     * extended with the full chain: IR Clear op (explicitly-labelled
+     * synthetic GpuOpList) -> PlanVulkanCommands (gpu/vulkan_backend.cpp,
+     * the host-locked planner) -> image clear -> submit -> fence ->
+     * vkCmdCopyImageToBuffer into a host-visible buffer -> CPU readback ->
+     * exact-pixel verification + SHA-256. A created device is NOT this
+     * proof's evidence; the matched pixel count is.
+     * @param detailOut Output parameter receiving proof detail
+     * @return true if every readback byte matched the planned clear, false otherwise
+     */
+    bool RunM7ClearReadbackProof(std::string& detailOut);
+
+    /**
      * Attaches ANativeWindow for on-screen rendering (SurfaceView lifecycle).
      * @param window Native window from Android
      * @return true if attachment succeeded, false otherwise

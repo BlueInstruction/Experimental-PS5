@@ -743,6 +743,26 @@ std::string Emulator::SelfTestFoundation() {
         if (!gok) goto done;   // honest: real device must submit commands
     }
 
+    // --- Step 8b: M7 backend gate — IR Clear -> Vulkan -> pixel readback --
+    // The M7 milestone gate (docs/milestones.md): instance -> device ->
+    // queue -> image -> clear -> submit -> fence -> READBACK with expected
+    // pixels. The clear arrives as a GpuOp (the M6 IR type) planned by
+    // gpu/vulkan_backend.cpp — the backend never sees GNM/PM4 types. The
+    // IR list is a synthetic one-Clear list (the decoder's Clear semantics
+    // are still M5-PARTIAL), so this proves the BACKEND chain, not the
+    // decoder — the proof's own detail line says so. Matched pixel count
+    // is the evidence; a created device is not.
+    {
+        std::string m7Detail;
+        const bool m7ok = VulkanGpuDevice::GetInstance()
+                              .RunM7ClearReadbackProof(m7Detail);
+        lines.push_back(
+            std::string(m7ok ? "[PASS] 8b. GPU IR clear readback | "
+                             : "[FAIL] 8b. GPU IR clear readback | ") +
+            m7Detail);
+        if (!m7ok) goto done;   // honest: the readback gate IS M7
+    }
+
     // --- Step 9: libkernel HLE DirectMemory exercise ---------------------
     {
         auto& kHle = SceKernelHle::KernelHle::GetInstance();

@@ -797,6 +797,60 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
         return res;
     }
 
+    // v1.57 — THE REAL-GUEST CALL FIX: initialize the call/return shadow stack.
+    //
+    // On-device proof (v1.56, vc57, Vivo Y51 SD665, 2026-09-22 02:20:32):
+    //   SIGSEGV si_addr=0xfffffffffffff0, pc=<JIT block, anon exec>, x25=0.
+    //   Faulting instruction (capstone): stp x20, x0, [x25, #-0x10]!
+    //   with x20=0x140000089 = the guest return RIP of the game entry's
+    //   FIRST `call` (push rbp; mov rbp,rsp; ...; lea rdi,[rdi+8]; call),
+    //   x0 = the host return-trampoline address. FEX's JIT pushes
+    //   <GuestRIP, HostRet> pairs onto a per-thread shadow stack through
+    //   REG_CALLRET_SP = x25 (ArchHelpers/Arm64Emitter.h:48) on every guest
+    //   CALL (JIT/BranchOps.cpp:168). State.callret_sp is zero-initialized
+    //   (CoreState.h:109) and FEXCore NEVER assigns it — every FEX frontend
+    //   does: FEXLoader's LinuxSyscalls/ThreadManager.cpp:196 and the
+    //   Windows frontend (Windows/Common/CallRetStack.h:36). PX5 embeds
+    //   FEXCore without FEXLoader and never did -> the first guest CALL of
+    //   any real binary deterministically faulted through the null pointer.
+    //   The synthetic suite never executes a guest CALL, which is why every
+    //   conformance/syscall/NID test passed on the same device while the
+    //   real eboot died at its entry. Same bug family as v1.24's
+    //   segment_arrays: "FEXCore expects the HOST to install X after
+    //   CreateThread; every FEX host does this; PX5 never did."
+    //
+    // Mirror FEXLoader's ThreadManager exactly: PROT_NONE reservation with
+    // a guard page on EACH side, RW middle, CallRetStackBase = base+page
+    // (FEXCore itself DontNeed()s exactly that range on invalidation), and
+    // callret_sp = base + SIZE/4 — 1 MiB of push headroom below and 3 MiB
+    // above; an unbalanced-call under/overflow hits a guard page and
+    // reports honestly instead of silently corrupting adjacent mappings.
+    const size_t callretSize =
+        FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;  // 0x400000
+    const size_t callretAllocSize =
+        callretSize + 2 * FEXCore::Utils::FEX_PAGE_SIZE;
+    void* callretAlloc = mmap(nullptr, callretAllocSize, PROT_NONE,
+                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (callretAlloc == MAP_FAILED) {
+        res.error = "callret shadow stack mmap failed";
+        PX5_LOGE(LogCategory::FEX, "%s (errno=%d %s)", res.error.c_str(),
+                 errno, strerror(errno));
+        g_context->DestroyThread(thread);
+        return res;
+    }
+    auto* callretBase =
+        static_cast<uint8_t*>(callretAlloc) + FEXCore::Utils::FEX_PAGE_SIZE;
+    mprotect(callretBase, callretSize, PROT_READ | PROT_WRITE);
+    thread->CallRetStackBase = callretBase;
+    thread->CurrentFrame->State.callret_sp =
+        reinterpret_cast<uint64_t>(callretBase) + callretSize / 4;
+    PX5_LOGI(LogCategory::FEX,
+             "callret shadow stack installed: base=%p sp=0x%llx size=%zu KiB "
+             "(v1.57 real-guest CALL fix — first call pushed through null x25)",
+             callretBase,
+             (unsigned long long)thread->CurrentFrame->State.callret_sp,
+             callretSize / 1024);
+
     // v1.24 — THE CPU-GATE FIX.
     // Symbolized 2026-08-31 07:07 device crash (v1.23 auto-run, vc24):
     //   SIGSEGV si_addr=0x4, pc=libpx5.so+0x3809e4
@@ -956,6 +1010,10 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
                  (unsigned long long)st.handledCalls);
     }
 
+    // Release the callret shadow stack BEFORE DestroyThread: FEXCore's
+    // DestroyThread only VirtualDontNeed()s the range (madvise), it never
+    // munmaps — without this the 4 MiB reservation would leak per run.
+    munmap(callretAlloc, callretAllocSize);
     g_context->DestroyThread(thread);
     return res;
 }
