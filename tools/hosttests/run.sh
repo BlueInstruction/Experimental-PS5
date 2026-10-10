@@ -226,4 +226,34 @@ echo "[hosttests] building dispatch_proof_contract_test (M8 T7 contract)"
 echo "[hosttests] running dispatch_proof_contract_test (M8 T7 contract)"
 "$OUT/dispatch_proof_contract_test"
 
+echo "[hosttests] building audio_out_hle_test (sceAudioOut HLE)"
+# ORBIS audio-out semantics: port table, format decode, volume/Std-mix math,
+# virtual-clock pacing — locked before the AAudio backend ever lands.
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
+    -I"$SHIM" -I"$CPP" \
+    -o "$OUT/audio_out_hle_test" \
+    "$ROOT/tools/hosttests/audio_out_hle_test.cpp" \
+    "$CPP/audio/audio_out_hle.cpp" \
+    "$CPP/utils/logger.cpp" \
+    "$CPP/utils/diag_bridge.cpp"
+
+echo "[hosttests] running audio_out_hle_test (sceAudioOut HLE)"
+"$OUT/audio_out_hle_test"
+
+echo "[hosttests] building pad_hle_test (scePad HLE)"
+# ORBIS pad semantics: PadData layout (the guest ABI), button-bit mapping,
+# stick/trigger byte conversion, read/handle rules — locked against the
+# InputManager bridge.
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
+    -I"$SHIM" -I"$CPP" \
+    -o "$OUT/pad_hle_test" \
+    "$ROOT/tools/hosttests/pad_hle_test.cpp" \
+    "$CPP/input/pad_hle.cpp" \
+    "$CPP/input/controller.cpp" \
+    "$CPP/utils/logger.cpp" \
+    "$CPP/utils/diag_bridge.cpp"
+
+echo "[hosttests] running pad_hle_test (scePad HLE)"
+"$OUT/pad_hle_test"
+
 echo "[hosttests] all host tests passed"

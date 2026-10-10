@@ -1,6 +1,8 @@
 #include "sce_kernel_hle.h"
 
+#include "../audio/audio_out_hle.h"
 #include "../gpu/gnm/gnm_submit.h"
+#include "../input/pad_hle.h"
 #include "../memory/memory.h"
 #include "../filesystem/vfs.h"
 #include "syscalls.h"          // GuestSyscalls::AppendOutput (evidence channel)
@@ -75,6 +77,29 @@ void KernelHle::RegisterAll() {
     // submit interface the dossier mandates hooking). Routed to GnmSubmit
     // -> Pm4Decoder -> GnmState; evidence counters + stats are live.
     add("sceGnmSubmitCommandBuffers");
+
+    // M8-era ORBIS library surfaces (ported from AnyPS5, GPL-2.0): the
+    // audio-out and pad services games call constantly. The services own
+    // their full ABI; these entries expose the invoked surface to the same
+    // table + counters every other symbol uses.
+    add("sceAudioOutInit");
+    add("sceAudioOutOpen");
+    add("sceAudioOutClose");
+    add("sceAudioOutOutput");
+    add("sceAudioOutOutputs");
+    add("sceAudioOutSetVolume");
+    add("sceAudioOutGetLastOutputTime");
+    add("sceAudioOutGetPortState");
+    add("sceAudioOutSetMixLevelPadSpk");
+    add("scePadInit");
+    add("scePadOpen");
+    add("scePadClose");
+    add("scePadRead");
+    add("scePadReadState");
+    add("scePadGetControllerInformation");
+    add("scePadGetInfo");
+    add("scePadSetVibration");
+    add("scePadSetLightBar");
 
     m_registered = true;
     PX5_LOGI(LogCategory::KERNEL,
@@ -301,8 +326,13 @@ uint64_t KernelHle::InvokeByName(const std::string& symbol,
                                  uint64_t a2, uint64_t a3,
                                  uint64_t a4, uint64_t a5) {
     RegisterAll();
-    // args passed through to typed impls — keep parameter list small:
-    (void)a4; (void)a5;
+    // ORBIS int32 results sign-extend into the uint64 return contract.
+    const auto s32 = [](int32_t rc) -> uint64_t {
+        return static_cast<uint64_t>(static_cast<int64_t>(rc));
+    };
+    const auto ptr = [](uint64_t va) -> void* {
+        return reinterpret_cast<void*>(va);
+    };
 
     if (symbol == "sceKernelOpen")                    return Open(a0, a1, a2);
     if (symbol == "sceKernelWrite")                   return Write(a0, a1, a2);
@@ -319,6 +349,73 @@ uint64_t KernelHle::InvokeByName(const std::string& symbol,
     if (symbol == "sceKernelIsNeoMode")               return IsNeoMode();
     if (symbol == "sceKernelGetCompiledSdkVersion")   return GetCompiledSdkVersion();
     if (symbol == "sceGnmSubmitCommandBuffers")       return GnmSubmitCommandBuffers(a0, a1, a2);
+
+    // --- sceAudioOut (SceAudioOutHle) --------------------------------------
+    auto& audioOut = SceAudioOutHle::AudioOutHle::Instance();
+    if (symbol == "sceAudioOutInit")
+        return s32(audioOut.Init());
+    if (symbol == "sceAudioOutOpen")
+        return s32(audioOut.Open(static_cast<int32_t>(a0),
+                                 static_cast<int32_t>(a1),
+                                 static_cast<int32_t>(a2),
+                                 static_cast<uint32_t>(a3),
+                                 static_cast<uint32_t>(a4),
+                                 static_cast<uint32_t>(a5)));
+    if (symbol == "sceAudioOutClose")
+        return s32(audioOut.Close(static_cast<int32_t>(a0)));
+    if (symbol == "sceAudioOutOutput")
+        return s32(audioOut.Output(static_cast<int32_t>(a0), ptr(a1)));
+    if (symbol == "sceAudioOutOutputs")
+        return s32(audioOut.Outputs(
+            static_cast<const SceAudioOutHle::AudioOutHle::OutputParam*>(
+                ptr(a0)),
+            static_cast<uint32_t>(a1)));
+    if (symbol == "sceAudioOutSetVolume")
+        return s32(audioOut.SetVolume(static_cast<int32_t>(a0),
+                                      static_cast<uint32_t>(a1),
+                                      static_cast<const int32_t*>(ptr(a2))));
+    if (symbol == "sceAudioOutGetLastOutputTime")
+        return s32(audioOut.GetLastOutputTime(static_cast<int32_t>(a0),
+                                              static_cast<uint64_t*>(ptr(a1))));
+    if (symbol == "sceAudioOutGetPortState")
+        return s32(audioOut.GetPortState(
+            static_cast<int32_t>(a0),
+            static_cast<SceAudioOutHle::AudioOutPortState*>(ptr(a1))));
+    if (symbol == "sceAudioOutSetMixLevelPadSpk")
+        return s32(audioOut.SetMixLevelPadSpk(static_cast<int32_t>(a0),
+                                              static_cast<int32_t>(a1)));
+
+    // --- scePad (ScePadHle) -------------------------------------------------
+    auto& pad = ScePadHle::PadHle::Instance();
+    if (symbol == "scePadInit")            return s32(pad.Init());
+    if (symbol == "scePadOpen")
+        return s32(pad.Open(static_cast<int32_t>(a0),
+                            static_cast<int32_t>(a1),
+                            static_cast<int32_t>(a2), ptr(a3)));
+    if (symbol == "scePadClose")
+        return s32(pad.Close(static_cast<int32_t>(a0)));
+    if (symbol == "scePadRead")
+        return s32(pad.Read(static_cast<int32_t>(a0),
+                            static_cast<ScePadHle::PadData*>(ptr(a1)),
+                            static_cast<int32_t>(a2)));
+    if (symbol == "scePadReadState")
+        return s32(pad.ReadState(static_cast<int32_t>(a0),
+                                 static_cast<ScePadHle::PadData*>(ptr(a1))));
+    if (symbol == "scePadGetControllerInformation")
+        return s32(pad.GetControllerInformation(
+            static_cast<int32_t>(a0),
+            static_cast<ScePadHle::PadControllerInformation*>(ptr(a1))));
+    if (symbol == "scePadGetInfo")
+        return s32(pad.GetInfo(static_cast<ScePadHle::PadInfo*>(ptr(a0))));
+    if (symbol == "scePadSetVibration")
+        return s32(pad.SetVibration(
+            static_cast<int32_t>(a0),
+            static_cast<const ScePadHle::PadVibrationParam*>(ptr(a1))));
+    if (symbol == "scePadSetLightBar")
+        return s32(pad.SetLightBar(
+            static_cast<int32_t>(a0),
+            static_cast<const ScePadHle::PadLightBarParam*>(ptr(a1))));
+
     return static_cast<uint64_t>(kErrInval);
 }
 

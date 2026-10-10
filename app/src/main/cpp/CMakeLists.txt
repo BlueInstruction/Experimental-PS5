@@ -65,6 +65,9 @@ if(ANDROID_ABI STREQUAL "x86_64")
             gpu/gnm/pm4_decoder.cpp
             gpu/gnm/gnm_selftest.cpp
             gpu/gnm/gnm_submit.cpp
+            audio/audio_out_hle.cpp
+            input/pad_hle.cpp
+            input/controller.cpp
             loader/self_extract.cpp
             loader/self_extract_selftest.cpp
             loader/self_fixtures.cpp
@@ -219,7 +222,9 @@ add_library(
         gpu/gnm/gnm_selftest.cpp
         gpu/gnm/gnm_submit.cpp
         audio/audio.cpp
+        audio/audio_out_hle.cpp
         input/controller.cpp
+        input/pad_hle.cpp
         filesystem/vfs.cpp
         utils/logger.cpp
         utils/breadcrumbs.cpp
@@ -289,16 +294,17 @@ target_compile_features(px5 PRIVATE cxx_std_20)
 # The logger still routes PX5_LOG* macros to Android logcat; no file backend.
 find_library(log-lib log)
 find_library(android-lib android)
-# libaaudio is deliberately NOT linked: nothing in the tree calls AAudio.
-# It was linked while audio/audio.cpp claimed a working "AAudio Low-Latency
-# Stream", which made the link line read as evidence for a feature that did
-# not exist. Re-add it in the same change that first calls AAudio_*.
+# libaaudio: linked AGAIN as of the real audio backend — audio.cpp opens one
+# low-latency AAudio stream per guest port behind the sceAudioOut HLE (the
+# earlier link was removed when the audio TU was exposed as a fake; the
+# re-link and the first real AAudio_* calls land in the same change).
 
 # z: SELF extractor (segment inflate) — NDK ships libz.
 target_link_libraries(
         px5
         ${log-lib}
         ${android-lib}
+        aaudio
         z
         FEXCore
         FEXCore_Base
