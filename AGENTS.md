@@ -118,8 +118,8 @@ Before a task is called complete:
    - `commits/<sha>/check-runs` — status and conclusion per check
    - `check-runs/<id>/annotations` — inline findings
    - `actions/jobs/<job_id>/logs` — full job log, including the
-     "Publish lint/cppcheck summary" steps, which carry the structured
-     findings as plain text
+     "Publish lint summary" and "Publish cppcheck summary" steps, which
+     carry the structured findings as plain text
    - `actions/artifacts` — cppcheck.xml / lint reports / APK
    - `code-scanning/alerts` — SARIF alerts from the Security tab
    The run page Step Summary mirrors the publish steps; either source is
@@ -137,6 +137,9 @@ Before a task is called complete:
    step fails); `warning` findings are reviewed one by one; style,
    portability and performance notes are opportunistic and must not drive
    scope.
-6. A green CI run means "no detected code-level defects". It does NOT
-   prove CPU translation, ELF loading, or Vulkan correctness — see Rules
-   2 and 3: behavior claims need runtime evidence from the device logs.
+6. A green CI run means "no gate-blocking findings were detected": the
+   cppcheck gate fails only on `error` severity, so `warning` findings
+   may still be present in the publish summary (see item 5). A green run
+   does NOT prove CPU translation, ELF loading, or Vulkan correctness —
+   see Rules 2 and 3: behavior claims need runtime evidence from the
+   device logs.
