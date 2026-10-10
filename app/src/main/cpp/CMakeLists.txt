@@ -175,6 +175,7 @@ add_library(
         loader/runtime_linker.cpp
         loader/runtime_linker_selftest.cpp
         gpu/ir/gpu_ir.cpp
+        gpu/shader_pipeline.cpp
         gpu/vulkan_device.cpp
         gpu/driver_manager.cpp
         gpu/gnm/gnm_state.cpp
@@ -199,6 +200,15 @@ target_include_directories(px5 PRIVATE
         ${PX5_FEXCORE_ROOT}/FEXCore/include
         ${CMAKE_CURRENT_BINARY_DIR}/fex/FEXCore/include
         ${CMAKE_CURRENT_BINARY_DIR}/fex/generated)
+
+# ----------------------------------------------------------------------------
+# Vendored shader recompiler (AnyPS5 origin, GPL-2.0-only — see
+# gpu/shader_recompiler/PX5_PORT.md). Compiled as its own static library so
+# the upstream-shaped tree keeps its own flags; gpu/shader_pipeline.cpp is
+# the only PX5 code that links against it.
+# ----------------------------------------------------------------------------
+add_subdirectory(gpu/shader_recompiler)
+target_link_libraries(px5 px5_shader_recompiler)
 
 # Belt and suspenders: explicitly require C++20 on the px5 target itself
 # so any consumer of px5 inherits the requirement.
