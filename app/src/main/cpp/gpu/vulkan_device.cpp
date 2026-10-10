@@ -8,6 +8,7 @@
 #include "driver_manager.h"
 #include "vulkan_backend.h"
 #include "gpu/shader/shader_recompiler_service.h"
+#include "gpu/shader/graphics_pipeline_desc.h"
 #include "../core/settings.h"
 #include "../utils/logger.h"
 #include "../utils/breadcrumbs.h"
@@ -375,6 +376,11 @@ bool VulkanGpuDevice::BuildDeviceTable(VkDevice dev) {
     PX5_DEV_FN(DestroyPipelineLayout,      "vkDestroyPipelineLayout");
     PX5_DEV_FN(CreateComputePipelines,     "vkCreateComputePipelines");
     PX5_DEV_FN(DestroyPipeline,            "vkDestroyPipeline");
+    // M8 T6 — guest graphics pipelines. Core 1.0, always resolvable on a
+    // functional device; hard-required like the compute set.
+    PX5_DEV_FN(CreateRenderPass,           "vkCreateRenderPass");
+    PX5_DEV_FN(DestroyRenderPass,          "vkDestroyRenderPass");
+    PX5_DEV_FN(CreateGraphicsPipelines,    "vkCreateGraphicsPipelines");
 
 #undef PX5_DEV_FN
 
@@ -730,12 +736,492 @@ bool VulkanGpuDevice::CreateComputePipelineFromReflection(
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// M8 T6 — guest graphics pipelines (recompiled VS+FS SPIR-V + desc -> real
+// Vulkan objects). Honest scope: materialization only — descriptor SETS,
+// vertex buffer binding, and draw recording are later milestone steps. The
+// desc is validated AGAIN here (the boundary does not trust its callers) and
+// the merge refusals name the conflicting (set, binding) — a bad desc dies
+// before the driver sees anything.
+// ---------------------------------------------------------------------------
+uint64_t VulkanGpuDevice::HashGraphicsPipeline(
+    const std::vector<uint32_t>& vertexSpirvWords,
+    const std::vector<uint32_t>& fragmentSpirvWords,
+    const PX5::Gpu::MergedGraphicsReflection& merged,
+    const PX5::Gpu::GraphicsPipelineDesc& desc) const {
+    // 'gpx1' domain tag (FNV-1a over the ASCII bytes) — the compute keys
+    // start from HashWords alone, so identical words can never collide.
+    uint64_t h = 1469598103934665603ull;
+    const auto mix = [&h](uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+    };
+    mix(0x67307831ull);
+    const auto mixWords = [&mix](const std::vector<uint32_t>& w) {
+        mix(static_cast<uint64_t>(w.size()));
+        for (const uint32_t v : w) mix(v);
+    };
+    mixWords(vertexSpirvWords);
+    mixWords(fragmentSpirvWords);
+    mix(merged.pushConstantSizeBytes);
+    mix(merged.pushConstantStageFlags);
+    mix(merged.bindings.size());
+    for (const auto& b : merged.bindings) {
+        mix((static_cast<uint64_t>(b.type) << 32) | b.set);
+        mix((static_cast<uint64_t>(b.binding) << 32) | b.count);
+        mix((static_cast<uint64_t>(b.readOnly ? 1u : 0u) << 32) | b.stageFlags);
+    }
+    mix(desc.topology);
+    mix(desc.colorTargetCount);
+    for (const uint32_t f : desc.colorFormats) mix(f);
+    mix(desc.depthFormat);
+    mix(desc.vertexBindings.size());
+    for (const auto& b : desc.vertexBindings) {
+        mix((static_cast<uint64_t>(b.binding) << 32) | b.stride);
+        mix(b.perInstance ? 1u : 0u);
+    }
+    mix(desc.vertexAttributes.size());
+    for (const auto& a : desc.vertexAttributes) {
+        mix((static_cast<uint64_t>(a.location) << 32) | a.binding);
+        mix((static_cast<uint64_t>(a.format) << 32) | a.offset);
+    }
+    for (const auto& b : desc.blends) {
+        mix((static_cast<uint64_t>(b.srcColorFactor) << 32) | b.dstColorFactor);
+        mix((static_cast<uint64_t>(b.colorBlendOp) << 32) | b.alphaBlendOp);
+        mix((static_cast<uint64_t>(b.srcAlphaFactor) << 32) | b.dstAlphaFactor);
+        mix((static_cast<uint64_t>(b.colorWriteMask) << 8) |
+            (b.blendEnable ? 1u : 0u));
+    }
+    mix(desc.depthStencil.depthTestEnable ? 1u : 0u);
+    mix(desc.depthStencil.depthWriteEnable ? 1u : 0u);
+    mix(desc.depthStencil.depthCompareOp);
+    mix(desc.depthStencil.stencilTestEnable ? 1u : 0u);
+    return h;
+}
+
+bool VulkanGpuDevice::CreateGraphicsPipelineFromReflection(
+    const std::vector<uint32_t>& vertexSpirvWords,
+    const PX5::Gpu::GuestShaderReflection& vertexReflection,
+    const std::vector<uint32_t>& fragmentSpirvWords,
+    const PX5::Gpu::GuestShaderReflection& fragmentReflection,
+    const PX5::Gpu::GraphicsPipelineDesc& desc,
+    VkPipeline* outPipeline,
+    std::string& err) {
+    err.clear();
+    if (outPipeline) *outPipeline = VK_NULL_HANDLE;
+    if (vertexSpirvWords.empty() || fragmentSpirvWords.empty()) {
+        err = "graphics pipeline: empty stage spirv words";
+        ++m_shaderObjStats.failures;
+        return false;
+    }
+
+    // Boundary validation — named rejection before anything is built.
+    if (!PX5::Gpu::ValidateGraphicsPipelineDesc(desc, err)) {
+        err = "graphics pipeline desc: " + err;
+        ++m_shaderObjStats.failures;
+        return false;
+    }
+    // One binding table out of two stages — named refusal on conflicts.
+    PX5::Gpu::MergedGraphicsReflection merged;
+    if (!PX5::Gpu::MergeGraphicsReflections(vertexReflection, fragmentReflection,
+                                            merged, err)) {
+        err = "graphics pipeline merge: " + err;
+        ++m_shaderObjStats.failures;
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(m_gpuMutex);
+    if (!EnsureLogicalDeviceUnlocked()) {
+        err = "graphics pipeline: logical device unavailable";
+        ++m_shaderObjStats.failures;
+        return false;
+    }
+
+    const uint64_t key =
+        HashGraphicsPipeline(vertexSpirvWords, fragmentSpirvWords, merged, desc);
+    {
+        auto it = m_gfxPipelineCache.find(key);
+        if (it != m_gfxPipelineCache.end()) {
+            ++m_shaderObjStats.gfxHits;
+            if (outPipeline) *outPipeline = it->second.pipeline;
+            return true;
+        }
+    }
+
+    VkShaderModule vsModule = VK_NULL_HANDLE;
+    if (!CreateShaderModuleLocked(vertexSpirvWords.data(),
+                                  vertexSpirvWords.size(), &vsModule, err)) {
+        ++m_shaderObjStats.failures;
+        return false;
+    }
+    VkShaderModule fsModule = VK_NULL_HANDLE;
+    if (!CreateShaderModuleLocked(fragmentSpirvWords.data(),
+                                  fragmentSpirvWords.size(), &fsModule, err)) {
+        ++m_shaderObjStats.failures;
+        return false;
+    }
+
+    GraphicsPipelineObjects objects;
+    bool ok = true;
+
+    // Descriptor-set layouts from the merged table (sorted by (set, binding)).
+    std::map<uint32_t, std::vector<VkDescriptorSetLayoutBinding>> sets;
+    for (const auto& b : merged.bindings) {
+        VkDescriptorSetLayoutBinding lb{};
+        lb.binding = b.binding;
+        lb.descriptorType = static_cast<VkDescriptorType>(b.type);
+        lb.descriptorCount = (b.count == 0u) ? 1u : b.count;
+        lb.stageFlags = b.stageFlags;
+        lb.pImmutableSamplers = nullptr;
+        sets[b.set].push_back(lb);
+    }
+    for (auto& [setId, bindings] : sets) {
+        std::sort(bindings.begin(), bindings.end(),
+                  [](const VkDescriptorSetLayoutBinding& a,
+                     const VkDescriptorSetLayoutBinding& b2) {
+                      return a.binding < b2.binding;
+                  });
+        VkDescriptorSetLayoutCreateInfo ci{};
+        ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        ci.bindingCount = static_cast<uint32_t>(bindings.size());
+        ci.pBindings = bindings.data();
+        VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+        const VkResult r = m_tbl.CreateDescriptorSetLayout(m_device, &ci,
+                                                           nullptr, &layout);
+        if (r != VK_SUCCESS) {
+            err = "vkCreateDescriptorSetLayout(set=" +
+                  std::to_string(setId) + ") failed result=" +
+                  std::to_string(static_cast<int>(r));
+            ok = false;
+            break;
+        }
+        objects.setLayouts.push_back(layout);
+    }
+
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (ok) {
+        VkPushConstantRange pc{};
+        if (merged.pushConstantSizeBytes > 0u) {
+            pc.stageFlags = merged.pushConstantStageFlags;
+            pc.offset = 0u;
+            pc.size = merged.pushConstantSizeBytes;
+        }
+        VkPipelineLayoutCreateInfo ci{};
+        ci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        ci.setLayoutCount =
+            static_cast<uint32_t>(objects.setLayouts.size());
+        ci.pSetLayouts = objects.setLayouts.data();
+        ci.pushConstantRangeCount =
+            (merged.pushConstantSizeBytes > 0u) ? 1u : 0u;
+        ci.pPushConstantRanges = (ci.pushConstantRangeCount > 0u) ? &pc
+                                                                  : nullptr;
+        const VkResult r = m_tbl.CreatePipelineLayout(m_device, &ci, nullptr,
+                                                      &layout);
+        if (r != VK_SUCCESS) {
+            err = "vkCreatePipelineLayout failed result=" +
+                  std::to_string(static_cast<int>(r));
+            ok = false;
+        } else {
+            objects.layout = layout;
+        }
+    }
+
+    // Render pass: GENERAL-layout LOAD/STORE attachments (the AnyPS5
+    // assembly shape — attachment contents flow through general layout, the
+    // command planner owns transitions/barriers, TBDR LoadOp/StoreOp still
+    // drive the GMEM behaviour).
+    if (ok) {
+        std::vector<VkAttachmentDescription> attachments;
+        std::vector<VkAttachmentReference> colorRefs;
+        attachments.reserve(desc.colorTargetCount + 1u);
+        for (uint32_t i = 0; i < desc.colorTargetCount; ++i) {
+            VkAttachmentDescription a{};
+            a.format = static_cast<VkFormat>(desc.colorFormats[i]);
+            a.samples = VK_SAMPLE_COUNT_1_BIT;
+            a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            a.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            a.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            a.initialLayout = VK_IMAGE_LAYOUT_GENERAL;
+            a.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+            const uint32_t idx = static_cast<uint32_t>(attachments.size());
+            attachments.push_back(a);
+            colorRefs.push_back({idx, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
+        }
+        VkAttachmentReference depthRef{};
+        if (desc.depthFormat != 0u) {
+            VkAttachmentDescription a{};
+            a.format = static_cast<VkFormat>(desc.depthFormat);
+            a.samples = VK_SAMPLE_COUNT_1_BIT;
+            a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            a.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            a.stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+            a.initialLayout = VK_IMAGE_LAYOUT_GENERAL;
+            a.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+            depthRef.attachment = static_cast<uint32_t>(attachments.size());
+            depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            attachments.push_back(a);
+        }
+
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount =
+            static_cast<uint32_t>(colorRefs.size());
+        subpass.pColorAttachments = colorRefs.data();
+        subpass.pDepthStencilAttachment =
+            (desc.depthFormat != 0u) ? &depthRef : nullptr;
+
+        // One external dependency so the LOAD sees the previous submission's
+        // stores (the planner's barriers keep the rest ordered).
+        VkSubpassDependency dep{};
+        dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dep.dstSubpass = 0u;
+        dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                           VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                           VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        dep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                           VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                           VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+        VkRenderPassCreateInfo ci{};
+        ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        ci.attachmentCount = static_cast<uint32_t>(attachments.size());
+        ci.pAttachments = attachments.data();
+        ci.subpassCount = 1u;
+        ci.pSubpasses = &subpass;
+        ci.dependencyCount = 1u;
+        ci.pDependencies = &dep;
+        VkRenderPass renderPass = VK_NULL_HANDLE;
+        const VkResult r = m_tbl.CreateRenderPass(m_device, &ci, nullptr,
+                                                  &renderPass);
+        if (r != VK_SUCCESS) {
+            err = "vkCreateRenderPass failed result=" +
+                  std::to_string(static_cast<int>(r));
+            ok = false;
+        } else {
+            objects.renderPass = renderPass;
+        }
+    }
+
+    // The VkGraphicsPipeline — the AnyPS5 assembly shape: dynamic
+    // viewport+scissor, per-target blend array, 1 sample, two stages, one
+    // push-constant block.
+    if (ok) {
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType =
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = vsModule;
+        stages[0].pName = "main";  // the SpirvBackend's fixed entry point name
+        stages[1].sType =
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = fsModule;
+        stages[1].pName = "main";
+
+        std::vector<VkVertexInputBindingDescription> bindings(
+            desc.vertexBindings.size());
+        for (size_t i = 0; i < desc.vertexBindings.size(); ++i) {
+            bindings[i].binding = desc.vertexBindings[i].binding;
+            bindings[i].stride = desc.vertexBindings[i].stride;
+            bindings[i].inputRate =
+                desc.vertexBindings[i].perInstance
+                    ? VK_VERTEX_INPUT_RATE_INSTANCE
+                    : VK_VERTEX_INPUT_RATE_VERTEX;
+        }
+        std::vector<VkVertexInputAttributeDescription> attributes(
+            desc.vertexAttributes.size());
+        for (size_t i = 0; i < desc.vertexAttributes.size(); ++i) {
+            attributes[i].location = desc.vertexAttributes[i].location;
+            attributes[i].binding = desc.vertexAttributes[i].binding;
+            attributes[i].format =
+                static_cast<VkFormat>(desc.vertexAttributes[i].format);
+            attributes[i].offset = desc.vertexAttributes[i].offset;
+        }
+
+        VkPipelineVertexInputStateCreateInfo vertexInput{};
+        vertexInput.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertexInput.vertexBindingDescriptionCount =
+            static_cast<uint32_t>(bindings.size());
+        vertexInput.pVertexBindingDescriptions = bindings.data();
+        vertexInput.vertexAttributeDescriptionCount =
+            static_cast<uint32_t>(attributes.size());
+        vertexInput.pVertexAttributeDescriptions = attributes.data();
+
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+        inputAssembly.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssembly.topology =
+            static_cast<VkPrimitiveTopology>(desc.topology);
+        inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+        VkPipelineViewportStateCreateInfo viewport{};
+        viewport.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewport.viewportCount = 1u;
+        viewport.scissorCount = 1u;
+
+        VkPipelineRasterizationStateCreateInfo raster{};
+        raster.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        raster.polygonMode = VK_POLYGON_MODE_FILL;
+        raster.cullMode = VK_CULL_MODE_NONE;
+        raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        raster.depthBiasEnable = VK_FALSE;
+        raster.lineWidth = 1.0f;
+
+        VkPipelineMultisampleStateCreateInfo multisample{};
+        multisample.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        multisample.minSampleShading = 1.0f;
+
+        VkPipelineDepthStencilStateCreateInfo depthStencil{};
+        depthStencil.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        depthStencil.depthTestEnable =
+            desc.depthStencil.depthTestEnable ? VK_TRUE : VK_FALSE;
+        depthStencil.depthWriteEnable =
+            desc.depthStencil.depthWriteEnable ? VK_TRUE : VK_FALSE;
+        depthStencil.depthCompareOp =
+            static_cast<VkCompareOp>(desc.depthStencil.depthCompareOp);
+        depthStencil.depthBoundsTestEnable = VK_FALSE;
+        depthStencil.stencilTestEnable =
+            desc.depthStencil.stencilTestEnable ? VK_TRUE : VK_FALSE;
+        depthStencil.front.failOp =
+            static_cast<VkStencilOp>(desc.depthStencil.front.failOp);
+        depthStencil.front.passOp =
+            static_cast<VkStencilOp>(desc.depthStencil.front.passOp);
+        depthStencil.front.depthFailOp =
+            static_cast<VkStencilOp>(desc.depthStencil.front.depthFailOp);
+        depthStencil.front.compareOp =
+            static_cast<VkCompareOp>(desc.depthStencil.front.compareOp);
+        depthStencil.front.compareMask = desc.depthStencil.front.compareMask;
+        depthStencil.front.writeMask = desc.depthStencil.front.writeMask;
+        depthStencil.front.reference = desc.depthStencil.front.reference;
+        depthStencil.back.failOp =
+            static_cast<VkStencilOp>(desc.depthStencil.back.failOp);
+        depthStencil.back.passOp =
+            static_cast<VkStencilOp>(desc.depthStencil.back.passOp);
+        depthStencil.back.depthFailOp =
+            static_cast<VkStencilOp>(desc.depthStencil.back.depthFailOp);
+        depthStencil.back.compareOp =
+            static_cast<VkCompareOp>(desc.depthStencil.back.compareOp);
+        depthStencil.back.compareMask = desc.depthStencil.back.compareMask;
+        depthStencil.back.writeMask = desc.depthStencil.back.writeMask;
+        depthStencil.back.reference = desc.depthStencil.back.reference;
+
+        std::vector<VkPipelineColorBlendAttachmentState> blendStates(
+            desc.colorTargetCount);
+        for (uint32_t i = 0; i < desc.colorTargetCount; ++i) {
+            const PX5::Gpu::GraphicsTargetBlend& b = desc.blends[i];
+            VkPipelineColorBlendAttachmentState& s = blendStates[i];
+            s.blendEnable = b.blendEnable ? VK_TRUE : VK_FALSE;
+            s.srcColorBlendFactor =
+                static_cast<VkBlendFactor>(b.srcColorFactor);
+            s.dstColorBlendFactor =
+                static_cast<VkBlendFactor>(b.dstColorFactor);
+            s.colorBlendOp = static_cast<VkBlendOp>(b.colorBlendOp);
+            s.srcAlphaBlendFactor =
+                static_cast<VkBlendFactor>(b.srcAlphaFactor);
+            s.dstAlphaBlendFactor =
+                static_cast<VkBlendFactor>(b.dstAlphaFactor);
+            s.alphaBlendOp = static_cast<VkBlendOp>(b.alphaBlendOp);
+            s.colorWriteMask = b.colorWriteMask;
+        }
+        VkPipelineColorBlendStateCreateInfo blend{};
+        blend.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        blend.logicOpEnable = VK_FALSE;
+        blend.attachmentCount =
+            static_cast<uint32_t>(blendStates.size());
+        blend.pAttachments = blendStates.data();
+
+        const VkDynamicState dynamicStates[2] = {
+            VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dynamic{};
+        dynamic.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynamic.dynamicStateCount = 2u;
+        dynamic.pDynamicStates = dynamicStates;
+
+        VkGraphicsPipelineCreateInfo ci{};
+        ci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        ci.stageCount = 2u;
+        ci.pStages = stages;
+        ci.pVertexInputState = &vertexInput;
+        ci.pInputAssemblyState = &inputAssembly;
+        ci.pViewportState = &viewport;
+        ci.pRasterizationState = &raster;
+        ci.pMultisampleState = &multisample;
+        ci.pDepthStencilState = &depthStencil;
+        ci.pColorBlendState = &blend;
+        ci.pDynamicState = &dynamic;
+        ci.layout = objects.layout;
+        ci.renderPass = objects.renderPass;
+        ci.subpass = 0u;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        const VkResult r = m_tbl.CreateGraphicsPipelines(
+            m_device, VK_NULL_HANDLE, 1u, &ci, nullptr, &pipeline);
+        if (r != VK_SUCCESS) {
+            err = "vkCreateGraphicsPipelines failed result=" +
+                  std::to_string(static_cast<int>(r));
+            ok = false;
+        } else {
+            objects.pipeline = pipeline;
+        }
+    }
+
+    if (!ok) {
+        // Named failure: free what this attempt created, keep the caches
+        // clean (the modules stay cached — they were created successfully).
+        if (objects.renderPass != VK_NULL_HANDLE)
+            m_tbl.DestroyRenderPass(m_device, objects.renderPass, nullptr);
+        if (objects.layout != VK_NULL_HANDLE)
+            m_tbl.DestroyPipelineLayout(m_device, objects.layout, nullptr);
+        for (VkDescriptorSetLayout l : objects.setLayouts)
+            m_tbl.DestroyDescriptorSetLayout(m_device, l, nullptr);
+        ++m_shaderObjStats.failures;
+        return false;
+    }
+
+    if (m_gfxPipelineCache.size() >= kMaxGraphicsPipelines) {
+        // Drop-all eviction (same policy as the compute cache): destroy
+        // every tracked object, keep the modules (their own cache owns them).
+        for (auto& kv : m_gfxPipelineCache) {
+            GraphicsPipelineObjects& po = kv.second;
+            if (po.pipeline != VK_NULL_HANDLE)
+                m_tbl.DestroyPipeline(m_device, po.pipeline, nullptr);
+            if (po.layout != VK_NULL_HANDLE)
+                m_tbl.DestroyPipelineLayout(m_device, po.layout, nullptr);
+            if (po.renderPass != VK_NULL_HANDLE)
+                m_tbl.DestroyRenderPass(m_device, po.renderPass, nullptr);
+            for (VkDescriptorSetLayout l : po.setLayouts)
+                m_tbl.DestroyDescriptorSetLayout(m_device, l, nullptr);
+        }
+        m_gfxPipelineCache.clear();
+        ++m_shaderObjStats.gfxEvictions;
+    }
+    m_gfxPipelineCache.emplace(key, objects);
+    ++m_shaderObjStats.gfxCreated;
+    if (outPipeline) *outPipeline = objects.pipeline;
+    return true;
+}
+
 std::string VulkanGpuDevice::GetShaderObjectStatsString() const {
     std::lock_guard<std::mutex> lock(m_gpuMutex);
-    char b[192];
+    char b[224];
     snprintf(b, sizeof(b),
-             "modules=%llu hits=%llu pipelines=%llu hits=%llu "
-             "evictions=%llu failures=%llu",
+             "modules=%llu hits=%llu pipelines=%llu hits=%llu gfx=%llu "
+             "gfxHits=%llu evictions=%llu failures=%llu",
              static_cast<unsigned long long>(
                  m_shaderObjStats.modulesCreated.load()),
              static_cast<unsigned long long>(
@@ -745,8 +1231,13 @@ std::string VulkanGpuDevice::GetShaderObjectStatsString() const {
              static_cast<unsigned long long>(
                  m_shaderObjStats.pipelineHits.load()),
              static_cast<unsigned long long>(
+                 m_shaderObjStats.gfxCreated.load()),
+             static_cast<unsigned long long>(
+                 m_shaderObjStats.gfxHits.load()),
+             static_cast<unsigned long long>(
                  m_shaderObjStats.moduleEvictions.load() +
-                 m_shaderObjStats.pipelineEvictions.load()),
+                 m_shaderObjStats.pipelineEvictions.load() +
+                 m_shaderObjStats.gfxEvictions.load()),
              static_cast<unsigned long long>(
                  m_shaderObjStats.failures.load()));
     return std::string(b);
@@ -756,8 +1247,21 @@ void VulkanGpuDevice::DestroyShaderObjectsLocked() {
     if (m_device == VK_NULL_HANDLE) {
         m_moduleCache.clear();
         m_pipelineCache.clear();
+        m_gfxPipelineCache.clear();
         return;
     }
+    for (auto& kv : m_gfxPipelineCache) {
+        GraphicsPipelineObjects& po = kv.second;
+        if (po.pipeline != VK_NULL_HANDLE)
+            m_tbl.DestroyPipeline(m_device, po.pipeline, nullptr);
+        if (po.layout != VK_NULL_HANDLE)
+            m_tbl.DestroyPipelineLayout(m_device, po.layout, nullptr);
+        if (po.renderPass != VK_NULL_HANDLE)
+            m_tbl.DestroyRenderPass(m_device, po.renderPass, nullptr);
+        for (VkDescriptorSetLayout l : po.setLayouts)
+            m_tbl.DestroyDescriptorSetLayout(m_device, l, nullptr);
+    }
+    m_gfxPipelineCache.clear();
     for (auto& kv : m_pipelineCache) {
         PipelineObjects& po = kv.second;
         if (po.pipeline != VK_NULL_HANDLE)

@@ -15,6 +15,8 @@ struct ANativeWindow;
 
 namespace PX5::Gpu {
 struct GuestShaderReflection;
+struct GraphicsPipelineDesc;
+struct MergedGraphicsReflection;
 }
 
 namespace PX5 {
@@ -141,6 +143,23 @@ public:
         uint32_t vulkanStageFlags, VkPipeline* outPipeline,
         std::string& err);
 
+    // ---- M8 T6: guest graphics pipelines (real Vulkan materialization) --
+    // Validates the desc again at the boundary, merges the vertex+fragment
+    // reflections into one binding table, then builds set layouts + pipeline
+    // layout + render pass (GENERAL-layout LOAD/STORE attachments) + the
+    // VkGraphicsPipeline (dynamic viewport+scissor, per-target blend array,
+    // 1 sample, two stages, one push-constant block). Layouts and the render
+    // pass are owned here and destroyed with the pipeline. The desc and
+    // merge failures name their rule before the driver sees anything.
+    bool CreateGraphicsPipelineFromReflection(
+        const std::vector<uint32_t>& vertexSpirvWords,
+        const PX5::Gpu::GuestShaderReflection& vertexReflection,
+        const std::vector<uint32_t>& fragmentSpirvWords,
+        const PX5::Gpu::GuestShaderReflection& fragmentReflection,
+        const PX5::Gpu::GraphicsPipelineDesc& desc,
+        VkPipeline* outPipeline,
+        std::string& err);
+
     // Honest object accounting for the diagnostics panel.
     std::string GetShaderObjectStatsString() const;
 
@@ -238,6 +257,12 @@ private:
         PFN_vkDestroyPipelineLayout       DestroyPipelineLayout      = nullptr;
         PFN_vkCreateComputePipelines      CreateComputePipelines     = nullptr;
         PFN_vkDestroyPipeline             DestroyPipeline            = nullptr;
+        // M8 T6 — guest graphics pipelines. Core 1.0, hard-required like the
+        // compute set: a driver that cannot host recompiled graphics shaders
+        // is caught HERE, not at first draw.
+        PFN_vkCreateRenderPass            CreateRenderPass           = nullptr;
+        PFN_vkDestroyRenderPass           DestroyRenderPass          = nullptr;
+        PFN_vkCreateGraphicsPipelines     CreateGraphicsPipelines    = nullptr;
     };
 
     uint32_t FindGraphicsQueueFamily(VkPhysicalDevice dev);
@@ -266,6 +291,7 @@ private:
     // pipeline key so DestroyShaderObjects can free everything exactly.
     static constexpr size_t kMaxShaderModules = 128;
     static constexpr size_t kMaxComputePipelines = 64;
+    static constexpr size_t kMaxGraphicsPipelines = 64;
     std::unordered_map<uint64_t, VkShaderModule> m_moduleCache;
     struct PipelineObjects {
         VkPipeline               pipeline = VK_NULL_HANDLE;
@@ -275,6 +301,15 @@ private:
         // modules (sharing across pipelines), this entry owns the rest.
     };
     std::unordered_map<uint64_t, PipelineObjects> m_pipelineCache;
+    // M8 T6 — graphics pipelines own their render pass too (it is built per
+    // pipeline from the desc's attachment formats).
+    struct GraphicsPipelineObjects {
+        VkPipeline               pipeline = VK_NULL_HANDLE;
+        std::vector<VkDescriptorSetLayout> setLayouts;
+        VkPipelineLayout         layout = VK_NULL_HANDLE;
+        VkRenderPass             renderPass = VK_NULL_HANDLE;
+    };
+    std::unordered_map<uint64_t, GraphicsPipelineObjects> m_gfxPipelineCache;
     struct ShaderObjectStats {
         std::atomic<uint64_t> modulesCreated{0};
         std::atomic<uint64_t> moduleHits{0};
@@ -282,6 +317,9 @@ private:
         std::atomic<uint64_t> pipelinesCreated{0};
         std::atomic<uint64_t> pipelineHits{0};
         std::atomic<uint64_t> pipelineEvictions{0};
+        std::atomic<uint64_t> gfxCreated{0};
+        std::atomic<uint64_t> gfxHits{0};
+        std::atomic<uint64_t> gfxEvictions{0};
         std::atomic<uint64_t> failures{0};
     };
     ShaderObjectStats m_shaderObjStats;
@@ -295,6 +333,15 @@ private:
     uint64_t HashReflection(const std::vector<uint32_t>& spirvWords,
                             const PX5::Gpu::GuestShaderReflection& reflection,
                             uint32_t vulkanStageFlags) const;
+    // M8 T6 — 'gpx1'-domain key (no collision with the compute reflection
+    // keys over identical inputs). Mixes both stages' words, the merged
+    // binding table, the push window, and every desc field the object
+    // depends on.
+    uint64_t HashGraphicsPipeline(
+        const std::vector<uint32_t>& vertexSpirvWords,
+        const std::vector<uint32_t>& fragmentSpirvWords,
+        const PX5::Gpu::MergedGraphicsReflection& merged,
+        const PX5::Gpu::GraphicsPipelineDesc& desc) const;
 
     // Rendering state (guarded by m_gpuMutex for structural changes)
     VkDevice     m_device        = VK_NULL_HANDLE;

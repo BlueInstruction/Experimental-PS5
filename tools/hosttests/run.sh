@@ -203,4 +203,15 @@ echo "[hosttests] building guest_shader_capture_test (M8 T4)"
 echo "[hosttests] running guest_shader_capture_test (M8 T4)"
 "$OUT/guest_shader_capture_test"
 
+echo "[hosttests] building graphics_pipeline_desc_test (M8 T6)"
+# Vulkan-free desc/validator/merge — pure data + pure functions, no recompiler.
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
+    -I"$CPP" \
+    -o "$OUT/graphics_pipeline_desc_test" \
+    "$ROOT/tools/hosttests/graphics_pipeline_desc_test.cpp" \
+    "$CPP/gpu/shader/graphics_pipeline_desc.cpp"
+
+echo "[hosttests] running graphics_pipeline_desc_test (M8 T6)"
+"$OUT/graphics_pipeline_desc_test"
+
 echo "[hosttests] all host tests passed"
