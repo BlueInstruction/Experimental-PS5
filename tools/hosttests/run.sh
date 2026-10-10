@@ -151,4 +151,28 @@ echo "[hosttests] building shader_recompiler_stages_test (M8 T2)"
 echo "[hosttests] running shader_recompiler_stages_test (M8 T2)"
 "$OUT/shader_recompiler_stages_test"
 
+echo "[hosttests] building guest_shader_recompiler_test (M8 T3)"
+# The app-side shader service (gpu/shader/shader_recompiler_service.cpp) is
+# the TU the arm64 APK compiles; this gate proves it end to end on the host.
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread -DANYPS5_ENABLE_SPIRV_TOOLS=0 \
+    -I"$CPP" \
+    -I"$REC/core/libs" \
+    -I"$REC/core/shader/recompiler" \
+    -I"$REC/core/shader/recompiler/RdnaDecoder/include" \
+    -I"$REC/core/shader/recompiler/ControlFlow/include" \
+    -I"$REC/core/shader/recompiler/IntermediateRepresentation/include" \
+    -I"$REC/core/shader/recompiler/Translation/include" \
+    -I"$REC/core/shader/recompiler/Optimization/include" \
+    -I"$REC/core/shader/recompiler/SpirvBackend/include" \
+    -I"$SPIRVHDRS" \
+    -I"$PORTABLE" \
+    -o "$OUT/guest_shader_recompiler_test" \
+    "$ROOT/tools/hosttests/guest_shader_recompiler_test.cpp" \
+    "$CPP/gpu/shader/shader_recompiler_service.cpp" \
+    "$PORTABLE/px5_spirv_optimizer.cpp" \
+    $(cat "$OUT/rec_sources.txt")
+
+echo "[hosttests] running guest_shader_recompiler_test (M8 T3)"
+"$OUT/guest_shader_recompiler_test"
+
 echo "[hosttests] all host tests passed"
