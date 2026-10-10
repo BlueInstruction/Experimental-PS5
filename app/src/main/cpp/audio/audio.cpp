@@ -52,7 +52,7 @@ public:
         read_ = write_ = fill_ = 0;
     }
 
-    size_t Fill() const {
+    size_t Fill() {
         std::lock_guard<std::mutex> lock(m_);
         return fill_;
     }
@@ -161,7 +161,7 @@ public:
             // The callback stopped draining (device vanished). Drop the
             // block, count the stall — the guest keeps running.
             ++g_queueStalls;
-            PX5_LOGW_ONCE(CORE,
+            PX5_LOGW_ONCE(LogCategory::CORE,
                           "audio: ring full for %d ms — block dropped "
                           "(stream may have died)",
                           kQueueTimeoutMs);

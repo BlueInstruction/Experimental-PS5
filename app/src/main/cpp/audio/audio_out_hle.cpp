@@ -170,7 +170,10 @@ struct AudioOutHle::Impl {
     Clock* clock = nullptr;   // null => the real clock
     RealClock realClock;
 
-    Clock& Clk() { return clock ? *clock : realClock; }
+    Clock& Clk() {
+        if (clock != nullptr) return *clock;
+        return realClock;
+    }
 
     Port* GetPortLocked(int32_t handle) {
         const int idx = handle - 1;
