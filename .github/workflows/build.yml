@@ -10,7 +10,7 @@ on:
 jobs:
   build-apk:
     name: Build Release APK
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned: ubuntu-latest migrates to Ubuntu 26 (2026-10-19)
     env:
       PX5_FEXCORE_ROOT: ${{ github.workspace }}/.deps/FEX
       PX5_ADRENOTOOLS_ROOT: ${{ github.workspace }}/.deps/adrenotools
