@@ -8,7 +8,7 @@
 //   NUM_INSTANCES      -> instance-count capture
 //   DRAW_INDEX_AUTO    -> draw record (count + current instances/indexType)
 //   DRAW_INDEX_2       -> indexed draw record (5-dword body)
-//   DISPATCH_DIRECT    -> dispatch record (dimX/Y/Z)
+//   DISPATCH_DIRECT    -> dispatch record (dimX/Y/Z + initiator, M8 T4)
 //   NOP                -> skipped
 // Everything else: recognized-name lookup, counted, body skipped by count.
 
@@ -36,7 +36,11 @@ constexpr uint32_t kBodyIndexType     = 1;
 constexpr uint32_t kBodyNumInstances  = 1;
 constexpr uint32_t kBodyDrawIndexAuto = 2;  // [0]=count [1]=initiator
 constexpr uint32_t kBodyDrawIndex2    = 5;  // max,count | addrLo,addrHi | count,init
-constexpr uint32_t kBodyDispatch      = 3;  // dimX dimY dimZ
+constexpr uint32_t kBodyDispatch      = 3;  // dimX dimY dimZ (min)
+// Real packet shape (shadPS4 PM4CmdDispatchDirect, Kyty CpOpDispatchDirect):
+// dimX dimY dimZ dispatch_initiator — FOUR dwords. The initiator dword is
+// optional input for backward compatibility with older fixtures (wave64
+// default applies when absent).
 
 } // namespace
 
@@ -228,6 +232,12 @@ size_t Pm4Decoder::Decode(const uint32_t* dwords, size_t dwordCount,
         }
         case kItDispatchDirect: {
             if (bodyNeed >= kBodyDispatch) {
+                // M8 T4: capture the packet's own initiator when present
+                // (body[3]); the real PS5 packet is four dwords. Kyty's
+                // ComputeWaveSize reads CS_W32_EN[15] from this dword.
+                if (bodyNeed >= kBodyDispatch + 1) {
+                    state.SetDispatchInitiator(body[3]);
+                }
                 state.RecordDispatch(body[0], body[1], body[2],
                                      static_cast<uint32_t>(i));
                 ++stats.dispatches;

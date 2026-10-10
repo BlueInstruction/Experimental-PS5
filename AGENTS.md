@@ -105,3 +105,57 @@ Build: versionName 1.43 (versionCode 44).
 No Sony firmware, keys, or game assets here. The project runs legally
 obtained software on hardware the owner controls. Reference projects are
 credited in README.
+
+This repo is GPL-2.0-only (SPDX: GPL-2.0-only, relicensed from
+GPL-3.0 by the copyright holder, 2026-10) — chosen to match the PS5
+ecosystem (AnyPS5, shadPS4 are GPL-2.0-only). Merging code from
+same-license open-source projects needs NO per-copy permission; the
+license itself grants it. The obligations ride along automatically:
+
+- Keep copyright/license headers of copied files intact.
+- Credit the source project in README Credits.
+
+Compatibility map (verified against upstream LICENSE files 2026-10):
+mergeable without friction = AnyPS5, shadPS4 (both GPL-2.0-only),
+FEX/FEXCore, box64, Kyty, fmt, ankerl_unordered_map (MIT),
+libadrenotools, liblinkernsbypass (BSD-2-Clause). NOT mergeable =
+GPL-3-only or Apache-2.0-only sources (some Google projects) — verify
+the SPDX of anything new before importing it.
+
+## CI Review Policy
+
+Applies to any AI agent (or human) working on this repository.
+
+Before a task is called complete:
+
+1. Read the CI results for the exact commit being reviewed — never assume
+   a check is green without seeing its conclusion. Same-repo agents with a
+   read token can fetch everything through the GitHub API:
+   - `commits/<sha>/check-runs` — status and conclusion per check
+   - `check-runs/<id>/annotations` — inline findings
+   - `actions/jobs/<job_id>/logs` — full job log, including the
+     "Publish lint summary" and "Publish cppcheck summary" steps, which
+     carry the structured findings as plain text
+   - `actions/artifacts` — cppcheck.xml / lint reports / APK
+   - `code-scanning/alerts` — SARIF alerts from the Security tab
+   The run page Step Summary mirrors the publish steps; either source is
+   fine. If results are unreachable, say so — do not invent findings.
+2. For every finding, open the reported file and line before proposing a
+   fix; don't fix blind from the warning text. Fix priority: memory
+   safety / UB / resource lifetime / thread safety > API misuse >
+   style / performance.
+3. Never suppress a finding just to turn CI green. Suppress only a
+   demonstrated false positive or a documented intentional exception, and
+   state the reason in the suppression comment itself.
+4. Do not edit the fetched engine tree (see `tools/fetch_fexcore.sh`) to
+   silence findings — engine changes go through numbered patches.
+5. Severity: cppcheck `error` / Lint `Error` blocks the merge (the gate
+   step fails); `warning` findings are reviewed one by one; style,
+   portability and performance notes are opportunistic and must not drive
+   scope.
+6. A green CI run means "no gate-blocking findings were detected": the
+   cppcheck gate fails only on `error` severity, so `warning` findings
+   may still be present in the publish summary (see item 5). A green run
+   does NOT prove CPU translation, ELF loading, or Vulkan correctness —
+   see Rules 2 and 3: behavior claims need runtime evidence from the
+   device logs.

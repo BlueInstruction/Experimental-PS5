@@ -34,6 +34,12 @@ enum PadButtons : uint32_t {
     PAD_OPTIONS   = 1u << 10,
     PAD_SHARE     = 1u << 11,
     PAD_PS_HOME   = 1u << 12,
+    // M8-era additive bits: stick buttons + touchpad (the ORBIS HLE maps
+    // them to their real PadData bits; the Kotlin side may send them when
+    // the virtual pad grows the corresponding controls).
+    PAD_L3        = 1u << 13,
+    PAD_R3        = 1u << 14,
+    PAD_TOUCHPAD  = 1u << 15,
 };
 
 /**
@@ -91,6 +97,12 @@ public:
      * @param pressed true if pressed, false otherwise
      */
     void TouchpadPressed(bool pressed);
+
+    /**
+     * Returns current touchpad press state.
+     * @return true if pressed
+     */
+    bool Touchpad() const { return m_touchpad.load(std::memory_order_relaxed); }
 
     /**
      * Returns current button bit mask.

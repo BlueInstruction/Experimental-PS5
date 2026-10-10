@@ -359,25 +359,26 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
     }
 
     // ------------------------------------------------------------------
-    // v1.45 — import-trap installation. Every UNDEF STRONG import slot
-    // collected above now points at a 16-byte guest stub instead of the
-    // file's lazy-binding back-pointer:
-    //     B8 <nr>       mov eax, kPx5ImportTrapSyscall
-    //     BF <idx>      mov edi, <import index>
+    // v1.47 — the transparent import-call stub. Every UNDEF STRONG import
+    // slot now points at a 16-byte guest stub that preserves the FULL SysV
+    // call convention:
+    //     4C 8B D1      mov r10, rcx   ; call-ABI a4 -> syscall-ABI slot
+    //     B8 <nr>       mov eax, kPx5ImportCallBase + import index
     //     0F 05         syscall        -> GuestSyscalls::Dispatch
-    //     C3            ret            -> RAX=0 back to the caller
-    //     90 90 90      padding (never executed)
-    // A missing import is now a NAMED ledger event and the guest keeps
-    // running; a data read of the slot sees a mapped RX page, not null.
-    // HISTORY HONESTY (v1.46): the vc45 record said "PLT#0 -> GOT slot 0
-    // in LOAD#4 BSS". Both halves were wrong — the first PLT slot is
-    // 0x4943E0 (file value 0x2e54c6, the lazy back-pointer, NOT 0), and
-    // the vc45/vc46 crash happened BEFORE any PLT call: _start's first
-    // memory access is mov r14d,[rdi] with RDI still 0 (no ORBIS entry
-    // ABI at dispatch) — fixed v1.46 in fexcore_integration.cpp. The
-    // traps stay: they are what the guest hits as soon as the ABI is
-    // right, and every JUMP_SLOT slot would otherwise keep pointing at
-    // an unmapped link-time VA.
+    //     C3            ret            -> RAX back to the caller
+    //     90 x5         padding (never executed)
+    // Why this shape: FEXCore reads syscall arguments from
+    // RDI,RSI,RDX,R10,R8,R9 (OpcodeDispatcher SyscallOp, GPRIndexes_64)
+    // and rewrites guest RCX to the return address BEFORE the handler
+    // runs — a plain trap stub cannot carry the call convention's 4th
+    // argument. The shuffle moves RCX into R10 first, so all six call
+    // arguments pass through the syscall path intact; the stub never
+    // writes RDI (the v1.45 stub clobbered a1 with its index). The index
+    // rides IN the syscall number, not in any register, and the range
+    // [kPx5ImportCallBase, kPx5ImportCallEnd) keeps it out of every real
+    // Linux NR. Missing imports resolve at DISPATCH time: HLE-backed
+    // names/NID strings run the real service; the rest keep the v1.45
+    // named-ledger behavior (RAX=0, guest keeps running).
     // ------------------------------------------------------------------
     size_t trapInstalled = 0;
     if (!pend.empty()) {
@@ -392,7 +393,16 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
         const bool overlapsImage =
             stubBase < out.imageHighVa + 4096 &&
             stubBase + stubBytes > out.imageLowVa;
-        if (overlapsImage) {
+        if (pend.size() > kPx5ImportCallSlots) {
+            // The index is the syscall number's low bits; more imports
+            // than the reserved range cannot get honest indices. Refuse
+            // the whole install rather than alias stub k and k+65536.
+            PX5_LOGE(LogCategory::LOADER,
+                     "REL: %zu imports exceed the %u-slot import-call "
+                     "range — install refused, slots stay as linked",
+                     pend.size(),
+                     static_cast<unsigned>(kPx5ImportCallSlots));
+        } else if (overlapsImage) {
             PX5_LOGW(LogCategory::LOADER,
                      "REL: import-trap region 0x%llx overlaps the image — "
                      "slots stay 0 (the null wall stays; refusing to "
@@ -452,18 +462,18 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
                 }
                 if (t.name.empty()) ++nameless;
 
+                // mov r10,rcx (a4 shuffle) ; mov eax, base+index ; syscall ; ret
+                const uint32_t nr = kPx5ImportCallBase +
+                    static_cast<uint32_t>(i);
                 const uint8_t code[kStubStride] = {
-                    0xB8, static_cast<uint8_t>(kPx5ImportTrapSyscall & 0xff),
-                    static_cast<uint8_t>((kPx5ImportTrapSyscall >> 8) & 0xff),
-                    static_cast<uint8_t>((kPx5ImportTrapSyscall >> 16) & 0xff),
-                    static_cast<uint8_t>((kPx5ImportTrapSyscall >> 24) & 0xff),
-                    0xBF, static_cast<uint8_t>(i & 0xff),
-                    static_cast<uint8_t>((i >> 8) & 0xff),
-                    static_cast<uint8_t>((i >> 16) & 0xff),
-                    static_cast<uint8_t>((i >> 24) & 0xff),
+                    0x4C, 0x8B, 0xD1,              // mov r10, rcx
+                    0xB8, static_cast<uint8_t>(nr & 0xff),
+                    static_cast<uint8_t>((nr >> 8) & 0xff),
+                    static_cast<uint8_t>((nr >> 16) & 0xff),
+                    static_cast<uint8_t>((nr >> 24) & 0xff),
                     0x0F, 0x05,                    // syscall
                     0xC3,                          // ret
-                    0x90, 0x90, 0x90};             // padding, never executed
+                    0x90, 0x90, 0x90, 0x90, 0x90}; // padding, never executed
                 memcpy(stubHost, code, kStubStride);
                 traps.push_back(std::move(t));
             }
@@ -532,20 +542,20 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
 
                 PX5_LOGI(LogCategory::LOADER,
                          "IMPORT-TRAPS: stubs=%zu region=[0x%llx..0x%llx] "
-                         "nr=0x%x stride=16 slotsWritten=%zu readbackOk=%zu "
+                         "nr-base=0x%x stride=16 slotsWritten=%zu readbackOk=%zu "
                          "readbackMismatch=%zu nameless=%zu — "
                          "unresolved slots now trap to a named ledger",
                          trapInstalled,
                          (unsigned long long)stubBase,
                          (unsigned long long)(stubBase + stubBytes),
-                         kPx5ImportTrapSyscall,
+                         kPx5ImportCallBase,
                          slotsWritten,
                          slotsWritten - readbackMismatch,
                          readbackMismatch, nameless);
                 Evidence::AppendLedger(
-                    "import traps stubs=%zu region=0x%llx nr=0x%x",
+                    "import traps stubs=%zu region=0x%llx nr-base=0x%x",
                     trapInstalled, (unsigned long long)stubBase,
-                    kPx5ImportTrapSyscall);
+                    kPx5ImportCallBase);
                 Breadcrumb::Set("dyn: import traps=%zu", trapInstalled);
             }
         }
@@ -618,7 +628,8 @@ std::string ReadWholeFile(const std::string& path, std::vector<uint8_t>& data) {
     if (!f.is_open()) return "cannot open file: " + path + " (" +
                                strerror(errno) + ")";
     const std::streamsize sz = f.tellg();
-    if (sz <= 0 || sz > (1ull << 31)) return "unreasonable file size: " + path;
+    if (sz <= 0 || sz > static_cast<std::streamsize>(1ull << 31))
+        return "unreasonable file size: " + path;
     f.seekg(0);
     data.resize(static_cast<size_t>(sz));
     if (!f.read(reinterpret_cast<char*>(data.data()), sz))

@@ -130,7 +130,8 @@ void GuestPcRing::Format(char* out, size_t outCap) {
 
 uint64_t GuestSyscalls::Dispatch(uint32_t nr,
                                  uint64_t a0, uint64_t a1, uint64_t a2,
-                                 uint64_t a3, uint64_t a4, uint64_t a5) {
+                                 uint64_t a3, uint64_t a4, uint64_t a5,
+                                 uint64_t guestRsp) {
     {
         std::lock_guard<std::mutex> lk(g_stateMutex);
         ++g_stats.totalCalls;
@@ -378,6 +379,32 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
         return ret;
     }
 
+    default:
+        break;
+    }
+
+    // v1.47 — transparent import calls. The stub carries its own import
+    // index IN the syscall number (eax = kPx5ImportCallBase + index), so
+    // the six registers FEXCore hands us are the caller's untouched SysV
+    // arguments after the stub's rcx->r10 shuffle: a1..a6 arrive intact
+    // and the call-ABI stack stands at guestRsp for 7th+ arguments.
+    if (nr >= kPx5ImportCallBase && nr < kPx5ImportCallEnd) {
+        ImportCall call;
+        call.args[0] = a0;
+        call.args[1] = a1;
+        call.args[2] = a2;
+        call.args[3] = a3;          // r10 <= stub's mov rcx->r10 = call a4
+        call.args[4] = a4;
+        call.args[5] = a5;
+        call.guestRsp = guestRsp;
+        const uint64_t ret = RuntimeLinker::GetInstance().DispatchImportCall(
+            static_cast<uint64_t>(nr - kPx5ImportCallBase), call);
+        std::lock_guard<std::mutex> lk(g_stateMutex);
+        g_stats.handledCalls++;
+        return ret;
+    }
+
+    switch (nr) {
     case NR_futex:                           // single-threaded guests only
     case NR_sched_getaffinity: {
         std::lock_guard<std::mutex> lk(g_stateMutex);

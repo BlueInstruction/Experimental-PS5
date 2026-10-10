@@ -56,12 +56,19 @@ if(ANDROID_ABI STREQUAL "x86_64")
             SHARED
             stub/ui_smoke_stub.cpp
             gpu/ir/gpu_ir.cpp
+            gpu/vulkan_backend.cpp
             gpu/vulkan_device.cpp
+            gpu/shader/graphics_pipeline_desc.cpp
+            gpu/shader/dispatch_proof_contract.cpp
             gpu/driver_manager.cpp
             gpu/gnm/gnm_state.cpp
             gpu/gnm/pm4_decoder.cpp
             gpu/gnm/gnm_selftest.cpp
             gpu/gnm/gnm_submit.cpp
+            audio/audio_out_hle.cpp
+            input/pad_hle.cpp
+            input/controller.cpp
+            loader/nid.cpp
             loader/self_extract.cpp
             loader/self_extract_selftest.cpp
             loader/self_fixtures.cpp
@@ -83,6 +90,10 @@ if(ANDROID_ABI STREQUAL "x86_64")
     find_library(android-lib android)
     target_include_directories(px5 PRIVATE ${CMAKE_CURRENT_LIST_DIR})
     target_compile_features(px5 PRIVATE cxx_std_20)
+    # Marks the ABI inside the TUs it shares with the engine: engine-only
+    # entry points (the M8 dispatch proof needs the vendored recompiler)
+    # compile down to named refusals instead of undefined symbols.
+    target_compile_definitions(px5 PRIVATE PX5_UI_SMOKE_STUB=1)
     # z: SELF extractor inflate/deflate (NDK ships libz).
     target_link_libraries(px5 ${log-lib} ${android-lib} z)
     return()
@@ -121,9 +132,40 @@ if(NOT EXISTS "${PX5_FEXCORE_ROOT}/CMakeLists.txt")
         "source tree. Run tools/fetch_fexcore.sh first.")
 endif()
 
+# ----------------------------------------------------------------------------
+# ARMv8.0-A host baseline (REQUIRED — build-defect guard, vc57)
+# ----------------------------------------------------------------------------
+# FEX's CMake defaults to TUNE_CPU="native": on an aarch64 cross build it
+# runs Scripts/aarch64_fit_native.py against the BUILD HOST's /proc/cpuinfo
+# and then Scripts/NeedDisabledSVE.py, which CRASHES (TypeError, exit=1) on
+# any x86_64 CI runner (no "Features" line in an x86 cpuinfo). FEX treats
+# that non-zero exit as "bugged SVE platform" and FORCES AARCH64_CPU to
+# "cortex-a78" (CMakeLists.txt:510) — so the whole FEXCore JIT was compiled
+# -mcpu=cortex-a78 = ARMv8.2-A + LSE + RCPC. Every SDM below 8-series
+# without LSE then SIGILLs on the first std::atomic refcount increment:
+#   SIGILL pc=libpx5.so+0x1a6f50  ldadd x8, x8, [x25]
+#   __libcpp_atomic_refcount_increment inside
+#   FEXCore::CPU::SharedCodeBufferManager::AllocateNew (InitializeCompiler).
+# Pinning TUNE_CPU="none" skips FEX's tuning entirely: NDK's armv8-a
+# baseline lowers atomics to outline helpers (__aarch64_*) that runtime-
+# check HWCAP — LL/SC on v8.0 hosts, LSE on v8.1+. One binary serves all
+# Snapdragon generations.
+set(TUNE_CPU "none" CACHE STRING "PX5: force ARMv8.0 baseline — no build-host tuning" FORCE)
+set(TUNE_ARCH "generic" CACHE STRING "PX5: generic arch baseline" FORCE)
+
 list(APPEND CMAKE_MODULE_PATH ${PX5_FEXCORE_ROOT}/Data/CMake)
 add_subdirectory(${PX5_FEXCORE_ROOT}
                  ${CMAKE_CURRENT_BINARY_DIR}/fex)
+
+# Build-defect guard: if anything ever re-enables FEX host tuning, refuse to
+# configure rather than silently shipping an LSE-requiring binary again.
+if(NOT TUNE_CPU STREQUAL "none")
+    message(FATAL_ERROR
+        "PX5: TUNE_CPU='${TUNE_CPU}' is forbidden. Android ships one binary for "
+        "all Snapdragon generations and must keep the ARMv8.0 host baseline "
+        "(outline atomics). FEX's native tuning resolved to -mcpu=cortex-a78 "
+        "on CI and SIGILL'd every pre-LSE SoC at libpx5.so+0x1a6f50.")
+endif()
 
 # ----------------------------------------------------------------------------
 # Disable FEX targets we don't need on Android
@@ -172,18 +214,25 @@ add_library(
         loader/self_extract.cpp
         loader/self_extract_selftest.cpp
         loader/self_fixtures.cpp
+        loader/nid.cpp
         loader/runtime_linker.cpp
         loader/runtime_linker_selftest.cpp
         gpu/ir/gpu_ir.cpp
+        gpu/vulkan_backend.cpp
         gpu/shader_pipeline.cpp
         gpu/vulkan_device.cpp
+        gpu/shader/graphics_pipeline_desc.cpp
+        gpu/shader/dispatch_proof_contract.cpp
         gpu/driver_manager.cpp
         gpu/gnm/gnm_state.cpp
         gpu/gnm/pm4_decoder.cpp
         gpu/gnm/gnm_selftest.cpp
         gpu/gnm/gnm_submit.cpp
+        gpu/videoout_hle.cpp
         audio/audio.cpp
+        audio/audio_out_hle.cpp
         input/controller.cpp
+        input/pad_hle.cpp
         filesystem/vfs.cpp
         utils/logger.cpp
         utils/breadcrumbs.cpp
@@ -202,13 +251,23 @@ target_include_directories(px5 PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR}/fex/generated)
 
 # ----------------------------------------------------------------------------
-# Vendored shader recompiler (AnyPS5 origin, GPL-2.0-only — see
-# gpu/shader_recompiler/PX5_PORT.md). Compiled as its own static library so
-# the upstream-shaped tree keeps its own flags; gpu/shader_pipeline.cpp is
-# the only PX5 code that links against it.
+# M8 T3/T4 + M7 facade on ONE substrate: the vendored AnyPS5 recompiler
+# (GPL-2.0-only — see gpu/shader_recompiler/PX5_PORT.md). The earlier M8
+# fetch-pin (.deps/anyps5) is superseded by the vendored tree: hermetic (no
+# network at build time) and CI-proven; its PUBLIC include dirs reach every
+# app-side consumer:
+#   * gpu/shader_pipeline.cpp — the M7 facade, the one boundary PX5 code crosses
+#   * gpu/shader/shader_recompiler_service.cpp — the only TU that sees vendored
+#     types; gpu/shader/shader_capture.cpp speaks to its app-side interface only
+# tools/fetch_shader_recompiler.sh survives ONLY as the host-test substrate
+# (build.yml fetches for tools/hosttests/run.sh; the APK build ignores it).
+# The x86_64 UI-smoke stub target deliberately stays recompiler-free.
 # ----------------------------------------------------------------------------
 add_subdirectory(gpu/shader_recompiler)
 target_link_libraries(px5 px5_shader_recompiler)
+target_sources(px5 PRIVATE
+        gpu/shader/shader_capture.cpp
+        gpu/shader/shader_recompiler_service.cpp)
 
 # Belt and suspenders: explicitly require C++20 on the px5 target itself
 # so any consumer of px5 inherits the requirement.
@@ -217,16 +276,17 @@ target_compile_features(px5 PRIVATE cxx_std_20)
 # The logger still routes PX5_LOG* macros to Android logcat; no file backend.
 find_library(log-lib log)
 find_library(android-lib android)
-# libaaudio is deliberately NOT linked: nothing in the tree calls AAudio.
-# It was linked while audio/audio.cpp claimed a working "AAudio Low-Latency
-# Stream", which made the link line read as evidence for a feature that did
-# not exist. Re-add it in the same change that first calls AAudio_*.
+# libaaudio: linked AGAIN as of the real audio backend — audio.cpp opens one
+# low-latency AAudio stream per guest port behind the sceAudioOut HLE (the
+# earlier link was removed when the audio TU was exposed as a fake; the
+# re-link and the first real AAudio_* calls land in the same change).
 
 # z: SELF extractor (segment inflate) — NDK ships libz.
 target_link_libraries(
         px5
         ${log-lib}
         ${android-lib}
+        aaudio
         z
         FEXCore
         FEXCore_Base

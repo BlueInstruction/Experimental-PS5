@@ -10,30 +10,32 @@ on:
 jobs:
   build-apk:
     name: Build Release APK
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned: ubuntu-latest migrates to Ubuntu 26 (2026-10-19)
     env:
       PX5_FEXCORE_ROOT: ${{ github.workspace }}/.deps/FEX
       PX5_ADRENOTOOLS_ROOT: ${{ github.workspace }}/.deps/adrenotools
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Set up JDK 17
-      uses: actions/setup-java@v4
+      uses: actions/setup-java@v6
       with:
         java-version: '17'
         distribution: 'temurin'
 
     - name: Setup Android SDK
-      uses: android-actions/setup-android@v3
+      uses: android-actions/setup-android@v4
       with:
         packages: 'ndk;27.3.13750724 cmake;3.22.1'
 
     - name: Setup Gradle
-      uses: gradle/actions/setup-gradle@v3
+      uses: gradle/actions/setup-gradle@v5
       with:
-        gradle-version: '8.9'
+        # Same-repo pull_request events default to a read-only cache, which
+        # produced permanent "cache is read-only / 400" annotations.
+        cache-read-only: false
 
     # v1.33 hardening: some external editors / AI-studio syncs strip the
     # executable bit on round-trip (vc33 incident: fetch scripts + gradlew
@@ -41,12 +43,15 @@ jobs:
     # denied before Gradle even ran). Re-assert the modes here so the
     # build is immune to that class of damage.
     - name: Re-assert executable bits
-      run: chmod +x gradlew tools/fetch_fexcore.sh tools/fetch_adrenotools.sh tools/hosttests/run.sh
+      run: chmod +x gradlew tools/fetch_fexcore.sh tools/fetch_adrenotools.sh tools/fetch_shader_recompiler.sh tools/hosttests/run.sh
 
     # Runs BEFORE the APK build, and deliberately has no toolchain
     # dependency, so a logic regression is reported in seconds instead of
     # surviving a green "it compiled" build. Every other workflow in this
     # repo only compiles; this one executes assertions.
+    - name: Fetch pinned AnyPS5 shader recompiler
+      run: ./tools/fetch_shader_recompiler.sh
+
     - name: Host regression tests (memory ranges + JNI symbol parity)
       run: ./tools/hosttests/run.sh
 
@@ -67,10 +72,10 @@ jobs:
     # auto-generated debug keystore (see build.gradle.kts buildTypes), so
     # the artifact installs exactly like before — no upload secrets needed.
     - name: Build Release APK
-      run: gradle assembleRelease --no-daemon --stacktrace --info
+      run: ./gradlew assembleRelease --no-daemon --stacktrace --info
 
     - name: Upload APK
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: px5-alpha-apk
         path: app/build/outputs/apk/release/*.apk
@@ -81,7 +86,7 @@ jobs:
     # functions ONLY against the UNSTRIPPED native libraries (the APK copy
     # is stripped by AGP). The pre-strip copies live in the cxx obj dirs.
     - name: Upload unstripped native libraries (for crash symbolization)
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: px5-native-symbols-arm64
         path: |

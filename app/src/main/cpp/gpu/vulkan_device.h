@@ -6,10 +6,18 @@
 #include <atomic>
 #include <thread>
 #include <mutex>
+#include <unordered_map>
+#include <vector>
 
 #include <vulkan/vulkan_core.h>
 
 struct ANativeWindow;
+
+namespace PX5::Gpu {
+struct GuestShaderReflection;
+struct GraphicsPipelineDesc;
+struct MergedGraphicsReflection;
+}
 
 namespace PX5 {
 
@@ -24,6 +32,7 @@ struct GpuCapabilities {
     uint32_t    deviceId          = 0;      ///< Vulkan device ID
     uint32_t    vendorId          = 0;      ///< Vulkan vendor ID
     uint32_t    physicalDevices   = 0;      ///< Number of physical devices enumerated
+    std::string driverIdentity;             ///< VkPhysicalDeviceDriverProperties binding (driverID/driverName/Info) — the proof the enumerated device came from the loaded driver slot
     std::string lastError;                  ///< Non-empty => failure detail
 };
 
@@ -97,6 +106,79 @@ public:
      * @return true if proof passed, false otherwise
      */
     bool RunSelfContainedProof(std::string& detailOut);
+
+    /**
+     * M7 gate proof (docs/milestones.md): the readback chain with expected
+     * pixels. Self-contained and fork-safe by the same construction as
+     * RunSelfContainedProof (fresh instance -> device -> own drm context),
+     * extended with the full chain: IR Clear op (explicitly-labelled
+     * synthetic GpuOpList) -> PlanVulkanCommands (gpu/vulkan_backend.cpp,
+     * the host-locked planner) -> image clear -> submit -> fence ->
+     * vkCmdCopyImageToBuffer into a host-visible buffer -> CPU readback ->
+     * exact-pixel verification + SHA-256. A created device is NOT this
+     * proof's evidence; the matched pixel count is.
+     * @param detailOut Output parameter receiving proof detail
+     * @return true if every readback byte matched the planned clear, false otherwise
+     */
+    bool RunM7ClearReadbackProof(std::string& detailOut);
+
+    /**
+     * M8 T7 device half — the compute dispatch proof. Self-contained and
+     * fork-safe by the same construction as RunSelfContainedProof (fresh
+     * instance -> device with bufferDeviceAddress -> own queue), extended
+     * with the full recompiled-shader chain: the dispatch proof contract's
+     * RDNA programs -> GuestShaderRecompiler (RDNA -> SPIR-V) -> shader
+     * module + pipeline -> BDA buffers filled with the contract's input/
+     * output bytes -> push-constant user data (PS5 descriptor roots +
+     * selector) -> dispatch -> fence -> CPU readback -> VerifyOutput.
+     * All six contract cases must match byte-exact; the first differing
+     * thread is named in the detail line. A created pipeline is NOT the
+     * evidence — the matched threads are.
+     * @param detailOut Output parameter receiving proof detail
+     * @return true if every contract case matched, false otherwise
+     */
+    bool RunM8ComputeReadbackProof(std::string& detailOut);
+
+    // ---- M8 T5: guest shader objects (real Vulkan materialization) ------
+    // Creates (or serves from the bounded device cache) a VkShaderModule
+    // from recompiled SPIR-V words. Validation happens BEFORE the driver
+    // sees anything (magic/version/count); every failure is named in
+    // `err` and counted. Words come from GuestShaderRecompiler — this TU
+    // never recompiles anything.
+    bool CreateShaderModuleFromWords(const uint32_t* words, size_t wordCount,
+                                     VkShaderModule* outModule,
+                                     std::string& err);
+
+    // Builds the descriptor-set layouts + pipeline layout the reflection
+    // names, then the compute pipeline around the module. Layout objects
+    // are owned here and destroyed with the pipeline. `vulkanStageFlags`
+    // is the VkShaderStageFlagBits value the bindings and push-constant
+    // range are declared for (compute = 0x20 on the current path).
+    bool CreateComputePipelineFromReflection(
+        const std::vector<uint32_t>& spirvWords,
+        const PX5::Gpu::GuestShaderReflection& reflection,
+        uint32_t vulkanStageFlags, VkPipeline* outPipeline,
+        std::string& err);
+
+    // ---- M8 T6: guest graphics pipelines (real Vulkan materialization) --
+    // Validates the desc again at the boundary, merges the vertex+fragment
+    // reflections into one binding table, then builds set layouts + pipeline
+    // layout + render pass (GENERAL-layout LOAD/STORE attachments) + the
+    // VkGraphicsPipeline (dynamic viewport+scissor, per-target blend array,
+    // 1 sample, two stages, one push-constant block). Layouts and the render
+    // pass are owned here and destroyed with the pipeline. The desc and
+    // merge failures name their rule before the driver sees anything.
+    bool CreateGraphicsPipelineFromReflection(
+        const std::vector<uint32_t>& vertexSpirvWords,
+        const PX5::Gpu::GuestShaderReflection& vertexReflection,
+        const std::vector<uint32_t>& fragmentSpirvWords,
+        const PX5::Gpu::GuestShaderReflection& fragmentReflection,
+        const PX5::Gpu::GraphicsPipelineDesc& desc,
+        VkPipeline* outPipeline,
+        std::string& err);
+
+    // Honest object accounting for the diagnostics panel.
+    std::string GetShaderObjectStatsString() const;
 
     /**
      * Attaches ANativeWindow for on-screen rendering (SurfaceView lifecycle).
@@ -183,6 +265,21 @@ private:
         PFN_vkQueuePresentKHR             QueuePresent               = nullptr;
         PFN_vkWaitForFences               WaitForFences              = nullptr;
         PFN_vkResetFences                 ResetFences                = nullptr;
+        // M8 T5 — guest shader objects. All core 1.0 entry points.
+        PFN_vkCreateShaderModule          CreateShaderModule         = nullptr;
+        PFN_vkDestroyShaderModule         DestroyShaderModule        = nullptr;
+        PFN_vkCreateDescriptorSetLayout   CreateDescriptorSetLayout  = nullptr;
+        PFN_vkDestroyDescriptorSetLayout  DestroyDescriptorSetLayout = nullptr;
+        PFN_vkCreatePipelineLayout        CreatePipelineLayout       = nullptr;
+        PFN_vkDestroyPipelineLayout       DestroyPipelineLayout      = nullptr;
+        PFN_vkCreateComputePipelines      CreateComputePipelines     = nullptr;
+        PFN_vkDestroyPipeline             DestroyPipeline            = nullptr;
+        // M8 T6 — guest graphics pipelines. Core 1.0, hard-required like the
+        // compute set: a driver that cannot host recompiled graphics shaders
+        // is caught HERE, not at first draw.
+        PFN_vkCreateRenderPass            CreateRenderPass           = nullptr;
+        PFN_vkDestroyRenderPass           DestroyRenderPass          = nullptr;
+        PFN_vkCreateGraphicsPipelines     CreateGraphicsPipelines    = nullptr;
     };
 
     uint32_t FindGraphicsQueueFamily(VkPhysicalDevice dev);
@@ -203,6 +300,65 @@ private:
     void* m_vulkanLib = nullptr;
     void* m_instance  = nullptr;
     void* m_physDev   = nullptr;
+
+    // ---- M8 T5 guest shader object state (guarded by m_gpuMutex) --------
+    // Bounded drop-all caches (same policy as the recompiler service):
+    // key = FNV-1a over the exact inputs. Modules: words. Pipelines:
+    // words + bindings + stage flags. Owned layouts travel beside their
+    // pipeline key so DestroyShaderObjects can free everything exactly.
+    static constexpr size_t kMaxShaderModules = 128;
+    static constexpr size_t kMaxComputePipelines = 64;
+    static constexpr size_t kMaxGraphicsPipelines = 64;
+    std::unordered_map<uint64_t, VkShaderModule> m_moduleCache;
+    struct PipelineObjects {
+        VkPipeline               pipeline = VK_NULL_HANDLE;
+        std::vector<VkDescriptorSetLayout> setLayouts;
+        VkPipelineLayout         layout = VK_NULL_HANDLE;
+        // The VkShaderModule is NOT tracked here: the module cache owns all
+        // modules (sharing across pipelines), this entry owns the rest.
+    };
+    std::unordered_map<uint64_t, PipelineObjects> m_pipelineCache;
+    // M8 T6 — graphics pipelines own their render pass too (it is built per
+    // pipeline from the desc's attachment formats).
+    struct GraphicsPipelineObjects {
+        VkPipeline               pipeline = VK_NULL_HANDLE;
+        std::vector<VkDescriptorSetLayout> setLayouts;
+        VkPipelineLayout         layout = VK_NULL_HANDLE;
+        VkRenderPass             renderPass = VK_NULL_HANDLE;
+    };
+    std::unordered_map<uint64_t, GraphicsPipelineObjects> m_gfxPipelineCache;
+    struct ShaderObjectStats {
+        std::atomic<uint64_t> modulesCreated{0};
+        std::atomic<uint64_t> moduleHits{0};
+        std::atomic<uint64_t> moduleEvictions{0};
+        std::atomic<uint64_t> pipelinesCreated{0};
+        std::atomic<uint64_t> pipelineHits{0};
+        std::atomic<uint64_t> pipelineEvictions{0};
+        std::atomic<uint64_t> gfxCreated{0};
+        std::atomic<uint64_t> gfxHits{0};
+        std::atomic<uint64_t> gfxEvictions{0};
+        std::atomic<uint64_t> failures{0};
+    };
+    ShaderObjectStats m_shaderObjStats;
+    void DestroyShaderObjectsLocked();
+    // Caller must hold m_gpuMutex (public wrapper CreateShaderModuleFromWords
+    // locks; the pipeline path calls this directly — std::mutex is not
+    // recursive).
+    bool CreateShaderModuleLocked(const uint32_t* words, size_t wordCount,
+                                  VkShaderModule* outModule, std::string& err);
+    uint64_t HashWords(const uint32_t* words, size_t wordCount) const;
+    uint64_t HashReflection(const std::vector<uint32_t>& spirvWords,
+                            const PX5::Gpu::GuestShaderReflection& reflection,
+                            uint32_t vulkanStageFlags) const;
+    // M8 T6 — 'gpx1'-domain key (no collision with the compute reflection
+    // keys over identical inputs). Mixes both stages' words, the merged
+    // binding table, the push window, and every desc field the object
+    // depends on.
+    uint64_t HashGraphicsPipeline(
+        const std::vector<uint32_t>& vertexSpirvWords,
+        const std::vector<uint32_t>& fragmentSpirvWords,
+        const PX5::Gpu::MergedGraphicsReflection& merged,
+        const PX5::Gpu::GraphicsPipelineDesc& desc) const;
 
     // Rendering state (guarded by m_gpuMutex for structural changes)
     VkDevice     m_device        = VK_NULL_HANDLE;

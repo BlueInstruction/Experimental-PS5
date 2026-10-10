@@ -36,10 +36,14 @@ echo "[hosttests] running memory_range_test"
 "$OUT/memory_range_test"
 
 echo "[hosttests] building import_trap_test"
+# runtime_linker answers import routes only through the v1.47 seam, so the
+# loader test links the NID layer but not the kernel HLE floor (which the
+# nid_dispatch_test exercises directly).
 "$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
     -I"$SHIM" -I"$CPP" \
     -o "$OUT/import_trap_test" \
     "$ROOT/tools/hosttests/import_trap_test.cpp" \
+    "$CPP/loader/nid.cpp" \
     "$CPP/loader/elf_loader.cpp" \
     "$CPP/loader/self_extract.cpp" \
     "$CPP/loader/runtime_linker.cpp" \
@@ -54,6 +58,69 @@ echo "[hosttests] building import_trap_test"
 
 echo "[hosttests] running import_trap_test"
 "$OUT/import_trap_test" "$OUT/import_trap_ledger.log"
+
+echo "[hosttests] building nid_dispatch_test (M9 transparent import dispatch)"
+# The NID layer (AnyPS5 algorithm, golden vectors), the symbol registry and
+# the transparent DispatchImportCall bridge — the seam that lets a guest
+# PLT call reach the real HLE services with its call ABI intact.
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
+    -I"$SHIM" -I"$CPP" \
+    -o "$OUT/nid_dispatch_test" \
+    "$ROOT/tools/hosttests/nid_dispatch_test.cpp" \
+    "$CPP/loader/nid.cpp" \
+    "$CPP/loader/runtime_linker.cpp" \
+    "$CPP/kernel/sce_kernel_hle.cpp" \
+    "$CPP/kernel/syscalls.cpp" \
+    "$CPP/audio/audio_out_hle.cpp" \
+    "$CPP/input/pad_hle.cpp" \
+    "$CPP/input/controller.cpp" \
+    "$CPP/gpu/gnm/gnm_submit.cpp" \
+    "$CPP/gpu/videoout_hle.cpp" \
+    "$CPP/gpu/gnm/pm4_decoder.cpp" \
+    "$CPP/gpu/gnm/gnm_state.cpp" \
+    "$CPP/filesystem/vfs.cpp" \
+    "$CPP/memory/memory.cpp" \
+    "$CPP/utils/evidence.cpp" \
+    "$CPP/utils/logger.cpp" \
+    "$CPP/utils/diag_bridge.cpp" \
+    "$CPP/utils/breadcrumbs.cpp" \
+    "$CPP/utils/crash_handler.cpp" \
+    "$SHIM/fexcore_state_stub.cpp"
+
+echo "[hosttests] running nid_dispatch_test"
+"$OUT/nid_dispatch_test"
+
+echo "[hosttests] building videoout_hle_test (M10 T1 sceVideoOut HLE)"
+# ORBIS video-out semantics ported from AnyPS5 libSceVideoOut: open
+# validation order, the 1920x1080 open default, the RegisterBuffers2
+# chain, flip status accounting and the honesty boundary (flips retire,
+# no display engine claimed).
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
+    -I"$SHIM" -I"$CPP" \
+    -o "$OUT/videoout_hle_test" \
+    "$ROOT/tools/hosttests/videoout_hle_test.cpp" \
+    "$CPP/gpu/videoout_hle.cpp" \
+    "$CPP/kernel/sce_kernel_hle.cpp" \
+    "$CPP/kernel/syscalls.cpp" \
+    "$CPP/loader/nid.cpp" \
+    "$CPP/loader/runtime_linker.cpp" \
+    "$CPP/audio/audio_out_hle.cpp" \
+    "$CPP/input/pad_hle.cpp" \
+    "$CPP/input/controller.cpp" \
+    "$CPP/gpu/gnm/gnm_submit.cpp" \
+    "$CPP/gpu/gnm/pm4_decoder.cpp" \
+    "$CPP/gpu/gnm/gnm_state.cpp" \
+    "$CPP/filesystem/vfs.cpp" \
+    "$CPP/memory/memory.cpp" \
+    "$CPP/utils/evidence.cpp" \
+    "$CPP/utils/logger.cpp" \
+    "$CPP/utils/diag_bridge.cpp" \
+    "$CPP/utils/breadcrumbs.cpp" \
+    "$CPP/utils/crash_handler.cpp" \
+    "$SHIM/fexcore_state_stub.cpp"
+
+echo "[hosttests] running videoout_hle_test"
+"$OUT/videoout_hle_test"
 
 echo "[hosttests] building pm4_stream_test (M5 gate)"
 "$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
@@ -78,7 +145,182 @@ echo "[hosttests] building gpu_ir_test (M6 gate)"
 echo "[hosttests] running gpu_ir_test (M6 gate)"
 "$OUT/gpu_ir_test"
 
+echo "[hosttests] building vulkan_backend_test (M7 T1 gate)"
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
+    -I"$SHIM" -I"$CPP" \
+    -o "$OUT/vulkan_backend_test" \
+    "$ROOT/tools/hosttests/vulkan_backend_test.cpp" \
+    "$CPP/gpu/vulkan_backend.cpp" \
+    "$CPP/gpu/ir/gpu_ir.cpp" \
+    "$CPP/gpu/gnm/pm4_decoder.cpp" \
+    "$CPP/gpu/gnm/gnm_state.cpp"
+
+echo "[hosttests] running vulkan_backend_test (M7 T1 gate)"
+"$OUT/vulkan_backend_test"
+
 echo "[hosttests] running JNI symbol parity check"
 python3 "$ROOT/tools/check_jni_symbols.py"
+
+
+if [ ! -f "$ROOT/.deps/anyps5/.pin" ]; then
+    echo "[hosttests] materializing AnyPS5 recompiler pin"
+    "$ROOT/tools/fetch_shader_recompiler.sh"
+fi
+
+echo "[hosttests] building shader_recompiler_test (M8 T1)"
+REC="$ROOT/.deps/anyps5"
+PORTABLE="$ROOT/tools/hosttests/portable"
+SPIRVHDRS="$ROOT/tools/hosttests/spirv"
+# Vendored AnyPS5 recompiler: whole subtree except DummyShaders.cpp (glslang)
+# and SpirvOptimizer.cpp (SPIRV-Tools); port layer supplies both contracts.
+find "$REC/core/shader/recompiler" -name '*.cpp' ! -name 'DummyShaders.cpp' ! -name 'SpirvOptimizer.cpp' ! -name 'Deserialize.cpp' | sort > "$OUT/rec_sources.txt"
+# shellcheck disable=SC2046
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread -DANYPS5_ENABLE_SPIRV_TOOLS=0 \
+    -I"$SHIM" -I"$CPP" \
+    -I"$REC/core/libs" \
+    -I"$REC/core/shader/recompiler" \
+    -I"$REC/core/shader/recompiler/RdnaDecoder/include" \
+    -I"$REC/core/shader/recompiler/ControlFlow/include" \
+    -I"$REC/core/shader/recompiler/IntermediateRepresentation/include" \
+    -I"$REC/core/shader/recompiler/Translation/include" \
+    -I"$REC/core/shader/recompiler/Optimization/include" \
+    -I"$REC/core/shader/recompiler/SpirvBackend/include" \
+    -I"$SPIRVHDRS" \
+    -I"$PORTABLE" \
+    -o "$OUT/shader_recompiler_test" \
+    "$ROOT/tools/hosttests/shader_recompiler_test.cpp" \
+    "$PORTABLE/px5_spirv_optimizer.cpp" \
+    $(cat "$OUT/rec_sources.txt")
+
+echo "[hosttests] running shader_recompiler_test (M8 T1)"
+"$OUT/shader_recompiler_test"
+
+echo "[hosttests] building shader_recompiler_stages_test (M8 T2)"
+# Same vendored-subtree compile as T1, second entry point exercising the
+# graphics stages (vertex + fragment) through the real recompiler.
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread -DANYPS5_ENABLE_SPIRV_TOOLS=0 \
+    -I"$SHIM" -I"$CPP" \
+    -I"$REC/core/libs" \
+    -I"$REC/core/shader/recompiler" \
+    -I"$REC/core/shader/recompiler/RdnaDecoder/include" \
+    -I"$REC/core/shader/recompiler/ControlFlow/include" \
+    -I"$REC/core/shader/recompiler/IntermediateRepresentation/include" \
+    -I"$REC/core/shader/recompiler/Translation/include" \
+    -I"$REC/core/shader/recompiler/Optimization/include" \
+    -I"$REC/core/shader/recompiler/SpirvBackend/include" \
+    -I"$SPIRVHDRS" \
+    -I"$PORTABLE" \
+    -o "$OUT/shader_recompiler_stages_test" \
+    "$ROOT/tools/hosttests/shader_recompiler_stages_test.cpp" \
+    "$PORTABLE/px5_spirv_optimizer.cpp" \
+    $(cat "$OUT/rec_sources.txt")
+
+echo "[hosttests] running shader_recompiler_stages_test (M8 T2)"
+"$OUT/shader_recompiler_stages_test"
+
+echo "[hosttests] building guest_shader_recompiler_test (M8 T3)"
+# The app-side shader service (gpu/shader/shader_recompiler_service.cpp) is
+# the TU the arm64 APK compiles; this gate proves it end to end on the host.
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread -DANYPS5_ENABLE_SPIRV_TOOLS=0 \
+    -I"$CPP" \
+    -I"$REC/core/libs" \
+    -I"$REC/core/shader/recompiler" \
+    -I"$REC/core/shader/recompiler/RdnaDecoder/include" \
+    -I"$REC/core/shader/recompiler/ControlFlow/include" \
+    -I"$REC/core/shader/recompiler/IntermediateRepresentation/include" \
+    -I"$REC/core/shader/recompiler/Translation/include" \
+    -I"$REC/core/shader/recompiler/Optimization/include" \
+    -I"$REC/core/shader/recompiler/SpirvBackend/include" \
+    -I"$SPIRVHDRS" \
+    -I"$PORTABLE" \
+    -o "$OUT/guest_shader_recompiler_test" \
+    "$ROOT/tools/hosttests/guest_shader_recompiler_test.cpp" \
+    "$CPP/gpu/shader/shader_recompiler_service.cpp" \
+    "$PORTABLE/px5_spirv_optimizer.cpp" \
+    $(cat "$OUT/rec_sources.txt")
+
+echo "[hosttests] running guest_shader_recompiler_test (M8 T3)"
+"$OUT/guest_shader_recompiler_test"
+
+echo "[hosttests] building guest_shader_capture_test (M8 T4)"
+# M8 T4: real PM4 SET_SH streams decode into GnmState and the shader
+# capture layer turns the register state into SPIR-V via the T3 service.
+# Same TU set the arm64 APK compiles, plus the GNM decoder/state sources.
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread -DANYPS5_ENABLE_SPIRV_TOOLS=0 \
+    -I"$CPP" \
+    -I"$REC/core/libs" \
+    -I"$REC/core/shader/recompiler" \
+    -I"$REC/core/shader/recompiler/RdnaDecoder/include" \
+    -I"$REC/core/shader/recompiler/ControlFlow/include" \
+    -I"$REC/core/shader/recompiler/IntermediateRepresentation/include" \
+    -I"$REC/core/shader/recompiler/Translation/include" \
+    -I"$REC/core/shader/recompiler/Optimization/include" \
+    -I"$REC/core/shader/recompiler/SpirvBackend/include" \
+    -I"$SPIRVHDRS" \
+    -I"$PORTABLE" \
+    -o "$OUT/guest_shader_capture_test" \
+    "$ROOT/tools/hosttests/guest_shader_capture_test.cpp" \
+    "$CPP/gpu/shader/shader_capture.cpp" \
+    "$CPP/gpu/shader/shader_recompiler_service.cpp" \
+    "$CPP/gpu/gnm/pm4_decoder.cpp" \
+    "$CPP/gpu/gnm/gnm_state.cpp" \
+    "$PORTABLE/px5_spirv_optimizer.cpp" \
+    $(cat "$OUT/rec_sources.txt")
+
+echo "[hosttests] running guest_shader_capture_test (M8 T4)"
+"$OUT/guest_shader_capture_test"
+
+echo "[hosttests] building graphics_pipeline_desc_test (M8 T6)"
+# Vulkan-free desc/validator/merge — pure data + pure functions, no recompiler.
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
+    -I"$CPP" \
+    -o "$OUT/graphics_pipeline_desc_test" \
+    "$ROOT/tools/hosttests/graphics_pipeline_desc_test.cpp" \
+    "$CPP/gpu/shader/graphics_pipeline_desc.cpp"
+
+echo "[hosttests] running graphics_pipeline_desc_test (M8 T6)"
+"$OUT/graphics_pipeline_desc_test"
+
+echo "[hosttests] building dispatch_proof_contract_test (M8 T7 contract)"
+# The dispatch proof's expected bytes locked as data — the on-device proof's
+# fixed target, verified here before any device session spends time on it.
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
+    -I"$CPP" \
+    -o "$OUT/dispatch_proof_contract_test" \
+    "$ROOT/tools/hosttests/dispatch_proof_contract_test.cpp" \
+    "$CPP/gpu/shader/dispatch_proof_contract.cpp"
+
+echo "[hosttests] running dispatch_proof_contract_test (M8 T7 contract)"
+"$OUT/dispatch_proof_contract_test"
+
+echo "[hosttests] building audio_out_hle_test (sceAudioOut HLE)"
+# ORBIS audio-out semantics: port table, format decode, volume/Std-mix math,
+# virtual-clock pacing — locked before the AAudio backend ever lands.
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
+    -I"$SHIM" -I"$CPP" \
+    -o "$OUT/audio_out_hle_test" \
+    "$ROOT/tools/hosttests/audio_out_hle_test.cpp" \
+    "$CPP/audio/audio_out_hle.cpp" \
+    "$CPP/utils/logger.cpp" \
+    "$CPP/utils/diag_bridge.cpp"
+
+echo "[hosttests] running audio_out_hle_test (sceAudioOut HLE)"
+"$OUT/audio_out_hle_test"
+
+echo "[hosttests] building pad_hle_test (scePad HLE)"
+# ORBIS pad semantics: PadData layout (the guest ABI), button-bit mapping,
+# stick/trigger byte conversion, read/handle rules — locked against the
+# InputManager bridge.
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
+    -I"$SHIM" -I"$CPP" \
+    -o "$OUT/pad_hle_test" \
+    "$ROOT/tools/hosttests/pad_hle_test.cpp" \
+    "$CPP/input/pad_hle.cpp" \
+    "$CPP/input/controller.cpp" \
+    "$CPP/utils/logger.cpp" \
+    "$CPP/utils/diag_bridge.cpp"
+
+echo "[hosttests] running pad_hle_test (scePad HLE)"
+"$OUT/pad_hle_test"
 
 echo "[hosttests] all host tests passed"

@@ -64,6 +64,10 @@ This repository contains only original glue code and open-source engines.
 It must not be used to distribute Sony firmware, proprietary keys, or
 commercial game assets.
 
+License: **GPL-2.0-only** (see [LICENSE](LICENSE)) — chosen to match the
+PS5 ecosystem (AnyPS5, shadPS4 are GPL-2.0-only), so code can flow freely
+between these projects; just keep copyright headers and credit sources.
+
 ## Credits
 
 Thanks to the projects this work builds on and learns from:

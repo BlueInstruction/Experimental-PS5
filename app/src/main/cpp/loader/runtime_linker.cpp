@@ -4,8 +4,10 @@
 
 #include "runtime_linker.h"
 
+#include "../memory/memory.h"
 #include "../utils/evidence.h"
 #include "../utils/logger.h"
+#include "nid.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -358,6 +360,151 @@ uint64_t RuntimeLinker::DispatchImportTrap(uint64_t importIndex) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Transparent import dispatch (v1.47) — see runtime_linker.h for the
+// contract. The stub preserved the caller's registers; this half routes
+// the call by name (or NID string) into the HLE surface.
+// ---------------------------------------------------------------------------
+
+bool ImportCall::ReadStackArg(size_t k, uint64_t* out) const {
+    if (!out) return false;
+#ifdef PX5_UI_SMOKE_STUB
+    // The UI-smoke ABI ships no MemoryManager backend (see CMakeLists):
+    // there is no window to translate through. A named refusal, not a
+    // fake answer — the same policy the M8 proof uses on this ABI.
+    (void)k;
+    return false;
+#else
+    // [rsp] holds the return address at stub entry, so arg7 (k=0) sits at
+    // rsp+8 and each further argument is one 8-byte slot higher. The stub
+    // pushes nothing, so guestRsp is still the call-site rsp.
+    const uint64_t va = guestRsp + 8u + k * 8u;
+    auto& mm = MemoryManager::GetInstance();
+    if (!mm.IsValidAddress(va, sizeof(uint64_t))) return false;
+    const void* host = mm.GetHostPointer(va);
+    if (!host) return false;
+    uint64_t v;
+    memcpy(&v, host, sizeof v);   // guest memory is directly addressable
+    *out = v;                     // but may be unaligned relative to T*
+    return true;
+#endif
+}
+
+namespace {
+
+// Route resolution, run once per import under RuntimeLinker::m_mutex.
+// The HLE surface answers through the route seam installed at its
+// registration; readable names hit it directly, 11-char base64S NID
+// strings (the shape real PS5 images use) resolve through the NidRegistry
+// first. A missing seam (builds without a kernel layer) never fakes an
+// answer — the import stays on the named ledger.
+ImportTrapEntry::Route ResolveImportRoute(
+        const RuntimeLinker::ImportRoute& route,
+        const ImportTrapEntry& e, std::string* symbolOut) {
+    symbolOut->clear();
+    if (!route.resolve || e.name.empty()) {
+        return ImportTrapEntry::Route::Unavailable;
+    }
+    if (route.resolve(e.name, symbolOut)) {
+        return ImportTrapEntry::Route::KernelHle;
+    }
+    const std::string viaNid = Nid::NidRegistry::Instance().Resolve(e.name);
+    if (!viaNid.empty() && route.resolve(viaNid, symbolOut)) {
+        return ImportTrapEntry::Route::KernelHle;
+    }
+    return ImportTrapEntry::Route::Unavailable;
+}
+
+} // namespace
+
+uint64_t RuntimeLinker::DispatchImportCall(uint64_t importIndex,
+                                           const ImportCall& call) {
+    std::string name;
+    std::string symbol;
+    ImportTrapEntry::Route route = ImportTrapEntry::Route::Unresolved;
+    bool firstHit = false;
+    bool ledger = false;
+    uint64_t distinctSnapshot = 0;
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        if (importIndex >= m_importTraps.size()) {
+            // Same discipline as the legacy trap: never trust the index.
+            ++m_trapOob;
+            if (m_trapOob <= kMaxTrapOobLogs) {
+                PX5_LOGW(LogCategory::LOADER,
+                         "IMPORT-CALL: index %llu out of range (stubs=%zu) "
+                         "— stale/corrupt guest stub call refused",
+                         (unsigned long long)importIndex,
+                         m_importTraps.size());
+            }
+            return 0;
+        }
+        auto& e = m_importTraps[importIndex];
+        uint32_t& hits = m_trapHits[importIndex];
+        if (hits == 0) {
+            firstHit = true;
+            ++m_trapDistinct;
+            if (m_trapLedgered < kMaxTrapLedger) {
+                ++m_trapLedgered;
+                ledger = true;
+            }
+        }
+        ++hits;
+        ++m_trapTotalHits;
+
+        // Resolve once, cache forever (per module load) — but only when a
+        // decision was actually MADE: with no seam installed yet (the HLE
+        // surface has not registered), the entry stays Unresolved so a
+        // later call re-resolves instead of freezing a non-answer.
+        if (e.route == ImportTrapEntry::Route::Unresolved &&
+            m_importRoute.resolve) {
+            e.route = ResolveImportRoute(m_importRoute, e,
+                                         &e.resolvedSymbol);
+        }
+        route = e.route;
+        symbol = e.resolvedSymbol;
+        name = SanitizeImportName(e.name);
+        distinctSnapshot = m_trapDistinct;
+    }
+
+    if (firstHit) {
+        PX5_LOGW(LogCategory::LOADER,
+                 "IMPORT-CALL hit idx=%llu name='%s' route=%s sym='%s' "
+                 "(hit #%llu distinct)",
+                 (unsigned long long)importIndex, name.c_str(),
+                 route == ImportTrapEntry::Route::KernelHle ? "hle" : "miss",
+                 symbol.c_str(), (unsigned long long)distinctSnapshot);
+        if (ledger) {
+            Evidence::AppendLedger(
+                "import call idx=%llu name='%s' route=%s",
+                (unsigned long long)importIndex, name.c_str(),
+                route == ImportTrapEntry::Route::KernelHle ? "hle" : "miss");
+        }
+    }
+
+    if (route != ImportTrapEntry::Route::KernelHle) {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        ++m_importUnresolved;
+        return 0;
+    }
+
+    // Outside m_mutex: the HLE implementation may block (audio pacing,
+    // pad polling) and no linker state below depends on it.
+    const uint64_t result = m_importRoute.invoke
+        ? m_importRoute.invoke(symbol, call)
+        : 0;
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        ++m_importHleCalls;
+    }
+    return result;
+}
+
+void RuntimeLinker::SetImportRoute(ImportRoute route) {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    m_importRoute = std::move(route);
+}
+
 std::string RuntimeLinker::GetImportTrapSummary() {
     std::lock_guard<std::mutex> lk(m_mutex);
     if (m_importTraps.empty()) return "import traps: none installed";
@@ -381,7 +528,9 @@ std::string RuntimeLinker::GetImportTrapSummary() {
                            return std::string(b); }() +
                       "] hits=" + std::to_string(m_trapTotalHits) +
                       " (distinct=" + std::to_string(m_trapDistinct) +
-                      ")";
+                      ")" +
+                      " hle-calls=" + std::to_string(m_importHleCalls) +
+                      " unresolved=" + std::to_string(m_importUnresolved);
     if (show == 0) return out;
     out += " top:";
     char one[128];

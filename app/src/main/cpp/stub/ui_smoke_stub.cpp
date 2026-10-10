@@ -231,6 +231,12 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGpuProof(
     return env->NewStringUTF("FAIL | GPU proof requires the arm64-v8a "
                              "engine ABI (ui-smoke stub)");
 }
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeRunM8DispatchProof(
+        JNIEnv* env, jobject) {
+    return env->NewStringUTF("FAIL | M8 dispatch proof requires the "
+                             "arm64-v8a engine ABI (ui-smoke stub)");
+}
 // The GNM decoder self-test is pure C++ with no engine dependency, so the
 // smoke ABI runs the REAL test (no stub-fake needed).
 extern "C" JNIEXPORT jstring JNICALL

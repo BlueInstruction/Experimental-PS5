@@ -68,10 +68,39 @@
 
 namespace PX5 {
 
-// Reserved guest syscall numbers for the NID gate and the import trap
-// (see header comment; both deliberately outside every real x86-64 range).
+// Reserved guest syscall numbers for the NID gate, the import trap and the
+// transparent import-call range (see header comment; all deliberately
+// outside every real x86-64 range).
 constexpr uint32_t kPx5NidGateSyscall   = 0x5C500001u;
 constexpr uint32_t kPx5ImportTrapSyscall = 0x5C500002u;
+
+// v1.47 — transparent import dispatch. The guest stub carries its own
+// import index IN THE SYSCALL NUMBER (eax = base + index), so the syscall
+// argument registers stay the caller's untouched SysV arguments (the stub
+// only shuffles rcx -> r10, see elf_loader.cpp). One range check routes
+// every import call; 64 KiB slots bound the registry against a corrupt nr.
+constexpr uint32_t kPx5ImportCallBase   = 0x5C510000u;
+constexpr uint32_t kPx5ImportCallSlots  = 0x00010000u;
+constexpr uint32_t kPx5ImportCallEnd    = kPx5ImportCallBase + kPx5ImportCallSlots;
+
+/**
+ * A transparent import call as it arrives from the guest stub (v1.47).
+ * The six SysV register arguments come through the syscall-argument path
+ * after the stub's rcx->r10 shuffle; the guest stack pointer stands at
+ * stub entry ([rsp] = return address, so a 7th argument lives at rsp+8).
+ */
+struct ImportCall {
+    static constexpr size_t kRegArgCount = 6;
+    uint64_t args[kRegArgCount] = {};  ///< a1..a6 = rdi,rsi,rdx,rcx,r8,r9
+    uint64_t guestRsp = 0;             ///< guest rsp at stub entry
+
+    /**
+     * Reads the k-th stack argument (0-based: arg7 is k=0) from the guest
+     * stack through the memory window. False when the window cannot
+     * translate the address — callers must refuse, not guess.
+     */
+    bool ReadStackArg(size_t k, uint64_t* out) const;
+};
 
 /**
  * Bionic-native HLE export function type.
@@ -116,6 +145,14 @@ struct ImportTrapEntry {
     uint32_t    symIndex = 0;    ///< dynsym index of the UNDEF symbol
     bool        slotWritten = false;  ///< false = slot could not be written
                                      ///< (old content stays, stub never runs)
+
+    /// v1.47 — dispatch route, resolved once on the first import call.
+    /// Unresolved = no HLE decision made yet; KernelHle = routed to the
+    /// HLE symbol table (resolvedSymbol names it); Unavailable = this
+    /// import is named but PX5 implements nothing behind it (ledger path).
+    enum class Route : uint8_t { Unresolved = 0, KernelHle, Unavailable };
+    Route       route = Route::Unresolved;
+    std::string resolvedSymbol;  ///< HLE symbol when route == KernelHle
 };
 
 /**
@@ -241,7 +278,44 @@ public:
     uint64_t DispatchImportTrap(uint64_t importIndex);
 
     /**
-     * Returns the import-trap ledger summary (counts + hottest imports).
+     * Handles one transparent import call (v1.47): resolves the trap
+     * entry's dynstr name to the HLE surface — readable names hit the
+     * symbol table directly, 11-char NID strings resolve through the
+     * NidRegistry — and invokes it with the caller's untouched arguments.
+     * Resolution happens once per import and is cached in the entry;
+     * imports PX5 does not implement keep the v1.45 ledger behavior
+     * (named, counted, RAX=0).
+     *
+     * @param importIndex Trap index (nr - kPx5ImportCallBase)
+     * @param call Preserved guest call arguments (see ImportCall)
+     * @return Guest-visible RAX (HLE result, or 0 on the ledger path)
+     */
+    uint64_t DispatchImportCall(uint64_t importIndex, const ImportCall& call);
+
+    /**
+     * Installs the import-route seam (v1.47): the two directions a
+     * transparent dispatch needs from the HLE surface. The kernel layer
+     * registers both at registration time; builds without a kernel layer
+     * (the UI-smoke stub) register nothing, and every import then stays
+     * on the named ledger instead of pretending to resolve. Both sides
+     * are invoked while the linker mutex is held (route) or without it
+     * (invoke, HLE may block) and must not re-enter the linker.
+     */
+    struct ImportRoute {
+        /// name -> implemented symbol (false = not implemented)
+        std::function<bool(const std::string& name, std::string* symbolOut)>
+            resolve;
+        /// Runs the HLE implementation of a resolved symbol with the
+        /// caller's preserved arguments; returns guest RAX.
+        std::function<uint64_t(const std::string& symbol,
+                               const ImportCall& call)>
+            invoke;
+    };
+    void SetImportRoute(ImportRoute route);
+
+    /**
+     * Returns the import-trap ledger summary (counts + hottest imports +
+     * transparent-dispatch counters).
      * @return Formatted summary string
      */
     std::string GetImportTrapSummary();
@@ -291,6 +365,17 @@ private:
     uint64_t m_trapDistinct   = 0;   ///< distinct imports hit at least once
     uint64_t m_trapLedgered   = 0;   ///< distinct misses written to the ledger
     uint64_t m_trapOob        = 0;   ///< out-of-range indices (corrupt guest)
+
+    // v1.47 — transparent import dispatch counters (outcomes of
+    // DispatchImportCall; the hit accounting above is shared with the
+    // legacy trap path).
+    uint64_t m_importHleCalls   = 0; ///< dispatched into the HLE surface
+    uint64_t m_importUnresolved = 0; ///< named-but-unimplemented (RAX=0)
+
+    // v1.47 — the import-route seam (see SetImportRoute). Read under
+    // m_mutex; installed once by the HLE surface's registration, never
+    // re-installed after the guest starts running.
+    ImportRoute m_importRoute;
 };
 
 // ---------------------------------------------------------------------------

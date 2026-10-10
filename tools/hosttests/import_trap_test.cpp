@@ -180,13 +180,15 @@ int main(int argc, char** argv) {
     chk(SlotValue(base + 0x2018) == stubBase + 16,
         "strong JUMP_SLOT -> trap stub #1");
 
-    printf("\nStub bytes (mov eax,nr; mov edi,idx; syscall; ret):\n");
-    const uint8_t want0[16] = {0xB8, 0x02, 0x00, 0x50, 0x5C,
-                               0xBF, 0x00, 0x00, 0x00, 0x00,
-                               0x0F, 0x05, 0xC3, 0x90, 0x90, 0x90};
-    const uint8_t want1[16] = {0xB8, 0x02, 0x00, 0x50, 0x5C,
-                               0xBF, 0x01, 0x00, 0x00, 0x00,
-                               0x0F, 0x05, 0xC3, 0x90, 0x90, 0x90};
+    printf("\nStub bytes (v1.47: mov r10,rcx; mov eax,base+idx; syscall; ret):\n");
+    // The arg-preserving stub: a4 rides rcx->r10, the index rides in the
+    // syscall number (0x5C510000 + index), no argument register is touched.
+    const uint8_t want0[16] = {0x4C, 0x8B, 0xD1,
+                               0xB8, 0x00, 0x00, 0x51, 0x5C,
+                               0x0F, 0x05, 0xC3, 0x90, 0x90, 0x90, 0x90, 0x90};
+    const uint8_t want1[16] = {0x4C, 0x8B, 0xD1,
+                               0xB8, 0x01, 0x00, 0x51, 0x5C,
+                               0x0F, 0x05, 0xC3, 0x90, 0x90, 0x90, 0x90, 0x90};
     uint8_t got[16] = {};
     chk(mm.ReadGuestMemory(stubBase, got, 16) &&
         memcmp(got, want0, 16) == 0, "stub #0 bytes + index 0");

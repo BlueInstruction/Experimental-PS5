@@ -77,8 +77,9 @@ verification.
 | JNI symbol-name parity | source-level name check, 45 symbols × 2 ABIs (`tools/check_jni_symbols.py`) | T1 | exists, PASS — names only; signatures and built-library exports are NOT checked here |
 | PM4 stream decode | `pm4_stream_test.cpp` | T1 | exists, PASS (12/12 packets, 0 stream errors) |
 | GPU IR lowering | `gpu_ir_test.cpp` | T1 | exists, PASS (5/5 ops, 0 unexpected drops) |
+| Vulkan backend planner | `vulkan_backend_test.cpp` | T1 | exists, PASS (M7-T1: mapping + UNORM byte rule + readback checker, 0 failures) |
 | CPU fixtures (9) | `docs/cpu.md` table | T1+T2 | M1 deliverable — BLOCKED on device (see cpu.md) |
-| Vulkan readback | self-contained proof → readback | T2→T3 | proof exists; readback = M7 deliverable |
+| Vulkan readback | `RunM7ClearReadbackProof` (foundation suite step 8b) | T2→T3 | wired — device gate run pending (M7 gate) |
 | Shader compile | reference pattern compare | T3 | M8 deliverable |
 
 ## Rules

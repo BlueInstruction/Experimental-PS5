@@ -49,8 +49,8 @@ android {
         applicationId = "com.px5.emulator"
         minSdk = 28
         targetSdk = 35
-        versionCode = 53
-        versionName = "1.52"
+        versionCode = 60
+        versionName = "1.59"
 
         buildConfigField("String", "GIT_SHA", "\"${gitSha()}\"")
         buildConfigField("String", "FEXCORE_PIN", "\"${fexCorePin()}\"")
@@ -89,6 +89,13 @@ android {
                 val adrenoRoot = System.getenv("PX5_ADRENOTOOLS_ROOT")
                     ?: File(rootProject.projectDir, ".deps/adrenotools").absolutePath
                 arguments += "-DPX5_ADRENOTOOLS_ROOT=$adrenoRoot"
+
+                // Vendored AnyPS5 RDNA recompiler (M8) — same fetch-pin
+                // discipline; build.yml materializes .deps/anyps5 before
+                // gradle runs.
+                val shaderRoot = System.getenv("PX5_SHADER_RECOMPILER_ROOT")
+                    ?: File(rootProject.projectDir, ".deps/anyps5").absolutePath
+                arguments += "-DPX5_SHADER_RECOMPILER_ROOT=$shaderRoot"
             }
         }
     }

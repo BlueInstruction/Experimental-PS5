@@ -82,12 +82,15 @@ public:
      * @param a3 Fourth argument (r10)
      * @param a4 Fifth argument (r8)
      * @param a5 Sixth argument (r9)
+     * @param guestRsp Guest rsp at the syscall (stack arguments of the
+     *        transparent import-call range read relative to it; 0 = unknown)
      * @return Syscall return value (guest RAX)
      */
     static uint64_t Dispatch(uint32_t nr,
                              uint64_t a0 = 0, uint64_t a1 = 0,
                              uint64_t a2 = 0, uint64_t a3 = 0,
-                             uint64_t a4 = 0, uint64_t a5 = 0);
+                             uint64_t a4 = 0, uint64_t a5 = 0,
+                             uint64_t guestRsp = 0);
 
     /**
      * Records guest RIP checkpoint (forwarder for FEXCore handler).

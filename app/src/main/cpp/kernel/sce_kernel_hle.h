@@ -2,8 +2,11 @@
 #define PX5_SCE_KERNEL_HLE_H
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
+
+#include "../loader/runtime_linker.h"   // ImportCall (the import seam)
 
 namespace PX5::SceKernelHle {
 
@@ -46,9 +49,18 @@ public:
     static KernelHle& GetInstance();
 
     /**
-     * Registers the full symbol table (idempotent).
+     * Registers the full symbol table (idempotent, thread-safe). Every
+     * symbol is also seeded into the NID registry so guest NID-string
+     * imports resolve to the same table.
      */
     void RegisterAll();
+
+    /**
+     * True when InvokeByName(symbol) would route (registration included).
+     * The gate for transparent import dispatch: an import that fails here
+     * stays on the named ledger instead of consuming an HLE call.
+     */
+    bool HasSymbol(const std::string& symbol);
 
     /**
      * Returns the complete symbol table.
@@ -78,6 +90,17 @@ public:
                           uint64_t a0 = 0, uint64_t a1 = 0,
                           uint64_t a2 = 0, uint64_t a3 = 0,
                           uint64_t a4 = 0, uint64_t a5 = 0);
+
+    /**
+     * Dispatches one transparent import call (v1.48): the same dispatchers
+     * as InvokeByName, with the caller's preserved register arguments plus
+     * stack-argument access for the functions whose ORBIS arity exceeds
+     * six (e.g. sceVideoOutRegisterBuffers2). stack args are read through
+     * the memory window from the call-site rsp; an unreadable stack arg
+     * is a named refusal, never a guessed zero.
+     */
+    uint64_t InvokeByImport(const std::string& symbol,
+                            const ImportCall& call);
 
     /**
      * Returns human-readable summary of HLE state.
@@ -191,6 +214,7 @@ private:
     KernelHle() = default;
 
     std::vector<SymbolEntry> m_table;
+    std::mutex m_registerMutex;   ///< serializes the lazy RegisterAll seed
     bool m_registered = false;
 
     // Direct-memory bump allocator state (window-internal "physical" space).

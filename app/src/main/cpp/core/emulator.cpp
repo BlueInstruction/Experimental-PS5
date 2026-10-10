@@ -16,9 +16,12 @@
 #include "utils/crash_handler.h"
 #include "utils/evidence.h"
 
-#include <unistd.h>
 #include <cstdio>
 #include <cstring>
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <fstream>
 #include <algorithm>
 
@@ -47,6 +50,66 @@ std::string ResolveFixturePath(const std::string& baseDir,
         return logs + "/" + fileName;
     }
     return {};
+}
+
+// v1.59 — the v1.58 device session (Vivo Y51, 2026-10-10) died at step 5
+// with only "ELF fixture write failed": std::ofstream folds open/write/
+// fsync into one opaque good() bit, sets no errno anyone reads, and never
+// creates parent directories (m_baseDir = <logs>/vfs exists as a string
+// mapping, the directory itself never did). Both ends fixed here:
+bool EnsureParentDirs(const std::string& filePath, std::string& err) {
+    size_t pos = 0;
+    while ((pos = filePath.find('/', pos + 1)) != std::string::npos) {
+        const std::string dir = filePath.substr(0, pos);
+        if (dir.empty()) continue;  // leading '/'
+        if (mkdir(dir.c_str(), 0755) == 0 || errno == EEXIST) continue;
+        err = "mkdir(" + dir + "): errno=" + std::to_string(errno) +
+              " (" + strerror(errno) + ")";
+        return false;
+    }
+    return true;
+}
+
+// POSIX write with a NAMED failing stage + errno — the diagnostic contract
+// the v1.58 session asked for. Every failure returns which syscall, the
+// errno value and its string; success means the bytes are durable.
+bool WriteFixtureFile(const std::string& path,
+                      const void* data, size_t size, std::string& err) {
+    if (!EnsureParentDirs(path, err)) return false;
+    const int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        err = "open: errno=" + std::to_string(errno) +
+              " (" + strerror(errno) + ")";
+        return false;
+    }
+    const char* p = static_cast<const char*>(data);
+    size_t left = size;
+    while (left > 0) {
+        const ssize_t w = write(fd, p, left);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            err = "write: errno=" + std::to_string(errno) +
+                  " (" + strerror(errno) + ") after " +
+                  std::to_string(size - left) + "/" +
+                  std::to_string(size) + "B";
+            close(fd);
+            return false;
+        }
+        p += w;
+        left -= static_cast<size_t>(w);
+    }
+    if (fsync(fd) != 0) {
+        err = "fsync: errno=" + std::to_string(errno) +
+              " (" + strerror(errno) + ")";
+        close(fd);
+        return false;
+    }
+    if (close(fd) != 0) {
+        err = "close: errno=" + std::to_string(errno) +
+              " (" + strerror(errno) + ")";
+        return false;
+    }
+    return true;
 }
 
 }  // namespace
@@ -107,6 +170,11 @@ bool Emulator::LoadExecutable(const std::string& path, bool isSelf) {
         return false;
     }
     Breadcrumb::Set("load: memmgr ready");
+    // The transparent import dispatch needs the HLE floor registered (its
+    // route seam installs inside RegisterAll) BEFORE any guest stub can
+    // fire. Idempotent; also runs in the boot self-check, this is the
+    // order-independent guarantee.
+    SceKernelHle::KernelHle::GetInstance().RegisterAll();
     if (m_baseDir.empty()) {
         // /data/local/tmp is not writable by app processes, so it is not a
         // fallback -- it is just a slower failure. Anchor the VFS under the
@@ -505,13 +573,11 @@ std::string Emulator::SelfTestFoundation() {
             goto done;
         }
 
-        std::ofstream f(elfPath, std::ios::binary | std::ios::trunc);
-        f.write(reinterpret_cast<const char*>(TEST_GUEST_ELF),
-                TEST_GUEST_ELF_SIZE);
-        const bool wroteFixture = f.good();
-        f.close();
-        if (!wroteFixture) {
-            lines.push_back("[FAIL] 5. ELF fixture write failed (" + elfPath + ")");
+        std::string ferr;
+        if (!WriteFixtureFile(elfPath, TEST_GUEST_ELF, TEST_GUEST_ELF_SIZE,
+                              ferr)) {
+            lines.push_back("[FAIL] 5. ELF fixture write failed (" + elfPath +
+                            ") stage=" + ferr);
             goto done;
         }
 
@@ -582,14 +648,11 @@ std::string Emulator::SelfTestFoundation() {
             goto done;
         }
 
-        std::ofstream f(selfPath, std::ios::binary | std::ios::trunc);
-        f.write(reinterpret_cast<const char*>(built.bytes.data()),
-                static_cast<std::streamsize>(built.bytes.size()));
-        const bool wroteFixture = f.good();
-        f.close();
-        if (!wroteFixture) {
+        std::string ferr5b;
+        if (!WriteFixtureFile(selfPath, built.bytes.data(),
+                              built.bytes.size(), ferr5b)) {
             lines.push_back("[FAIL] 5b. SELF fixture write failed (" +
-                            selfPath + ")");
+                            selfPath + ") stage=" + ferr5b);
             goto done;
         }
 
@@ -643,11 +706,13 @@ std::string Emulator::SelfTestFoundation() {
             goto done;
         }
 
-        std::ofstream f(elfPath, std::ios::binary | std::ios::trunc);
-        f.write(reinterpret_cast<const char*>(TEST_GUEST_ELF_V2),
-                TEST_GUEST_ELF_V2_SIZE);
-        f.close();
-        if (!f.good()) { lines.push_back("[FAIL] 6. ELFv2 fixture write"); goto done; }
+        std::string ferr6;
+        if (!WriteFixtureFile(elfPath, TEST_GUEST_ELF_V2,
+                              TEST_GUEST_ELF_V2_SIZE, ferr6)) {
+            lines.push_back("[FAIL] 6. ELFv2 fixture write (" + elfPath +
+                            ") stage=" + ferr6);
+            goto done;
+        }
 
         LoadedElfImage img;
         if (!ElfLoader::LoadElfFile(elfPath, img)) {
@@ -741,6 +806,26 @@ std::string Emulator::SelfTestFoundation() {
                                         : "[FAIL] 8. GPU submission | ") +
                         gpuDetail);
         if (!gok) goto done;   // honest: real device must submit commands
+    }
+
+    // --- Step 8b: M7 backend gate — IR Clear -> Vulkan -> pixel readback --
+    // The M7 milestone gate (docs/milestones.md): instance -> device ->
+    // queue -> image -> clear -> submit -> fence -> READBACK with expected
+    // pixels. The clear arrives as a GpuOp (the M6 IR type) planned by
+    // gpu/vulkan_backend.cpp — the backend never sees GNM/PM4 types. The
+    // IR list is a synthetic one-Clear list (the decoder's Clear semantics
+    // are still M5-PARTIAL), so this proves the BACKEND chain, not the
+    // decoder — the proof's own detail line says so. Matched pixel count
+    // is the evidence; a created device is not.
+    {
+        std::string m7Detail;
+        const bool m7ok = VulkanGpuDevice::GetInstance()
+                              .RunM7ClearReadbackProof(m7Detail);
+        lines.push_back(
+            std::string(m7ok ? "[PASS] 8b. GPU IR clear readback | "
+                             : "[FAIL] 8b. GPU IR clear readback | ") +
+            m7Detail);
+        if (!m7ok) goto done;   // honest: the readback gate IS M7
     }
 
     // --- Step 9: libkernel HLE DirectMemory exercise ---------------------

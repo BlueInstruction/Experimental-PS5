@@ -1,6 +1,11 @@
 #include "sce_kernel_hle.h"
 
+#include "../audio/audio_out_hle.h"
 #include "../gpu/gnm/gnm_submit.h"
+#include "../gpu/videoout_hle.h"
+#include "../input/pad_hle.h"
+#include "../loader/nid.h"
+#include "../loader/runtime_linker.h"
 #include "../memory/memory.h"
 #include "../filesystem/vfs.h"
 #include "syscalls.h"          // GuestSyscalls::AppendOutput (evidence channel)
@@ -52,6 +57,7 @@ KernelHle& KernelHle::GetInstance() {
 }
 
 void KernelHle::RegisterAll() {
+    std::lock_guard<std::mutex> lk(m_registerMutex);
     if (m_registered) return;
     m_table.clear();
 
@@ -76,10 +82,84 @@ void KernelHle::RegisterAll() {
     // -> Pm4Decoder -> GnmState; evidence counters + stats are live.
     add("sceGnmSubmitCommandBuffers");
 
+    // M8-era ORBIS library surfaces (ported from AnyPS5, GPL-2.0): the
+    // audio-out and pad services games call constantly. The services own
+    // their full ABI; these entries expose the invoked surface to the same
+    // table + counters every other symbol uses.
+    add("sceAudioOutInit");
+    add("sceAudioOutOpen");
+    add("sceAudioOutClose");
+    add("sceAudioOutOutput");
+    add("sceAudioOutOutputs");
+    add("sceAudioOutSetVolume");
+    add("sceAudioOutGetLastOutputTime");
+    add("sceAudioOutGetPortState");
+    add("sceAudioOutSetMixLevelPadSpk");
+    add("scePadInit");
+    add("scePadOpen");
+    add("scePadClose");
+    add("scePadRead");
+    add("scePadReadState");
+    add("scePadGetControllerInformation");
+    add("scePadGetInfo");
+    add("scePadSetVibration");
+    add("scePadSetLightBar");
+
+    // M10 T1 — the video-out surface (ported from AnyPS5 libSceVideoOut,
+    // GPL-2.0): display open/close, swap-chain buffer registration, flip
+    // submission and the status queries games allocate against. The
+    // presentation bridge to the app surface is a later milestone; the
+    // service's validation chain and status accounting are already real.
+    add("sceVideoOutOpen");
+    add("sceVideoOutClose");
+    add("sceVideoOutRegisterBuffers2");
+    add("sceVideoOutSubmitFlip");
+    add("sceVideoOutGetFlipStatus");
+    add("sceVideoOutGetVblankStatus");
+    add("sceVideoOutGetOutputStatus");
+    add("sceVideoOutGetResolutionStatus");
+    add("sceVideoOutSetFlipRate");
+    add("sceVideoOutIsFlipPending");
+    add("sceVideoOutWaitVblank");
+    add("sceVideoOutAllowOutputResolutionWqhdDetection");
+    add("sceVideoOutIsOutputSupported");
+    add("sceVideoOutConfigureOutput");
+
     m_registered = true;
+    // Seed the NID registry: guest images import these functions by their
+    // 11-char NID strings; the transparent import dispatch resolves those
+    // strings back to the symbols above through exactly this map.
+    for (const auto& s : m_table)
+        Nid::NidRegistry::Instance().RegisterSymbol(s.name);
+    // Install the transparent-dispatch seam. The resolve side scans the
+    // table DIRECTLY (no RegisterAll re-entry — it can be called with the
+    // linker mutex held); the table is immutable past this point. The
+    // invoke side forwards to the same dispatchers the self-tests use.
+    RuntimeLinker::ImportRoute route;
+    route.resolve = [table = &m_table](const std::string& name,
+                                       std::string* symbolOut) -> bool {
+        for (const auto& s : *table)
+            if (name == s.name) {
+                symbolOut->assign(s.name);
+                return true;
+            }
+        return false;
+    };
+    route.invoke = [](const std::string& symbol,
+                      const ImportCall& call) -> uint64_t {
+        return KernelHle::GetInstance().InvokeByImport(symbol, call);
+    };
+    RuntimeLinker::GetInstance().SetImportRoute(std::move(route));
     PX5_LOGI(LogCategory::KERNEL,
              "libkernel HLE v1 registered: %zu symbols (imports resolve in Phase C)",
              m_table.size());
+}
+
+bool KernelHle::HasSymbol(const std::string& symbol) {
+    RegisterAll();
+    for (const auto& s : m_table)
+        if (symbol == s.name) return true;
+    return false;
 }
 
 size_t KernelHle::SymbolCount() const { return m_table.size(); }
@@ -300,9 +380,34 @@ uint64_t KernelHle::InvokeByName(const std::string& symbol,
                                  uint64_t a0, uint64_t a1,
                                  uint64_t a2, uint64_t a3,
                                  uint64_t a4, uint64_t a5) {
+    // Self-test / direct-call path: same dispatchers, no stack args
+    // (guestRsp=0 — symbols whose arity exceeds six refuse honestly).
+    ImportCall call;
+    call.args[0] = a0;
+    call.args[1] = a1;
+    call.args[2] = a2;
+    call.args[3] = a3;
+    call.args[4] = a4;
+    call.args[5] = a5;
+    return InvokeByImport(symbol, call);
+}
+
+uint64_t KernelHle::InvokeByImport(const std::string& symbol,
+                                   const ImportCall& call) {
     RegisterAll();
-    // args passed through to typed impls — keep parameter list small:
-    (void)a4; (void)a5;
+    const uint64_t a0 = call.args[0];
+    const uint64_t a1 = call.args[1];
+    const uint64_t a2 = call.args[2];
+    const uint64_t a3 = call.args[3];
+    const uint64_t a4 = call.args[4];
+    const uint64_t a5 = call.args[5];
+    // ORBIS int32 results sign-extend into the uint64 return contract.
+    const auto s32 = [](int32_t rc) -> uint64_t {
+        return static_cast<uint64_t>(static_cast<int64_t>(rc));
+    };
+    const auto ptr = [](uint64_t va) -> void* {
+        return reinterpret_cast<void*>(va);
+    };
 
     if (symbol == "sceKernelOpen")                    return Open(a0, a1, a2);
     if (symbol == "sceKernelWrite")                   return Write(a0, a1, a2);
@@ -319,6 +424,130 @@ uint64_t KernelHle::InvokeByName(const std::string& symbol,
     if (symbol == "sceKernelIsNeoMode")               return IsNeoMode();
     if (symbol == "sceKernelGetCompiledSdkVersion")   return GetCompiledSdkVersion();
     if (symbol == "sceGnmSubmitCommandBuffers")       return GnmSubmitCommandBuffers(a0, a1, a2);
+
+    // --- sceAudioOut (SceAudioOutHle) --------------------------------------
+    auto& audioOut = SceAudioOutHle::AudioOutHle::Instance();
+    if (symbol == "sceAudioOutInit")
+        return s32(audioOut.Init());
+    if (symbol == "sceAudioOutOpen")
+        return s32(audioOut.Open(static_cast<int32_t>(a0),
+                                 static_cast<int32_t>(a1),
+                                 static_cast<int32_t>(a2),
+                                 static_cast<uint32_t>(a3),
+                                 static_cast<uint32_t>(a4),
+                                 static_cast<uint32_t>(a5)));
+    if (symbol == "sceAudioOutClose")
+        return s32(audioOut.Close(static_cast<int32_t>(a0)));
+    if (symbol == "sceAudioOutOutput")
+        return s32(audioOut.Output(static_cast<int32_t>(a0), ptr(a1)));
+    if (symbol == "sceAudioOutOutputs")
+        return s32(audioOut.Outputs(
+            static_cast<const SceAudioOutHle::AudioOutHle::OutputParam*>(
+                ptr(a0)),
+            static_cast<uint32_t>(a1)));
+    if (symbol == "sceAudioOutSetVolume")
+        return s32(audioOut.SetVolume(static_cast<int32_t>(a0),
+                                      static_cast<uint32_t>(a1),
+                                      static_cast<const int32_t*>(ptr(a2))));
+    if (symbol == "sceAudioOutGetLastOutputTime")
+        return s32(audioOut.GetLastOutputTime(static_cast<int32_t>(a0),
+                                              static_cast<uint64_t*>(ptr(a1))));
+    if (symbol == "sceAudioOutGetPortState")
+        return s32(audioOut.GetPortState(
+            static_cast<int32_t>(a0),
+            static_cast<SceAudioOutHle::AudioOutPortState*>(ptr(a1))));
+    if (symbol == "sceAudioOutSetMixLevelPadSpk")
+        return s32(audioOut.SetMixLevelPadSpk(static_cast<int32_t>(a0),
+                                              static_cast<int32_t>(a1)));
+
+    // --- scePad (ScePadHle) -------------------------------------------------
+    auto& pad = ScePadHle::PadHle::Instance();
+    if (symbol == "scePadInit")            return s32(pad.Init());
+    if (symbol == "scePadOpen")
+        return s32(pad.Open(static_cast<int32_t>(a0),
+                            static_cast<int32_t>(a1),
+                            static_cast<int32_t>(a2), ptr(a3)));
+    if (symbol == "scePadClose")
+        return s32(pad.Close(static_cast<int32_t>(a0)));
+    if (symbol == "scePadRead")
+        return s32(pad.Read(static_cast<int32_t>(a0),
+                            static_cast<ScePadHle::PadData*>(ptr(a1)),
+                            static_cast<int32_t>(a2)));
+    if (symbol == "scePadReadState")
+        return s32(pad.ReadState(static_cast<int32_t>(a0),
+                                 static_cast<ScePadHle::PadData*>(ptr(a1))));
+    if (symbol == "scePadGetControllerInformation")
+        return s32(pad.GetControllerInformation(
+            static_cast<int32_t>(a0),
+            static_cast<ScePadHle::PadControllerInformation*>(ptr(a1))));
+    if (symbol == "scePadGetInfo")
+        return s32(pad.GetInfo(static_cast<ScePadHle::PadInfo*>(ptr(a0))));
+    if (symbol == "scePadSetVibration")
+        return s32(pad.SetVibration(
+            static_cast<int32_t>(a0),
+            static_cast<const ScePadHle::PadVibrationParam*>(ptr(a1))));
+    if (symbol == "scePadSetLightBar")
+        return s32(pad.SetLightBar(
+            static_cast<int32_t>(a0),
+            static_cast<const ScePadHle::PadLightBarParam*>(ptr(a1))));
+
+    // --- sceVideoOut (SceVideoOutHle) ---------------------------------------
+    auto& videoOut = SceVideoOutHle::VideoOutHle::Instance();
+    if (symbol == "sceVideoOutOpen")
+        return s32(videoOut.Open(static_cast<int32_t>(a0),
+                                 static_cast<int32_t>(a1),
+                                 static_cast<int32_t>(a2), a3));
+    if (symbol == "sceVideoOutClose")
+        return s32(videoOut.Close(static_cast<int32_t>(a0)));
+    if (symbol == "sceVideoOutRegisterBuffers2") {
+        // ORBIS arity 8: category and option are the 7th/8th arguments —
+        // they ride the guest stack beyond the six registers the stub
+        // preserves. An unreadable stack arg refuses named (INVALID_OPTION),
+        // it is never guessed to zero.
+        uint64_t category = 0, option = 0;
+        if (!call.ReadStackArg(0, &category) ||
+            !call.ReadStackArg(1, &option)) {
+            PX5_LOGW(LogCategory::GPU,
+                     "VIDEOOUT: register-buffers stack args unreadable "
+                     "(rsp=0x%llx) — refusing as INVALID_OPTION",
+                     (unsigned long long)call.guestRsp);
+            return s32(SceVideoOutHle::VIDEO_OUT_ERROR_INVALID_OPTION);
+        }
+        return s32(videoOut.RegisterBuffers2(
+            static_cast<int32_t>(a0), static_cast<int32_t>(a1),
+            static_cast<int32_t>(a2), a3, static_cast<int32_t>(a4), a5,
+            static_cast<int32_t>(category), option));
+    }
+    if (symbol == "sceVideoOutSubmitFlip")
+        return s32(videoOut.SubmitFlip(
+            static_cast<int32_t>(a0), static_cast<int32_t>(a1),
+            static_cast<int32_t>(a2), static_cast<int64_t>(a3)));
+    if (symbol == "sceVideoOutGetFlipStatus")
+        return s32(videoOut.GetFlipStatus(static_cast<int32_t>(a0), a1));
+    if (symbol == "sceVideoOutGetVblankStatus")
+        return s32(videoOut.GetVblankStatus(static_cast<int32_t>(a0), a1));
+    if (symbol == "sceVideoOutGetOutputStatus")
+        return s32(videoOut.GetOutputStatus(static_cast<int32_t>(a0), a1));
+    if (symbol == "sceVideoOutGetResolutionStatus")
+        return s32(videoOut.GetResolutionStatus(static_cast<int32_t>(a0),
+                                                a1));
+    if (symbol == "sceVideoOutSetFlipRate")
+        return s32(videoOut.SetFlipRate(static_cast<int32_t>(a0),
+                                        static_cast<int32_t>(a1)));
+    if (symbol == "sceVideoOutIsFlipPending")
+        return s32(videoOut.IsFlipPending(static_cast<int32_t>(a0)));
+    if (symbol == "sceVideoOutWaitVblank")
+        return s32(videoOut.WaitVblank(static_cast<int32_t>(a0)));
+    if (symbol == "sceVideoOutAllowOutputResolutionWqhdDetection")
+        return s32(videoOut.AllowOutputResolutionWqhdDetection(
+            static_cast<int32_t>(a0)));
+    if (symbol == "sceVideoOutIsOutputSupported")
+        return s32(videoOut.IsOutputSupported(static_cast<int32_t>(a0), a1,
+                                              a2));
+    if (symbol == "sceVideoOutConfigureOutput")
+        return s32(videoOut.ConfigureOutput(static_cast<int32_t>(a0), a1,
+                                            a2));
+
     return static_cast<uint64_t>(kErrInval);
 }
 

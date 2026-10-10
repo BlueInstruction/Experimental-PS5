@@ -778,6 +778,33 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeGetVulkanSummary(JNIEnv* env,
 #include <android/native_window_jni.h>
 
 extern "C" JNIEXPORT jstring JNICALL
+Java_com_px5_emulator_core_FexCoreWrapper_nativeRunM8DispatchProof(
+        JNIEnv* env, jobject) {
+    PX5::Breadcrumb::Set("jni: M8DispatchProof enter");
+    // In-process, same rationale as nativeRunGpuProof (vc32): a fork()ed
+    // child cannot safely drive the Vulkan loader / ICD dlopen path on this
+    // bionic+linker-hook stack. The proof itself is self-contained (fresh
+    // instance -> device with bufferDeviceAddress -> own queue -> full
+    // teardown), so the only parent driver state is none — but the render
+    // loop is still stopped around it for the external-synchronization
+    // contract the other probes honour.
+    auto& gpu = PX5::VulkanGpuDevice::GetInstance();
+    const bool wasRendering = gpu.StopRenderLoopForProbe();
+
+    std::string detail;
+    const bool ok = gpu.RunM8ComputeReadbackProof(detail);
+    PX5::Breadcrumb::Set("jni: M8DispatchProof inproc ok=%d", ok ? 1 : 0);
+
+    if (wasRendering) gpu.ResumeRenderLoopAfterProbe();
+
+    const std::string report =
+        std::string(ok ? "PASS | " : "FAIL | ") + detail;
+    PX5::Breadcrumb::Set("jni: M8DispatchProof done rep=%.64s",
+                         report.c_str());
+    return env->NewStringUTF(report.c_str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
 Java_com_px5_emulator_core_FexCoreWrapper_nativeRunGpuProof(JNIEnv* env,
                                                             jobject) {
     PX5::Breadcrumb::Set("jni: GpuProof enter");

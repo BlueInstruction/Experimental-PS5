@@ -237,6 +237,15 @@ public class FexCoreWrapper {
     public native String nativeRunGpuProof();
 
     /**
+     * M8 dispatch proof: the locked branch-past-endpgm contract's RDNA
+     * programs recompiled (RDNA -> SPIR-V), materialized as real compute
+     * pipelines, dispatched, and verified byte-exact on all 64 threads for
+     * all 6 cases. Returns "PASS | detail" (with cases=6/6 and the recompile
+     * stats) or "FAIL | detail" naming the first differing thread.
+     */
+    public native String nativeRunM8DispatchProof();
+
+    /**
      * Phase C milestone 1: synthetic-stream GNM PM4 decoder self-test
      * (pure CPU). Returns the decoder's own multi-line report starting
      * with "PASS" or "FAIL" plus per-subtest results. Proves decoder +
