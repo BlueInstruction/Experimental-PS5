@@ -219,6 +219,7 @@ add_library(
         loader/runtime_linker_selftest.cpp
         gpu/ir/gpu_ir.cpp
         gpu/vulkan_backend.cpp
+        gpu/shader_pipeline.cpp
         gpu/vulkan_device.cpp
         gpu/shader/graphics_pipeline_desc.cpp
         gpu/shader/dispatch_proof_contract.cpp
@@ -250,49 +251,23 @@ target_include_directories(px5 PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR}/fex/generated)
 
 # ----------------------------------------------------------------------------
-# M8 T3/T4: vendored AnyPS5 RDNA shader recompiler (fetch pin, GPL-2.0-only).
-# Same discipline as FEX: the tree is NOT vendored in-repo; it is materialized
-# by tools/fetch_shader_recompiler.sh into .deps/anyps5 at a pinned commit
-# (build.yml fetches BEFORE gradle runs). The app touches it ONLY through
-# gpu/shader/shader_recompiler_service.cpp (the one TU including recompiler
-# headers); gpu/shader/shader_capture.cpp sits on top and speaks to the
-# service's app-side interface only. The M8 T3/T4 host gates prove both end
-# to end, and no recompiler type ever leaks past that boundary.
+# M8 T3/T4 + M7 facade on ONE substrate: the vendored AnyPS5 recompiler
+# (GPL-2.0-only — see gpu/shader_recompiler/PX5_PORT.md). The earlier M8
+# fetch-pin (.deps/anyps5) is superseded by the vendored tree: hermetic (no
+# network at build time) and CI-proven; its PUBLIC include dirs reach every
+# app-side consumer:
+#   * gpu/shader_pipeline.cpp — the M7 facade, the one boundary PX5 code crosses
+#   * gpu/shader/shader_recompiler_service.cpp — the only TU that sees vendored
+#     types; gpu/shader/shader_capture.cpp speaks to its app-side interface only
+# tools/fetch_shader_recompiler.sh survives ONLY as the host-test substrate
+# (build.yml fetches for tools/hosttests/run.sh; the APK build ignores it).
 # The x86_64 UI-smoke stub target deliberately stays recompiler-free.
 # ----------------------------------------------------------------------------
-set(PX5_SHADER_RECOMPILER_ROOT
-        "${CMAKE_CURRENT_LIST_DIR}/../../../../.deps/anyps5"
-        CACHE PATH "Path to the fetched AnyPS5 recompiler tree")
-if(NOT EXISTS "${PX5_SHADER_RECOMPILER_ROOT}/core/shader/recompiler/Recompiler.cpp")
-    message(FATAL_ERROR
-        "PX5_SHADER_RECOMPILER_ROOT (${PX5_SHADER_RECOMPILER_ROOT}) does not "
-        "contain the AnyPS5 recompiler. Run tools/fetch_shader_recompiler.sh "
-        "first (see AGENTS.md).")
-endif()
+add_subdirectory(gpu/shader_recompiler)
+target_link_libraries(px5 px5_shader_recompiler)
 target_sources(px5 PRIVATE
         gpu/shader/shader_capture.cpp
-        gpu/shader/shader_recompiler_service.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/hosttests/portable/px5_spirv_optimizer.cpp)
-file(GLOB_RECURSE PX5_RECOMPILER_SOURCES
-        "${PX5_SHADER_RECOMPILER_ROOT}/core/shader/recompiler/*.cpp")
-list(FILTER PX5_RECOMPILER_SOURCES EXCLUDE REGEX
-        "DummyShaders\\.cpp$|SpirvOptimizer\\.cpp$|Deserialize\\.cpp$")
-target_sources(px5 PRIVATE ${PX5_RECOMPILER_SOURCES})
-set(PX5_RECOMPILER_INCLUDES
-        ${PX5_SHADER_RECOMPILER_ROOT}/core/libs
-        ${PX5_SHADER_RECOMPILER_ROOT}/core/shader/recompiler
-        ${PX5_SHADER_RECOMPILER_ROOT}/core/shader/recompiler/RdnaDecoder/include
-        ${PX5_SHADER_RECOMPILER_ROOT}/core/shader/recompiler/ControlFlow/include
-        ${PX5_SHADER_RECOMPILER_ROOT}/core/shader/recompiler/IntermediateRepresentation/include
-        ${PX5_SHADER_RECOMPILER_ROOT}/core/shader/recompiler/Translation/include
-        ${PX5_SHADER_RECOMPILER_ROOT}/core/shader/recompiler/Optimization/include
-        ${PX5_SHADER_RECOMPILER_ROOT}/core/shader/recompiler/SpirvBackend/include
-        ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/hosttests/spirv
-        ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/hosttests/portable)
-target_include_directories(px5 PRIVATE ${PX5_RECOMPILER_INCLUDES})
-# SPIRV-Tools stay out of the app (same substitution contract as the host
-# tests: the portable layer implements ValidateAndOptimizeSpirv structurally).
-target_compile_definitions(px5 PRIVATE ANYPS5_ENABLE_SPIRV_TOOLS=0)
+        gpu/shader/shader_recompiler_service.cpp)
 
 # Belt and suspenders: explicitly require C++20 on the px5 target itself
 # so any consumer of px5 inherits the requirement.

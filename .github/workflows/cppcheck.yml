@@ -63,12 +63,19 @@ jobs:
           # severity=error fails the build, everything else is reported.
           # cppcheck itself must not abort here, or the gate never gets to
           # print the summary.
+          # -i excludes: vendored third-party trees are upstream-gated code
+          # (see gpu/shader_recompiler/PX5_PORT.md) and are not re-analysed
+          # here; the PX5-owned facade (gpu/shader_pipeline.cpp) stays inside
+          # the scan. cppcheck -i also skips the dir when it appears in
+          # #include paths of scanned files.
           cppcheck \
             --enable=warning,style,performance,portability \
             --suppress=missingIncludeSystem \
             --suppress=unusedFunction \
             --inline-suppr \
             --force \
+            -i app/src/main/cpp/gpu/shader_recompiler \
+            -i app/src/main/cpp/third_party \
             -D__ANDROID__ \
             -D__aarch64__ \
             -DARM64 \
@@ -83,6 +90,17 @@ jobs:
             -I app/src/main/cpp/kernel \
             -I app/src/main/cpp/loader \
             -I app/src/main/cpp/gpu \
+            -I app/src/main/cpp/gpu/ir \
+            -I app/src/main/cpp/gpu/gnm \
+            -I app/src/main/cpp/gpu/shader_recompiler \
+            -I app/src/main/cpp/gpu/shader_recompiler/RdnaDecoder/include \
+            -I app/src/main/cpp/gpu/shader_recompiler/ControlFlow/include \
+            -I app/src/main/cpp/gpu/shader_recompiler/IntermediateRepresentation/include \
+            -I app/src/main/cpp/gpu/shader_recompiler/Translation/include \
+            -I app/src/main/cpp/gpu/shader_recompiler/Optimization/include \
+            -I app/src/main/cpp/gpu/shader_recompiler/SpirvBackend/include \
+            -I app/src/main/cpp/gpu/shader_recompiler/px5_shim \
+            -I app/src/main/cpp/third_party/spirv-headers/include \
             -I app/src/main/cpp/audio \
             -I app/src/main/cpp/input \
             -I app/src/main/cpp/filesystem \
