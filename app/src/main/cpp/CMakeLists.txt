@@ -59,6 +59,7 @@ if(ANDROID_ABI STREQUAL "x86_64")
             gpu/vulkan_backend.cpp
             gpu/vulkan_device.cpp
             gpu/shader/graphics_pipeline_desc.cpp
+            gpu/shader/dispatch_proof_contract.cpp
             gpu/driver_manager.cpp
             gpu/gnm/gnm_state.cpp
             gpu/gnm/pm4_decoder.cpp
@@ -211,6 +212,7 @@ add_library(
         gpu/vulkan_backend.cpp
         gpu/vulkan_device.cpp
         gpu/shader/graphics_pipeline_desc.cpp
+        gpu/shader/dispatch_proof_contract.cpp
         gpu/driver_manager.cpp
         gpu/gnm/gnm_state.cpp
         gpu/gnm/pm4_decoder.cpp

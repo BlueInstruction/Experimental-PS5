@@ -214,4 +214,16 @@ echo "[hosttests] building graphics_pipeline_desc_test (M8 T6)"
 echo "[hosttests] running graphics_pipeline_desc_test (M8 T6)"
 "$OUT/graphics_pipeline_desc_test"
 
+echo "[hosttests] building dispatch_proof_contract_test (M8 T7 contract)"
+# The dispatch proof's expected bytes locked as data — the on-device proof's
+# fixed target, verified here before any device session spends time on it.
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
+    -I"$CPP" \
+    -o "$OUT/dispatch_proof_contract_test" \
+    "$ROOT/tools/hosttests/dispatch_proof_contract_test.cpp" \
+    "$CPP/gpu/shader/dispatch_proof_contract.cpp"
+
+echo "[hosttests] running dispatch_proof_contract_test (M8 T7 contract)"
+"$OUT/dispatch_proof_contract_test"
+
 echo "[hosttests] all host tests passed"
