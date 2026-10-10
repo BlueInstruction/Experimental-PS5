@@ -191,7 +191,10 @@ SubResult TestTruncation() {
         // past it — the header dword itself is never consumed as body.
         r.detail = "stop offset wrong: " + std::to_string(stopped); return r;
     }
-    if (!errors.empty() && errors[0].dwordOffset != 0) {
+    // errors.size()==1 was enforced above (early return), so errors[0]
+    // is in range here; a redundant !errors.empty() guard made cppcheck
+    // flag the access as possibly out of bounds (24.04 analyzer).
+    if (errors[0].dwordOffset != 0) {
         r.detail = "error offset wrong"; return r;
     }
     if (errors[0].what.find("truncated") == std::string::npos) {

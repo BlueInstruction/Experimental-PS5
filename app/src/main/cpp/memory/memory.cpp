@@ -753,7 +753,7 @@ std::string MemoryManager::GetWindowInfoString() const {
              "guestVA=[0x%llx..0x%llx] sizeMB=%zu mapped=%.2f MiB blocks=%zu",
              (unsigned long long)m_guestBase,
              (unsigned long long)(m_guestBase + m_windowSize),
-             m_windowSize / (1024 * 1024),
+             (size_t)(m_windowSize / (1024 * 1024)),
              m_allocatedBytes / (1024.0 * 1024.0),
              m_allocations.size());
     return buf;
