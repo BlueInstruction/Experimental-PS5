@@ -227,6 +227,7 @@ add_library(
         gpu/gnm/pm4_decoder.cpp
         gpu/gnm/gnm_selftest.cpp
         gpu/gnm/gnm_submit.cpp
+        gpu/videoout_hle.cpp
         audio/audio.cpp
         audio/audio_out_hle.cpp
         input/controller.cpp

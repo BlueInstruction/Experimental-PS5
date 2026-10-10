@@ -170,6 +170,11 @@ bool Emulator::LoadExecutable(const std::string& path, bool isSelf) {
         return false;
     }
     Breadcrumb::Set("load: memmgr ready");
+    // The transparent import dispatch needs the HLE floor registered (its
+    // route seam installs inside RegisterAll) BEFORE any guest stub can
+    // fire. Idempotent; also runs in the boot self-check, this is the
+    // order-independent guarantee.
+    SceKernelHle::KernelHle::GetInstance().RegisterAll();
     if (m_baseDir.empty()) {
         // /data/local/tmp is not writable by app processes, so it is not a
         // fallback -- it is just a slower failure. Anchor the VFS under the

@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "../loader/runtime_linker.h"   // ImportCall (the import seam)
+
 namespace PX5::SceKernelHle {
 
 // ---------------------------------------------------------------------------
@@ -88,6 +90,17 @@ public:
                           uint64_t a0 = 0, uint64_t a1 = 0,
                           uint64_t a2 = 0, uint64_t a3 = 0,
                           uint64_t a4 = 0, uint64_t a5 = 0);
+
+    /**
+     * Dispatches one transparent import call (v1.48): the same dispatchers
+     * as InvokeByName, with the caller's preserved register arguments plus
+     * stack-argument access for the functions whose ORBIS arity exceeds
+     * six (e.g. sceVideoOutRegisterBuffers2). stack args are read through
+     * the memory window from the call-site rsp; an unreadable stack arg
+     * is a named refusal, never a guessed zero.
+     */
+    uint64_t InvokeByImport(const std::string& symbol,
+                            const ImportCall& call);
 
     /**
      * Returns human-readable summary of HLE state.

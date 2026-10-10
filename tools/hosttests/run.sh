@@ -75,6 +75,7 @@ echo "[hosttests] building nid_dispatch_test (M9 transparent import dispatch)"
     "$CPP/input/pad_hle.cpp" \
     "$CPP/input/controller.cpp" \
     "$CPP/gpu/gnm/gnm_submit.cpp" \
+    "$CPP/gpu/videoout_hle.cpp" \
     "$CPP/gpu/gnm/pm4_decoder.cpp" \
     "$CPP/gpu/gnm/gnm_state.cpp" \
     "$CPP/filesystem/vfs.cpp" \
@@ -88,6 +89,38 @@ echo "[hosttests] building nid_dispatch_test (M9 transparent import dispatch)"
 
 echo "[hosttests] running nid_dispatch_test"
 "$OUT/nid_dispatch_test"
+
+echo "[hosttests] building videoout_hle_test (M10 T1 sceVideoOut HLE)"
+# ORBIS video-out semantics ported from AnyPS5 libSceVideoOut: open
+# validation order, the 1920x1080 open default, the RegisterBuffers2
+# chain, flip status accounting and the honesty boundary (flips retire,
+# no display engine claimed).
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
+    -I"$SHIM" -I"$CPP" \
+    -o "$OUT/videoout_hle_test" \
+    "$ROOT/tools/hosttests/videoout_hle_test.cpp" \
+    "$CPP/gpu/videoout_hle.cpp" \
+    "$CPP/kernel/sce_kernel_hle.cpp" \
+    "$CPP/kernel/syscalls.cpp" \
+    "$CPP/loader/nid.cpp" \
+    "$CPP/loader/runtime_linker.cpp" \
+    "$CPP/audio/audio_out_hle.cpp" \
+    "$CPP/input/pad_hle.cpp" \
+    "$CPP/input/controller.cpp" \
+    "$CPP/gpu/gnm/gnm_submit.cpp" \
+    "$CPP/gpu/gnm/pm4_decoder.cpp" \
+    "$CPP/gpu/gnm/gnm_state.cpp" \
+    "$CPP/filesystem/vfs.cpp" \
+    "$CPP/memory/memory.cpp" \
+    "$CPP/utils/evidence.cpp" \
+    "$CPP/utils/logger.cpp" \
+    "$CPP/utils/diag_bridge.cpp" \
+    "$CPP/utils/breadcrumbs.cpp" \
+    "$CPP/utils/crash_handler.cpp" \
+    "$SHIM/fexcore_state_stub.cpp"
+
+echo "[hosttests] running videoout_hle_test"
+"$OUT/videoout_hle_test"
 
 echo "[hosttests] building pm4_stream_test (M5 gate)"
 "$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
