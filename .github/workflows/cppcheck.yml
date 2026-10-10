@@ -34,12 +34,12 @@ permissions:
 jobs:
   cppcheck:
     name: cppcheck static analysis
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install cppcheck
         run: |
@@ -97,6 +97,19 @@ jobs:
       - name: Gate on cppcheck findings
         run: python3 tools/cppcheck_gate.py build-reports/cppcheck.xml
 
+      - name: Publish cppcheck summary
+        if: always()   # also runs when the gate failed, so the breaking
+                       # findings are on the run page, not only in artifacts
+        run: |
+          # tee puts the summary on the run page (GITHUB_STEP_SUMMARY) AND
+          # in this step's job log — which an agent with repo read access
+          # can fetch through the Actions API without downloading artifacts.
+          if [ -f build-reports/cppcheck.xml ]; then
+            python3 tools/cppcheck_summary.py build-reports/cppcheck.xml | tee "$GITHUB_STEP_SUMMARY"
+          else
+            echo "cppcheck.xml was not produced." | tee "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Convert cppcheck XML to SARIF
         if: always()   # runs even when the gate failed, so the Security tab
                        # shows the findings that broke the build
@@ -117,7 +130,7 @@ jobs:
 
       - name: Upload SARIF
         if: always() && hashFiles('build-reports/cppcheck.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: build-reports/cppcheck.sarif
           category: '/cppcheck'
@@ -125,7 +138,7 @@ jobs:
 
       - name: Upload HTML report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cppcheck-report-${{ github.run_id }}
           path: build-reports/

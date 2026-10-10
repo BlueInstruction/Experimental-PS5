@@ -105,3 +105,38 @@ Build: versionName 1.43 (versionCode 44).
 No Sony firmware, keys, or game assets here. The project runs legally
 obtained software on hardware the owner controls. Reference projects are
 credited in README.
+
+## CI Review Policy
+
+Applies to any AI agent (or human) working on this repository.
+
+Before a task is called complete:
+
+1. Read the CI results for the exact commit being reviewed — never assume
+   a check is green without seeing its conclusion. Same-repo agents with a
+   read token can fetch everything through the GitHub API:
+   - `commits/<sha>/check-runs` — status and conclusion per check
+   - `check-runs/<id>/annotations` — inline findings
+   - `actions/jobs/<job_id>/logs` — full job log, including the
+     "Publish lint/cppcheck summary" steps, which carry the structured
+     findings as plain text
+   - `actions/artifacts` — cppcheck.xml / lint reports / APK
+   - `code-scanning/alerts` — SARIF alerts from the Security tab
+   The run page Step Summary mirrors the publish steps; either source is
+   fine. If results are unreachable, say so — do not invent findings.
+2. For every finding, open the reported file and line before proposing a
+   fix; don't fix blind from the warning text. Fix priority: memory
+   safety / UB / resource lifetime / thread safety > API misuse >
+   style / performance.
+3. Never suppress a finding just to turn CI green. Suppress only a
+   demonstrated false positive or a documented intentional exception, and
+   state the reason in the suppression comment itself.
+4. Do not edit the fetched engine tree (see `tools/fetch_fexcore.sh`) to
+   silence findings — engine changes go through numbered patches.
+5. Severity: cppcheck `error` / Lint `Error` blocks the merge (the gate
+   step fails); `warning` findings are reviewed one by one; style,
+   portability and performance notes are opportunistic and must not drive
+   scope.
+6. A green CI run means "no detected code-level defects". It does NOT
+   prove CPU translation, ELF loading, or Vulkan correctness — see Rules
+   2 and 3: behavior claims need runtime evidence from the device logs.
