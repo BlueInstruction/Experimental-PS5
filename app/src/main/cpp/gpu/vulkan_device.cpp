@@ -43,12 +43,16 @@ std::string VkVersion(uint32_t v) {
 // library (the system Qualcomm blob never reports a Mesa driverID).
 // Missing entrypoint or driverID=0 (pre-1.2 impls) -> honest
 // "unavailable", never a guess.
-std::string VkDriverIdentityString(VkPhysicalDevice phys,
+std::string VkDriverIdentityString(VkInstance inst, VkPhysicalDevice phys,
                                    PFN_vkGetInstanceProcAddr gipa) {
-    if (!phys || !gipa) return "driverProps=unavailable(no-phys/gipa)";
+    if (!inst || !phys || !gipa)
+        return "driverProps=unavailable(no-inst/phys/gipa)";
+    // vkGetPhysicalDeviceProperties2 is instance-level: the Android loader
+    // returns NULL for it with a NULL instance (cubic P2, v1.59 review) —
+    // the lookup MUST go through the live instance.
     auto pfnProps2 =
         reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
-            gipa(VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties2"));
+            gipa(inst, "vkGetPhysicalDeviceProperties2"));
     if (!pfnProps2) return "driverProps=unavailable(no-props2-entrypoint)";
     VkPhysicalDeviceDriverProperties dp{};
     dp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
@@ -217,7 +221,8 @@ bool VulkanGpuDevice::Initialize() {
     // v1.59 — bind the enumerated device to its actual implementation
     // (driverID/driverName) so every session log proves WHICH driver the
     // instance bound — slot run = MESA_TURNIP, system blob = not-Mesa.
-    m_caps.driverIdentity   = VkDriverIdentityString(devs[0], vkGIPA);
+    m_caps.driverIdentity   = VkDriverIdentityString(
+        reinterpret_cast<VkInstance>(m_instance), devs[0], vkGIPA);
 
     PX5_LOGI(LogCategory::GPU,
              "Vulkan REAL init OK: %s | API %s | driver %s | vendor=0x%x "
@@ -1038,6 +1043,11 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
     VkPhysicalDevice pd = devs[0];
     VkPhysicalDeviceProperties props{};
     pfnProps(pd, &props);
+    // v1.59 — capture the driver identity WHILE inst is alive: pd is a
+    // child of inst, destroyed with it (cubic P2, v1.59 review). Composing
+    // the detail after pfnDestroyInstance would pass a dead handle.
+    const std::string driverIdentity =
+        VkDriverIdentityString(inst, pd, gipa);
     Breadcrumb::Set("gpu.m7: physical device ready");
 
     uint32_t nf = 0;
@@ -1480,7 +1490,7 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
              VkVersion(props.apiVersion).c_str(), props.vendorID,
              props.deviceID);
     detailOut = std::string(head) + (ok ? "PASS — " : "FAIL — ") + err +
-                " | " + VkDriverIdentityString(pd, gipa);
+                " | " + driverIdentity;
     if (ok && m7Sha[0] != '\0') {
         detailOut += " | sha256=";
         detailOut += m7Sha;
