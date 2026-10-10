@@ -122,6 +122,23 @@ public:
      */
     bool RunM7ClearReadbackProof(std::string& detailOut);
 
+    /**
+     * M8 T7 device half — the compute dispatch proof. Self-contained and
+     * fork-safe by the same construction as RunSelfContainedProof (fresh
+     * instance -> device with bufferDeviceAddress -> own queue), extended
+     * with the full recompiled-shader chain: the dispatch proof contract's
+     * RDNA programs -> GuestShaderRecompiler (RDNA -> SPIR-V) -> shader
+     * module + pipeline -> BDA buffers filled with the contract's input/
+     * output bytes -> push-constant user data (PS5 descriptor roots +
+     * selector) -> dispatch -> fence -> CPU readback -> VerifyOutput.
+     * All six contract cases must match byte-exact; the first differing
+     * thread is named in the detail line. A created pipeline is NOT the
+     * evidence — the matched threads are.
+     * @param detailOut Output parameter receiving proof detail
+     * @return true if every contract case matched, false otherwise
+     */
+    bool RunM8ComputeReadbackProof(std::string& detailOut);
+
     // ---- M8 T5: guest shader objects (real Vulkan materialization) ------
     // Creates (or serves from the bounded device cache) a VkShaderModule
     // from recompiled SPIR-V words. Validation happens BEFORE the driver

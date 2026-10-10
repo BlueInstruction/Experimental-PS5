@@ -9,6 +9,7 @@
 #include "vulkan_backend.h"
 #include "gpu/shader/shader_recompiler_service.h"
 #include "gpu/shader/graphics_pipeline_desc.h"
+#include "gpu/shader/dispatch_proof_contract.h"
 #include "../core/settings.h"
 #include "../utils/logger.h"
 #include "../utils/breadcrumbs.h"
@@ -2387,6 +2388,558 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
         detailOut += m7Sha;
     }
     PX5_LOGI(LogCategory::GPU, "M7 readback proof: %s", detailOut.c_str());
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
+// M8 T7 (device half) — the compute dispatch proof: the locked contract's
+// RDNA programs go through the REAL recompiler (RDNA -> SPIR-V), materialize
+// as real Vulkan compute pipelines, dispatch on a real queue, and the
+// readback is verified against the contract's expected bytes.
+//
+// Construction is the PROVEN self-contained one — fresh instance -> fresh
+// device -> own queue, full teardown — extended with the core-1.2
+// bufferDeviceAddress feature the recompiled SPIR-V requires (the BDA ABI:
+// PS5 buffer descriptors carry raw 64-bit GPU VAs that the shader
+// dereferences as physical storage buffers). The user-data SGPRs (descriptor
+// roots + case selector) travel as push constants into the recompiler's
+// 128-byte block, exactly the ShaderInputInfoBuilder ABI shape.
+//
+// The verdict is the OUTPUT BYTES: all six cases must show
+// Output[tid] == Input[tid] + added for every one of the 64 threads
+// (VerifyOutput names the first differing thread). A created pipeline is
+// not evidence; matched threads are.
+// ---------------------------------------------------------------------------
+bool VulkanGpuDevice::RunM8ComputeReadbackProof(std::string& detailOut) {
+    using Gpu::DispatchProof::BufferDescriptor;
+    using Gpu::DispatchProof::Cases;
+    using Gpu::DispatchProof::FillInput;
+    using Gpu::DispatchProof::FillOutput;
+    using Gpu::DispatchProof::kSelectorRegister;
+    using Gpu::DispatchProof::kThreads;
+    using Gpu::DispatchProof::kUserDataSize;
+    using Gpu::DispatchProof::VerifyOutput;
+
+    void* lib = m_vulkanLib ? m_vulkanLib
+                            : dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) {
+        detailOut = std::string("dlopen libvulkan.so failed: ") + dlerror();
+        return false;
+    }
+    auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+        dlsym(lib, "vkGetInstanceProcAddr"));
+    if (!gipa) { detailOut = "vkGetInstanceProcAddr missing"; return false; }
+
+    Breadcrumb::Set("gpu.m8: enter");
+
+    VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    appInfo.pApplicationName = "PX5-m8-proof";
+    appInfo.apiVersion       = VK_API_VERSION_1_0;
+    VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    ici.pApplicationInfo = &appInfo;
+    VkInstance inst = VK_NULL_HANDLE;
+    auto pfnCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(
+        gipa(VK_NULL_HANDLE, "vkCreateInstance"));
+    if (!pfnCreateInstance ||
+        pfnCreateInstance(&ici, nullptr, &inst) != VK_SUCCESS || !inst) {
+        detailOut = "m8: vkCreateInstance failed";
+        return false;
+    }
+
+    auto pfnEnumDevs = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
+        gipa(inst, "vkEnumeratePhysicalDevices"));
+    auto pfnProps = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+        gipa(inst, "vkGetPhysicalDeviceProperties"));
+    auto pfnFams = reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
+        gipa(inst, "vkGetPhysicalDeviceQueueFamilyProperties"));
+    auto pfnMemProps = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+        gipa(inst, "vkGetPhysicalDeviceMemoryProperties"));
+    auto pfnCreateDevice = reinterpret_cast<PFN_vkCreateDevice>(
+        gipa(inst, "vkCreateDevice"));
+    if (!pfnEnumDevs || !pfnProps || !pfnFams || !pfnMemProps ||
+        !pfnCreateDevice) {
+        detailOut = "m8: instance-level fns missing";
+        return false;
+    }
+
+    uint32_t nd = 0;
+    if (pfnEnumDevs(inst, &nd, nullptr) != VK_SUCCESS || nd == 0) {
+        detailOut = "m8: no physical devices";
+        return false;
+    }
+    std::vector<VkPhysicalDevice> devs(nd);
+    pfnEnumDevs(inst, &nd, devs.data());
+    VkPhysicalDevice pd = devs[0];
+    VkPhysicalDeviceProperties props{};
+    pfnProps(pd, &props);
+    // The recompiled SPIR-V uses PhysicalStorageBufferAddresses (core-1.2
+    // bufferDeviceAddress). Below 1.2 the proof refuses by name instead of
+    // building a pipeline that cannot legally run.
+    if (props.apiVersion < VK_API_VERSION_1_2) {
+        detailOut = std::string("m8: device API ") +
+                    VkVersion(props.apiVersion) +
+                    " < 1.2 — bufferDeviceAddress unavailable, the "
+                    "recompiler's BDA ABI cannot run here";
+        return false;
+    }
+
+    uint32_t nf = 0;
+    pfnFams(pd, &nf, nullptr);
+    if (nf == 0) { detailOut = "m8: no queue families"; return false; }
+    std::vector<VkQueueFamilyProperties> fams(nf);
+    pfnFams(pd, &nf, fams.data());
+    uint32_t gfx = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < nf; ++i)
+        if (fams[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { gfx = i; break; }
+    if (gfx == 0xFFFFFFFFu) {
+        detailOut = "m8: no compute queue family";
+        return false;
+    }
+
+    // Fresh logical device with bufferDeviceAddress ON (core 1.2 feature
+    // struct in the pNext chain). Nothing else enabled — the proof is
+    // offscreen compute only.
+    const float prio = 1.0f;
+    VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+    qci.queueFamilyIndex = gfx;
+    qci.queueCount       = 1;
+    qci.pQueuePriorities = &prio;
+    VkPhysicalDeviceVulkan12Features f12{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    f12.bufferDeviceAddress = VK_TRUE;
+    VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    dci.pNext               = &f12;
+    dci.queueCreateInfoCount = 1;
+    dci.pQueueCreateInfos    = &qci;
+    VkDevice dev = VK_NULL_HANDLE;
+    if (pfnCreateDevice(pd, &dci, nullptr, &dev) != VK_SUCCESS || !dev) {
+        detailOut = "m8: vkCreateDevice (bufferDeviceAddress) failed";
+        return false;
+    }
+
+    auto gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+        gipa(inst, "vkGetDeviceProcAddr"));
+#define PX5_M8_P(fn, name) \
+    auto fn = reinterpret_cast<PFN_vk##fn>(gdpa ? gdpa(dev, name) : nullptr)
+    PX5_M8_P(GetDeviceQueue,          "vkGetDeviceQueue");
+    PX5_M8_P(CreateBuffer,            "vkCreateBuffer");
+    PX5_M8_P(DestroyBuffer,           "vkDestroyBuffer");
+    // (GetBufferMemoryRequirements is resolved separately below — its
+    // shorthand name would break the PFN_vk##fn token paste.)
+    PX5_M8_P(BindBufferMemory,        "vkBindBufferMemory");
+    PX5_M8_P(AllocateMemory,          "vkAllocateMemory");
+    PX5_M8_P(FreeMemory,              "vkFreeMemory");
+    PX5_M8_P(MapMemory,               "vkMapMemory");
+    PX5_M8_P(UnmapMemory,             "vkUnmapMemory");
+    PX5_M8_P(GetBufferDeviceAddress,  "vkGetBufferDeviceAddress");
+    PX5_M8_P(CreateCommandPool,       "vkCreateCommandPool");
+    PX5_M8_P(AllocateCommandBuffers,  "vkAllocateCommandBuffers");
+    PX5_M8_P(BeginCommandBuffer,      "vkBeginCommandBuffer");
+    PX5_M8_P(EndCommandBuffer,        "vkEndCommandBuffer");
+    PX5_M8_P(CmdBindPipeline,         "vkCmdBindPipeline");
+    PX5_M8_P(CmdPushConstants,        "vkCmdPushConstants");
+    PX5_M8_P(CmdDispatch,             "vkCmdDispatch");
+    PX5_M8_P(QueueSubmit,             "vkQueueSubmit");
+    PX5_M8_P(WaitForFences,           "vkWaitForFences");
+    PX5_M8_P(CreateFence,             "vkCreateFence");
+    PX5_M8_P(DestroyFence,            "vkDestroyFence");
+    PX5_M8_P(DeviceWaitIdle,          "vkDeviceWaitIdle");
+    PX5_M8_P(DestroyCommandPool,      "vkDestroyCommandPool");
+    PX5_M8_P(CreateShaderModule,      "vkCreateShaderModule");
+    PX5_M8_P(DestroyShaderModule,     "vkDestroyShaderModule");
+    PX5_M8_P(CreateDescriptorSetLayout, "vkCreateDescriptorSetLayout");
+    PX5_M8_P(DestroyDescriptorSetLayout, "vkDestroyDescriptorSetLayout");
+    PX5_M8_P(CreatePipelineLayout,    "vkCreatePipelineLayout");
+    PX5_M8_P(DestroyPipelineLayout,   "vkDestroyPipelineLayout");
+    PX5_M8_P(CreateComputePipelines,  "vkCreateComputePipelines");
+    PX5_M8_P(DestroyPipeline,         "vkDestroyPipeline");
+    PX5_M8_P(DestroyDevice,           "vkDestroyDevice");
+#undef PX5_M8_P
+    auto GetBufferMemReqs =
+        reinterpret_cast<PFN_vkGetBufferMemoryRequirements>(
+            gdpa ? gdpa(dev, "vkGetBufferMemoryRequirements") : nullptr);
+
+    bool ok = false;
+    std::string err;
+    VkQueue queue = VK_NULL_HANDLE;
+    VkBuffer inBuf = VK_NULL_HANDLE, outBuf = VK_NULL_HANDLE;
+    VkDeviceMemory inMem = VK_NULL_HANDLE, outMem = VK_NULL_HANDLE;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    uint64_t inAddr = 0, outAddr = 0;
+    uint32_t casesPassed = 0;
+
+    if (!GetDeviceQueue || !CreateBuffer || !DestroyBuffer ||
+        !GetBufferMemReqs || !BindBufferMemory || !AllocateMemory ||
+        !FreeMemory || !MapMemory || !UnmapMemory || !GetBufferDeviceAddress ||
+        !CreateCommandPool || !AllocateCommandBuffers || !BeginCommandBuffer ||
+        !EndCommandBuffer || !CmdBindPipeline || !CmdPushConstants ||
+        !CmdDispatch || !QueueSubmit || !WaitForFences || !CreateFence ||
+        !DestroyFence || !DeviceWaitIdle || !DestroyCommandPool ||
+        !CreateShaderModule || !DestroyShaderModule ||
+        !CreateDescriptorSetLayout || !DestroyDescriptorSetLayout ||
+        !CreatePipelineLayout || !DestroyPipelineLayout ||
+        !CreateComputePipelines || !DestroyPipeline || !DestroyDevice) {
+        err = "m8: device-level fns missing";
+    } else {
+        GetDeviceQueue(dev, gfx, 0, &queue);
+        if (queue == VK_NULL_HANDLE) {
+            err = "m8: GetDeviceQueue null";
+        } else {
+            ok = true;
+        }
+    }
+
+    // Two BDA host-visible buffers: input (contract fill) + output (the
+    // dispatch target, read back per case). 64 threads * 4 dwords * 4 B.
+    constexpr VkDeviceSize kBufBytes =
+        VkDeviceSize{kThreads} * 4u * sizeof(uint32_t);
+    if (ok) {
+        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bci.size  = kBufBytes;
+        bci.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        for (int i = 0; i < 2 && ok; ++i) {
+            VkBuffer b = VK_NULL_HANDLE;
+            if (CreateBuffer(dev, &bci, nullptr, &b) != VK_SUCCESS) {
+                ok = false; err = "m8: CreateBuffer failed";
+                break;
+            }
+            VkMemoryRequirements reqs{};
+            GetBufferMemReqs(dev, b, &reqs);
+            VkPhysicalDeviceMemoryProperties mp{};
+            pfnMemProps(pd, &mp);
+            int typeIdx = -1;
+            for (uint32_t t = 0; t < mp.memoryTypeCount; ++t) {
+                if ((reqs.memoryTypeBits & (1u << t)) &&
+                    (mp.memoryTypes[t].propertyFlags &
+                     (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
+                    typeIdx = static_cast<int>(t);
+                    break;
+                }
+            }
+            if (typeIdx < 0) {
+                ok = false; err = "m8: no HOST_VISIBLE|COHERENT memory type";
+                DestroyBuffer(dev, b, nullptr);
+                break;
+            }
+            VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            mai.allocationSize  = reqs.size;
+            mai.memoryTypeIndex = static_cast<uint32_t>(typeIdx);
+            VkDeviceMemory m = VK_NULL_HANDLE;
+            if (AllocateMemory(dev, &mai, nullptr, &m) != VK_SUCCESS ||
+                BindBufferMemory(dev, b, m, 0) != VK_SUCCESS) {
+                ok = false; err = "m8: buffer memory alloc/bind failed";
+                if (m != VK_NULL_HANDLE) FreeMemory(dev, m, nullptr);
+                DestroyBuffer(dev, b, nullptr);
+                break;
+            }
+            if (i == 0) { inBuf = b; inMem = m; }
+            else        { outBuf = b; outMem = m; }
+        }
+    }
+    if (ok) {
+        VkBufferDeviceAddressInfo ai{
+            VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+        ai.buffer = inBuf;
+        inAddr = GetBufferDeviceAddress(dev, &ai);
+        ai.buffer = outBuf;
+        outAddr = GetBufferDeviceAddress(dev, &ai);
+        if (inAddr == 0u || outAddr == 0u) {
+            ok = false;
+            err = "m8: vkGetBufferDeviceAddress returned 0";
+        }
+    }
+    if (ok) {
+        void* in = nullptr;
+        if (MapMemory(dev, inMem, 0, VK_WHOLE_SIZE, 0, &in) != VK_SUCCESS) {
+            ok = false; err = "m8: map input failed";
+        } else {
+            FillInput({static_cast<uint32_t*>(in),
+                       size_t{kThreads} * 4u});
+            UnmapMemory(dev, inMem);
+        }
+    }
+    if (ok) {
+        VkCommandPoolCreateInfo pci{
+            VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        pci.queueFamilyIndex = gfx;
+        if (CreateCommandPool(dev, &pci, nullptr, &pool) != VK_SUCCESS) {
+            ok = false; err = "m8: CreateCommandPool failed";
+        } else {
+            VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            if (CreateFence(dev, &fci, nullptr, &fence) != VK_SUCCESS) {
+                ok = false; err = "m8: CreateFence failed";
+            }
+        }
+    }
+
+    // The six contract cases. Per case: recompile (real recompiler), build
+    // module + layout + pipeline, fill the output window, dispatch, fence,
+    // read back, verify against the contract bytes. Per-case teardown keeps
+    // the lifetime bookkeeping exact.
+    const auto& cases = Cases();
+    for (uint32_t ci = 0; ok && ci < cases.size(); ++ci) {
+        const auto& c = cases[ci];
+        Breadcrumb::Set("gpu.m8: case %u enter", ci);
+        std::array<uint32_t, kUserDataSize> userData{};
+        const auto inDesc = BufferDescriptor(inAddr, uint32_t{kThreads} * 4u);
+        const auto outDesc = BufferDescriptor(outAddr, uint32_t{kThreads} * 4u);
+        for (int i = 0; i < 4; ++i) {
+            userData[Gpu::DispatchProof::kInputDescriptorSlot + i] = inDesc[i];
+            userData[Gpu::DispatchProof::kOutputDescriptorSlot + i] = outDesc[i];
+        }
+        userData[kSelectorRegister] = c.selector;
+
+        Gpu::GuestShaderMeta meta{};
+        meta.stage = Gpu::GuestShaderStage::Compute;
+        meta.code = c.code;
+        meta.codeDwords = c.codeDwords;
+        meta.userData = std::span<const uint32_t>(userData.data(),
+                                                  userData.size());
+        meta.threadsX = kThreads;
+        meta.threadsY = 1u;
+        meta.threadsZ = 1u;
+        meta.wave32 = false;
+
+        std::vector<uint32_t> spirv;
+        Gpu::GuestShaderReflection reflection;
+        std::string recErr;
+        if (!Gpu::GuestShaderRecompiler::Instance().Recompile(
+                meta, spirv, reflection, recErr)) {
+            ok = false;
+            err = "m8: recompile '" + std::string(c.name) +
+                  "' refused: " + recErr;
+            break;
+        }
+
+        VkShaderModuleCreateInfo smci{
+            VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        smci.codeSize = spirv.size() * sizeof(uint32_t);
+        smci.pCode    = spirv.data();
+        VkShaderModule module = VK_NULL_HANDLE;
+        if (CreateShaderModule(dev, &smci, nullptr, &module) != VK_SUCCESS) {
+            ok = false; err = "m8: CreateShaderModule failed (case " +
+                              std::to_string(ci) + ")";
+            break;
+        }
+
+        // Descriptor-set layouts from the recompiler's own reflection (the
+        // BDA path typically reflects none — user data rides in the push
+        // block); layout + push window from the same reflection.
+        std::map<uint32_t, std::vector<VkDescriptorSetLayoutBinding>> sets;
+        for (const auto& b : reflection.bindings) {
+            VkDescriptorSetLayoutBinding lb{};
+            lb.binding = b.binding;
+            lb.descriptorType =
+                static_cast<VkDescriptorType>(b.type);
+            lb.descriptorCount = (b.count == 0u) ? 1u : b.count;
+            lb.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            lb.pImmutableSamplers = nullptr;
+            sets[b.set].push_back(lb);
+        }
+        std::vector<VkDescriptorSetLayout> setLayouts;
+        bool caseOk = true;
+        for (auto& [setId, bindings] : sets) {
+            std::sort(bindings.begin(), bindings.end(),
+                      [](const VkDescriptorSetLayoutBinding& a,
+                         const VkDescriptorSetLayoutBinding& b2) {
+                          return a.binding < b2.binding;
+                      });
+            VkDescriptorSetLayoutCreateInfo ci2{
+                VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+            ci2.bindingCount = static_cast<uint32_t>(bindings.size());
+            ci2.pBindings = bindings.data();
+            VkDescriptorSetLayout l = VK_NULL_HANDLE;
+            if (CreateDescriptorSetLayout(dev, &ci2, nullptr, &l)
+                    != VK_SUCCESS) {
+                caseOk = false;
+                err = "m8: CreateDescriptorSetLayout failed (case " +
+                      std::to_string(ci) + ")";
+                break;
+            }
+            setLayouts.push_back(l);
+        }
+
+        VkPipelineLayout layout = VK_NULL_HANDLE;
+        if (caseOk) {
+            if (reflection.pushConstantSizeBytes <
+                    kUserDataSize * sizeof(uint32_t)) {
+                caseOk = false;
+                err = "m8: recompiler push window " +
+                      std::to_string(reflection.pushConstantSizeBytes) +
+                      "B < user data " +
+                      std::to_string(kUserDataSize * sizeof(uint32_t)) +
+                      "B — the descriptor-root ABI changed";
+            } else {
+                VkPushConstantRange pc{};
+                pc.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+                pc.offset = 0u;
+                pc.size = reflection.pushConstantSizeBytes;
+                VkPipelineLayoutCreateInfo li{
+                    VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+                li.setLayoutCount =
+                    static_cast<uint32_t>(setLayouts.size());
+                li.pSetLayouts = setLayouts.data();
+                li.pushConstantRangeCount = 1u;
+                li.pPushConstantRanges = &pc;
+                if (CreatePipelineLayout(dev, &li, nullptr, &layout)
+                        != VK_SUCCESS) {
+                    caseOk = false;
+                    err = "m8: CreatePipelineLayout failed (case " +
+                          std::to_string(ci) + ")";
+                }
+            }
+        }
+
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        if (caseOk) {
+            VkPipelineShaderStageCreateInfo stage{};
+            stage.sType =
+                VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+            stage.module = module;
+            stage.pName  = "main";
+            VkComputePipelineCreateInfo pi{
+                VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+            pi.stage  = stage;
+            pi.layout = layout;
+            if (CreateComputePipelines(dev, VK_NULL_HANDLE, 1u, &pi,
+                                       nullptr, &pipeline) != VK_SUCCESS) {
+                caseOk = false;
+                err = "m8: CreateComputePipelines failed (case " +
+                      std::to_string(ci) + ")";
+            }
+        }
+
+        if (caseOk) {
+            // Contract output fill for THIS case, then dispatch.
+            void* out = nullptr;
+            if (MapMemory(dev, outMem, 0, VK_WHOLE_SIZE, 0, &out)
+                    != VK_SUCCESS) {
+                caseOk = false; err = "m8: map output failed (case " +
+                                      std::to_string(ci) + ")";
+            } else {
+                FillOutput({static_cast<uint32_t*>(out),
+                            size_t{kThreads} * 4u});
+                UnmapMemory(dev, outMem);
+            }
+        }
+        if (caseOk) {
+            VkCommandBufferAllocateInfo cai{
+                VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            cai.commandPool        = pool;
+            cai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cai.commandBufferCount = 1;
+            VkCommandBuffer cb = VK_NULL_HANDLE;
+            if (AllocateCommandBuffers(dev, &cai, &cb) != VK_SUCCESS) {
+                caseOk = false; err = "m8: AllocateCommandBuffers failed";
+            } else {
+                VkCommandBufferBeginInfo bi{
+                    VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                if (BeginCommandBuffer(cb, &bi) != VK_SUCCESS) {
+                    caseOk = false; err = "m8: Begin failed (case " +
+                                          std::to_string(ci) + ")";
+                } else {
+                    CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                    pipeline);
+                    CmdPushConstants(cb, layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                                     0u,
+                                     kUserDataSize * sizeof(uint32_t),
+                                     userData.data());
+                    CmdDispatch(cb, 1u, 1u, 1u);
+                    EndCommandBuffer(cb);
+                    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                    si.commandBufferCount = 1;
+                    si.pCommandBuffers    = &cb;
+                    if (QueueSubmit(queue, 1, &si, fence) != VK_SUCCESS) {
+                        caseOk = false;
+                        err = "m8: QueueSubmit failed (case " +
+                              std::to_string(ci) + ")";
+                    } else if (WaitForFences(dev, 1, &fence, VK_TRUE,
+                                             3000000000ull) != VK_SUCCESS) {
+                        caseOk = false;
+                        err = "m8: fence timeout (3 s, case " +
+                              std::to_string(ci) + ")";
+                    }
+                }
+            }
+        }
+        if (caseOk) {
+            // Readback + contract verification: map BOTH windows so the
+            // verify sees the exact bytes the shader read. A mismatch names
+            // the first differing thread (the contract's message verbatim).
+            void* in = nullptr;
+            void* out = nullptr;
+            const bool mapped =
+                MapMemory(dev, inMem, 0, VK_WHOLE_SIZE, 0, &in) == VK_SUCCESS &&
+                MapMemory(dev, outMem, 0, VK_WHOLE_SIZE, 0, &out) == VK_SUCCESS;
+            if (!mapped) {
+                caseOk = false;
+                err = "m8: map readback windows failed (case " +
+                      std::to_string(ci) + ")";
+            } else {
+                const std::string verdict = VerifyOutput(
+                    {static_cast<const uint32_t*>(in),
+                     size_t{kThreads} * 4u},
+                    {static_cast<const uint32_t*>(out),
+                     size_t{kThreads} * 4u},
+                    c);
+                UnmapMemory(dev, outMem);
+                UnmapMemory(dev, inMem);
+                if (!verdict.empty()) {
+                    caseOk = false;
+                    err = "m8: " + verdict;
+                }
+            }
+        }
+        if (pipeline != VK_NULL_HANDLE) DestroyPipeline(dev, pipeline, nullptr);
+        if (layout != VK_NULL_HANDLE) DestroyPipelineLayout(dev, layout, nullptr);
+        for (VkDescriptorSetLayout l : setLayouts)
+            if (l != VK_NULL_HANDLE) DestroyDescriptorSetLayout(dev, l, nullptr);
+        if (module != VK_NULL_HANDLE) DestroyShaderModule(dev, module, nullptr);
+        if (caseOk) {
+            ++casesPassed;
+        } else {
+            // First failing case stops the proof with ITS named verdict —
+            // continuing would overwrite the message that names the thread.
+            break;
+        }
+    }
+    if (ok && casesPassed == cases.size()) {
+        err = "cases=6/6 (branch-past-endpgm contract matched on all 64 "
+              "threads)";
+    } else if (ok) {
+        ok = false;
+        err = "m8: only " + std::to_string(casesPassed) + "/6 cases passed";
+    }
+
+    if (fence != VK_NULL_HANDLE) DestroyFence(dev, fence, nullptr);
+    if (pool != VK_NULL_HANDLE) DestroyCommandPool(dev, pool, nullptr);
+    if (inMem != VK_NULL_HANDLE) FreeMemory(dev, inMem, nullptr);
+    if (outMem != VK_NULL_HANDLE) FreeMemory(dev, outMem, nullptr);
+    if (inBuf != VK_NULL_HANDLE) DestroyBuffer(dev, inBuf, nullptr);
+    if (outBuf != VK_NULL_HANDLE) DestroyBuffer(dev, outBuf, nullptr);
+    if (DestroyDevice) DestroyDevice(dev, nullptr);
+    auto pfnDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(
+        gipa(inst, "vkDestroyInstance"));
+    if (pfnDestroyInstance) pfnDestroyInstance(inst, nullptr);
+    Breadcrumb::Set("gpu.m8: done ok=%d", ok ? 1 : 0);
+
+    char head[512];
+    snprintf(head, sizeof(head),
+             "m8 dispatch proof on '%s' drv=%s api=%s vendor=0x%x dev=0x%x "
+             "in=0x%llx out=0x%llx: ",
+             props.deviceName, VkVersion(props.driverVersion).c_str(),
+             VkVersion(props.apiVersion).c_str(), props.vendorID,
+             props.deviceID, static_cast<unsigned long long>(inAddr),
+             static_cast<unsigned long long>(outAddr));
+    detailOut = std::string(head) + (ok ? "PASS — " : "FAIL — ") + err +
+                " | " + Gpu::GuestShaderRecompiler::Instance().Stats().SummaryString();
+    PX5_LOGI(LogCategory::GPU, "M8 dispatch proof: %s", detailOut.c_str());
     return ok;
 }
 

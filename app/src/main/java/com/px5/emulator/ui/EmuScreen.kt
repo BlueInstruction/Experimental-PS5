@@ -103,6 +103,7 @@ fun EmuScreen(
     var fpsText by remember { mutableStateOf("") }
     var frametimeText by remember { mutableStateOf("") }
     var gpuProof by remember { mutableStateOf<String?>(null) }
+    var m8DispatchProof by remember { mutableStateOf<String?>(null) }
     var gnmSelfTest by remember { mutableStateOf<String?>(null) }
     var loaderSelfTest by remember { mutableStateOf<String?>(null) }
     var inputSummary by remember { mutableStateOf("input: -") }
@@ -330,6 +331,15 @@ fun EmuScreen(
             }
             com.px5.emulator.core.PX5EventLog.event("gameBoot", "gpu_proof",
                     "result=${gpuProof?.take(120)}")
+            // M8 dispatch proof: recompiled RDNA contract -> SPIR-V -> real
+            // dispatch -> byte-exact readback (the first guest shader code
+            // that has ever executed on the GPU stack).
+            setStage(0.30f, "Testing shader recompiler dispatch")
+            m8DispatchProof = withContext(Dispatchers.Default) {
+                try { wrapper.nativeRunM8DispatchProof() } catch (t: Throwable) { "FAIL | ${t.message}" }
+            }
+            com.px5.emulator.core.PX5EventLog.event("gameBoot", "m8_dispatch_proof",
+                    "result=${m8DispatchProof?.take(160)}")
             setStage(0.34f, "Testing GNM decoder")
             gnmSelfTest = withContext(Dispatchers.Default) {
                 try { wrapper.nativeRunGnmSelfTest() } catch (t: Throwable) { "FAIL | ${t.message}" }
