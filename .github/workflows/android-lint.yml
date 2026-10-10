@@ -49,7 +49,7 @@ jobs:
           packages: 'platforms;android-35'
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
         with:
           # Same-repo pull_request events default to a read-only cache, which
           # produced permanent "cache is read-only / 400" annotations; there
