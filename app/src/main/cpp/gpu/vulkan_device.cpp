@@ -884,7 +884,10 @@ bool VulkanGpuDevice::RunSelfContainedProof(std::string& detailOut) {
     if (pfnDestroyInstance) pfnDestroyInstance(inst, nullptr);
     Breadcrumb::Set("gpu.proof: done ok=%d", ok ? 1 : 0);
 
-    char head[192];
+    // 512 covers the Vulkan limits (device name 256 + driver/api strings) —
+    // a 192-byte head truncated the measured set on long device names
+    // (cubic P2, v1.56 review).
+    char head[512];
     snprintf(head, sizeof(head),
              "self-contained proof on '%s' drv=%s vendor=0x%x dev=0x%x: ",
              props.deviceName, VkVersion(props.driverVersion).c_str(),
@@ -1424,7 +1427,9 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
     if (pfnDestroyInstance) pfnDestroyInstance(inst, nullptr);
     Breadcrumb::Set("gpu.m7: done ok=%d", ok ? 1 : 0);
 
-    char head[320];
+    // Same limit as the M6 head above — 320 truncated the measured set on
+    // maximum-length device names (cubic P2, v1.56 review).
+    char head[512];
     snprintf(head, sizeof(head),
              "self-contained M7 readback (synthetic IR: proves the BACKEND, "
              "not the decoder) on '%s' drv=%s api=%s "

@@ -827,8 +827,14 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
     // reports honestly instead of silently corrupting adjacent mappings.
     const size_t callretSize =
         FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;  // 0x400000
-    const size_t callretAllocSize =
-        callretSize + 2 * FEXCore::Utils::FEX_PAGE_SIZE;
+    // Guards are HOST pages: FEX_PAGE_SIZE is a hardcoded 4096, and on a
+    // 16 KiB-page host alloc+4096 is misaligned — mprotect returns EINVAL,
+    // the RW middle stays PROT_NONE and the first guest CALL faults
+    // (cubic P1, v1.57 review). FEXCore only ever sees CallRetStackBase,
+    // so the guard width is ours to choose; sysconf is the only value the
+    // kernel agrees with (same rule as memory/page_size.h).
+    const size_t callretGuard = kPageSizeNow();
+    const size_t callretAllocSize = callretSize + 2 * callretGuard;
     void* callretAlloc = mmap(nullptr, callretAllocSize, PROT_NONE,
                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (callretAlloc == MAP_FAILED) {
@@ -839,8 +845,15 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
         return res;
     }
     auto* callretBase =
-        static_cast<uint8_t*>(callretAlloc) + FEXCore::Utils::FEX_PAGE_SIZE;
-    mprotect(callretBase, callretSize, PROT_READ | PROT_WRITE);
+        static_cast<uint8_t*>(callretAlloc) + callretGuard;
+    if (mprotect(callretBase, callretSize, PROT_READ | PROT_WRITE) != 0) {
+        res.error = "callret shadow stack mprotect failed";
+        PX5_LOGE(LogCategory::FEX, "%s (errno=%d %s)", res.error.c_str(),
+                 errno, strerror(errno));
+        munmap(callretAlloc, callretAllocSize);
+        g_context->DestroyThread(thread);
+        return res;
+    }
     thread->CallRetStackBase = callretBase;
     thread->CurrentFrame->State.callret_sp =
         reinterpret_cast<uint64_t>(callretBase) + callretSize / 4;
