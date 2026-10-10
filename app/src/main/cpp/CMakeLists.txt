@@ -89,6 +89,10 @@ if(ANDROID_ABI STREQUAL "x86_64")
     find_library(android-lib android)
     target_include_directories(px5 PRIVATE ${CMAKE_CURRENT_LIST_DIR})
     target_compile_features(px5 PRIVATE cxx_std_20)
+    # Marks the ABI inside the TUs it shares with the engine: engine-only
+    # entry points (the M8 dispatch proof needs the vendored recompiler)
+    # compile down to named refusals instead of undefined symbols.
+    target_compile_definitions(px5 PRIVATE PX5_UI_SMOKE_STUB=1)
     # z: SELF extractor inflate/deflate (NDK ships libz).
     target_link_libraries(px5 ${log-lib} ${android-lib} z)
     return()

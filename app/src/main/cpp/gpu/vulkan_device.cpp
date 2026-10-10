@@ -2411,6 +2411,13 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
 // not evidence; matched threads are.
 // ---------------------------------------------------------------------------
 bool VulkanGpuDevice::RunM8ComputeReadbackProof(std::string& detailOut) {
+#ifdef PX5_UI_SMOKE_STUB
+    // The UI-smoke ABI compiles no vendored recompiler and no engine — the
+    // proof would be undefined-symbol soup. Named refusal, honest and loud.
+    detailOut = "m8 dispatch proof: unavailable on the UI-smoke ABI "
+                "(no vendored recompiler, no engine)";
+    return false;
+#else
     using Gpu::DispatchProof::BufferDescriptor;
     using Gpu::DispatchProof::Cases;
     using Gpu::DispatchProof::FillInput;
@@ -2943,6 +2950,7 @@ bool VulkanGpuDevice::RunM8ComputeReadbackProof(std::string& detailOut) {
                 " | " + Gpu::GuestShaderRecompiler::Instance().Stats().SummaryString();
     PX5_LOGI(LogCategory::GPU, "M8 dispatch proof: %s", detailOut.c_str());
     return ok;
+#endif  // PX5_UI_SMOKE_STUB
 }
 
 // ---------------------------------------------------------------------------
