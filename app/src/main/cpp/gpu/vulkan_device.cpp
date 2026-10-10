@@ -33,6 +33,39 @@ std::string VkVersion(uint32_t v) {
     return b;
 }
 
+// v1.59 — name the DRIVER BEHIND an enumerated physical device, not just
+// its device properties. VkPhysicalDeviceDriverProperties (core 1.2)
+// reports driverID/driverName/driverInfo from the implementation itself:
+// this is the identity link the v1.58 device session called out —
+// "driverVerified=yes" proves the slot library preloaded, and a Turnip
+// version string is plausible inference, but driverID=
+// VK_DRIVER_ID_MESA_TURNIP binds the ENUMERATED device to the loaded
+// library (the system Qualcomm blob never reports a Mesa driverID).
+// Missing entrypoint or driverID=0 (pre-1.2 impls) -> honest
+// "unavailable", never a guess.
+std::string VkDriverIdentityString(VkPhysicalDevice phys,
+                                   PFN_vkGetInstanceProcAddr gipa) {
+    if (!phys || !gipa) return "driverProps=unavailable(no-phys/gipa)";
+    auto pfnProps2 =
+        reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
+            gipa(VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties2"));
+    if (!pfnProps2) return "driverProps=unavailable(no-props2-entrypoint)";
+    VkPhysicalDeviceDriverProperties dp{};
+    dp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
+    VkPhysicalDeviceProperties2 p2{};
+    p2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    p2.pNext = &dp;
+    pfnProps2(phys, &p2);
+    if (dp.driverID == 0) return "driverProps=unavailable(driverID=0)";
+    const VkConformanceVersion& cv = dp.conformanceVersion;
+    return "driverID=" + std::to_string(static_cast<int>(dp.driverID)) +
+           " driverName=" + (dp.driverName[0] ? dp.driverName : "?") +
+           " driverInfo=" + (dp.driverInfo[0] ? dp.driverInfo : "?") +
+           " conformance=" + std::to_string(cv.major) + "." +
+           std::to_string(cv.minor) + "." + std::to_string(cv.subminor) +
+           "." + std::to_string(cv.patch);
+}
+
 // Memory-type selection honouring EngineSettings::vramUsageMode. Runs on the
 // caller's thread against freshly-queried device properties; every branch
 // picks a type that satisfies reqs, so this can never return an invalid
@@ -181,13 +214,17 @@ bool VulkanGpuDevice::Initialize() {
     m_caps.driverVersionStr = VkVersion(props.driverVersion);
     m_caps.initialized      = true;
     m_physDev               = devs[0];
+    // v1.59 — bind the enumerated device to its actual implementation
+    // (driverID/driverName) so every session log proves WHICH driver the
+    // instance bound — slot run = MESA_TURNIP, system blob = not-Mesa.
+    m_caps.driverIdentity   = VkDriverIdentityString(devs[0], vkGIPA);
 
     PX5_LOGI(LogCategory::GPU,
              "Vulkan REAL init OK: %s | API %s | driver %s | vendor=0x%x "
-             "dev=0x%x (%u GPUs)",
+             "dev=0x%x (%u GPUs) | %s",
              m_caps.deviceName.c_str(), m_caps.apiVersionStr.c_str(),
              m_caps.driverVersionStr.c_str(), m_caps.vendorId,
-             m_caps.deviceId, count);
+             m_caps.deviceId, count, m_caps.driverIdentity.c_str());
     return true;
 }
 
@@ -247,7 +284,12 @@ std::string VulkanGpuDevice::GetSummaryString() const {
              m_caps.deviceName.c_str(), m_caps.apiVersionStr.c_str(),
              m_caps.driverVersionStr.c_str(), m_caps.physicalDevices,
              m_caps.vendorId);
-    return buf;
+    // Identity appended outside the fixed buffer: driverName/driverInfo
+    // are 256-byte fields, the summary must never truncate them.
+    return std::string(buf) +
+           (m_caps.driverIdentity.empty()
+                ? std::string("")
+                : " | " + m_caps.driverIdentity);
 }
 
 // ---------------------------------------------------------------------------
@@ -1437,7 +1479,8 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
              props.deviceName, VkVersion(props.driverVersion).c_str(),
              VkVersion(props.apiVersion).c_str(), props.vendorID,
              props.deviceID);
-    detailOut = std::string(head) + (ok ? "PASS — " : "FAIL — ") + err;
+    detailOut = std::string(head) + (ok ? "PASS — " : "FAIL — ") + err +
+                " | " + VkDriverIdentityString(pd, gipa);
     if (ok && m7Sha[0] != '\0') {
         detailOut += " | sha256=";
         detailOut += m7Sha;

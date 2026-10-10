@@ -24,6 +24,7 @@ struct GpuCapabilities {
     uint32_t    deviceId          = 0;      ///< Vulkan device ID
     uint32_t    vendorId          = 0;      ///< Vulkan vendor ID
     uint32_t    physicalDevices   = 0;      ///< Number of physical devices enumerated
+    std::string driverIdentity;             ///< VkPhysicalDeviceDriverProperties binding (driverID/driverName/Info) — the proof the enumerated device came from the loaded driver slot
     std::string lastError;                  ///< Non-empty => failure detail
 };
 
