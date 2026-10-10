@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
 
 namespace PX5::Gpu {
 
@@ -22,6 +23,51 @@ using ShaderRecompiler::ShaderStage;
 // this class the unqualified name resolves to the member function.
 
 constexpr size_t kMaxCacheEntries = 256;
+
+// Vendored DescriptorKind -> STABLE PUBLIC VkDescriptorType numeric value
+// (M8 T5). The numbers are fixed by the Vulkan specification's
+// VkDescriptorType enum; the host gate locks them without Vulkan headers.
+uint32_t DescriptorTypeValue(const ShaderRecompiler::DescriptorKind kind) {
+    switch (kind) {
+    case ShaderRecompiler::DescriptorKind::Sampler:            return 0u;   // SAMPLER
+    case ShaderRecompiler::DescriptorKind::SampledImage:       return 2u;   // SAMPLED_IMAGE
+    case ShaderRecompiler::DescriptorKind::StorageImage:       return 3u;   // STORAGE_IMAGE
+    case ShaderRecompiler::DescriptorKind::UniformTexelBuffer: return 5u;   // UNIFORM_TEXEL_BUFFER
+    case ShaderRecompiler::DescriptorKind::StorageTexelBuffer: return 6u;   // STORAGE_TEXEL_BUFFER
+    case ShaderRecompiler::DescriptorKind::StorageBuffer:      return 7u;   // STORAGE_BUFFER
+    case ShaderRecompiler::DescriptorKind::UniformBuffer:
+    default:                                                    return 4u;   // UNIFORM_BUFFER
+    }
+}
+
+// Vendored DescriptorRole -> stable role id for diagnostics (order of the
+// vendored enum: GuestBuffers, GuestImages, GuestSamplers, Gds,
+// BdaPagetable, FaultBuffer, FlattenedSrt, ShaderData).
+uint32_t DescriptorRoleId(const ShaderRecompiler::DescriptorRole role) {
+    return static_cast<uint32_t>(role);
+}
+
+// Vendored reflection -> app-owned GuestShaderReflection (M8 T5). Runs
+// inside the ONLY TU that sees the vendored types — the layer contract
+// (docs/gpu.md chain) stays intact.
+GuestShaderReflection TranslateReflection(
+    const ShaderRecompiler::RecompileResult& result,
+    const ShaderRecompiler::BindingLayout& layout) {
+    GuestShaderReflection out;
+    out.pushConstantSizeBytes = layout.pushConstantSizeBytes;
+    out.bindings.reserve(result.bindings.size());
+    for (const ShaderRecompiler::DescriptorBinding& b : result.bindings) {
+        GuestShaderBinding out2;
+        out2.type = DescriptorTypeValue(b.kind);
+        out2.set = b.descriptorSet;
+        out2.binding = b.binding;
+        out2.count = b.count;
+        out2.readOnly = b.readOnly;
+        out2.role = DescriptorRoleId(b.role);
+        out.bindings.push_back(out2);
+    }
+    return out;
+}
 
 ShaderStage ToRecompilerStage(GuestShaderStage stage) {
     switch (stage) {
@@ -105,7 +151,11 @@ std::string GuestShaderStats::SummaryString() const {
 
 struct GuestShaderRecompiler::Impl {
     std::mutex mutex;
-    std::unordered_map<uint64_t, std::vector<uint32_t>> cache;
+    struct CacheEntry {
+        std::vector<uint32_t> words;
+        GuestShaderReflection reflection;
+    };
+    std::unordered_map<uint64_t, CacheEntry> cache;
     GuestShaderStats stats;
 };
 
@@ -131,7 +181,16 @@ void GuestShaderRecompiler::ClearCache() {
 bool GuestShaderRecompiler::Recompile(const GuestShaderMeta& meta,
                                       std::vector<uint32_t>& spirv,
                                       std::string& error) {
+    GuestShaderReflection unusedReflection;
+    return Recompile(meta, spirv, unusedReflection, error);
+}
+
+bool GuestShaderRecompiler::Recompile(const GuestShaderMeta& meta,
+                                      std::vector<uint32_t>& spirv,
+                                      GuestShaderReflection& reflection,
+                                      std::string& error) {
     spirv.clear();
+    reflection = GuestShaderReflection{};
     error.clear();
 
     if (meta.code == nullptr || meta.codeDwords == 0) {
@@ -147,7 +206,8 @@ bool GuestShaderRecompiler::Recompile(const GuestShaderMeta& meta,
         auto it = impl_->cache.find(key);
         if (it != impl_->cache.end()) {
             ++impl_->stats.cacheHits;
-            spirv = it->second;
+            spirv = it->second.words;
+            reflection = it->second.reflection;
             return true;
         }
     }
@@ -208,15 +268,23 @@ bool GuestShaderRecompiler::Recompile(const GuestShaderMeta& meta,
     try {
         const ShaderRecompiler::RecompileResult result = ShaderRecompiler::Recompile(request);
         std::vector<uint32_t> words = result.spirv.Words();
+        // Reflection translation runs inside this TU (layer contract) and
+        // travels with the module through the cache (M8 T5).
+        GuestShaderReflection translated =
+            TranslateReflection(result, request.layout);
         std::lock_guard<std::mutex> lock(impl_->mutex);
         ++impl_->stats.recompiles;
         if (impl_->cache.size() >= kMaxCacheEntries) {
             impl_->cache.clear();
             ++impl_->stats.cacheEvictions;
         }
-        impl_->cache.emplace(key, words);
+        Impl::CacheEntry entry;
+        entry.words = words;
+        entry.reflection = translated;
+        impl_->cache.emplace(key, std::move(entry));
         impl_->stats.cachedEntries = impl_->cache.size();
         spirv = std::move(words);
+        reflection = std::move(translated);
         return true;
     } catch (const std::exception& e) {
         std::lock_guard<std::mutex> lock(impl_->mutex);

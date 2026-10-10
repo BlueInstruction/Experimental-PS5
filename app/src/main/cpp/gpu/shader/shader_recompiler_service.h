@@ -37,6 +37,38 @@ enum class GuestShaderStage : uint32_t {
     Fragment,
 };
 
+// One reflected resource the recompiled SPIR-V expects, app-owned form
+// (M8 T5). The vendored reflection types never leave the service TU; this
+// struct is the app-side vocabulary the Vulkan device layer builds
+// VkDescriptorSetLayout objects from.
+//
+// `type` carries the STABLE PUBLIC Vulkan VkDescriptorType numeric value,
+// mapped inside the service TU from the recompiler's descriptor kind:
+//   Sampler=0, CombinedImageSampler=1, SampledImage=2, StorageImage=3,
+//   UniformTexelBuffer=5, StorageTexelBuffer=6, StorageBuffer=7,
+//   UniformBuffer=4.
+// These are fixed by the Vulkan specification's VkDescriptorType enum, so
+// the host gate can lock them without Vulkan headers.
+struct GuestShaderBinding {
+    uint32_t type = 0;       // VkDescriptorType value (see table above)
+    uint32_t set = 0;        // descriptor set index
+    uint32_t binding = 0;    // binding slot inside the set
+    uint32_t count = 0;      // descriptor count (arrays > 1 supported)
+    bool readOnly = false;   // storage resources not written by the shader
+    uint32_t role = 0;       // recompiler role id (diagnostics; GuestBuffers
+                             // = 0, GuestImages = 1, GuestSamplers = 2, ...)
+};
+
+// Reflection side-product of a successful recompile (M8 T5). A shader that
+// reads no resources produces an empty bindings list — that is real
+// reflection, not absence of information.
+struct GuestShaderReflection {
+    std::vector<GuestShaderBinding> bindings;
+    // Push-constant window the recompile was built with (bytes). The SPIR-V
+    // declares this block; the pipeline layout must match it exactly.
+    uint32_t pushConstantSizeBytes = 0;
+};
+
 struct GuestShaderMeta {
     GuestShaderStage stage = GuestShaderStage::Compute;
     // RDNA machine code (dwords). Must stay valid for the call.
@@ -79,6 +111,12 @@ public:
     // (stage, wave size, threads, code) requests are served from cache.
     bool Recompile(const GuestShaderMeta& meta, std::vector<uint32_t>& spirv,
                    std::string& error);
+
+    // M8 T5 overload: also fills `reflection` on success (undefined on
+    // failure). Same cache: an identical request hits without a recompile
+    // and returns the stored reflection verbatim.
+    bool Recompile(const GuestShaderMeta& meta, std::vector<uint32_t>& spirv,
+                   GuestShaderReflection& reflection, std::string& error);
 
     GuestShaderStats Stats() const;
 

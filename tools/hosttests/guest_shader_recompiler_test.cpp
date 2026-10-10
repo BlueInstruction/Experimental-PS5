@@ -184,6 +184,95 @@ int main() {
                 "stats summary must carry failure accounting");
 
         std::printf("M8 T3: guest shader service gates passed\n");
+
+        // ---- M8 T5: reflection side-product locked on host --------------
+        // The Vulkan VkDescriptorType numeric values are stable public ABI,
+        // so the host asserts them without Vulkan headers. The compute
+        // fixture reads two BDA buffers -> storage-buffer bindings; the
+        // vertex/fragment fixtures read no resources -> empty bindings is
+        // the real reflection, not absence of information.
+        using PX5::Gpu::GuestShaderReflection;
+        service.ClearCache();
+        {
+            alignas(256) static std::array<uint32_t, 64> buffers5{};
+            const uintptr_t bufferAddr5 = reinterpret_cast<uintptr_t>(buffers5.data());
+            const std::array<uint32_t, 9> userData5{
+                static_cast<uint32_t>(bufferAddr5),
+                static_cast<uint32_t>((bufferAddr5 >> 32u) & 0xffffu) | (4u << 16u),
+                64u, 0x01016facu,
+                static_cast<uint32_t>(bufferAddr5),
+                static_cast<uint32_t>((bufferAddr5 >> 32u) & 0xffffu) | (4u << 16u),
+                64u, 0x01016facu,
+                1u,
+            };
+            meta.stage = GuestShaderStage::Compute;
+            meta.code = ComputeCode.data();
+            meta.codeDwords = static_cast<uint32_t>(ComputeCode.size());
+            meta.userData = userData5;
+            meta.threadsX = 64u;
+
+            std::vector<uint32_t> spirv5;
+            GuestShaderReflection refl;
+            Require(service.Recompile(meta, spirv5, refl, error),
+                    "T5 compute recompile failed: " + error);
+            Require(spirv5[0] == 0x07230203u, "T5: compute module magic");
+            Require(refl.pushConstantSizeBytes == 128u,
+                    "T5: push-constant window must be the recompile's 128 bytes");
+            // The fixture consumes buffer descriptors: storage-buffer type
+            // value 7 (VK_DESCRIPTOR_TYPE_STORAGE_BUFFER), set 0 (the
+            // request layout), counts >= 1.
+            Require(!refl.bindings.empty(),
+                    "T5: compute fixture must reflect its buffer bindings");
+            for (const auto& b : refl.bindings) {
+                switch (b.type) {
+                    case 0u: case 1u: case 2u: case 3u: case 4u:
+                    case 5u: case 6u: case 7u: break;
+                    default:
+                        Require(false, "T5: descriptor type value outside the "
+                                       "Vulkan VkDescriptorType range");
+                }
+                Require(b.count >= 1u, "T5: binding count must be >= 1");
+                Require(b.set == 0u, "T5: request layout pins descriptor set 0");
+            }
+            const bool hasStorage = [ &refl ] {
+                for (const auto& b : refl.bindings)
+                    if (b.type == 7u) return true;
+                return false;
+            }();
+            Require(hasStorage,
+                    "T5: compute fixture's buffer reads must reflect as "
+                    "storage buffers (type 7)");
+
+            // Cache path: the 4-arg recompile on an identical request must
+            // return the SAME reflection verbatim without a recompile.
+            const uint64_t recompiles5 = service.Stats().recompiles;
+            const uint64_t hits5 = service.Stats().cacheHits;
+            std::vector<uint32_t> spirv6;
+            GuestShaderReflection refl2;
+            Require(service.Recompile(meta, spirv6, refl2, error),
+                    "T5 cached recompile failed: " + error);
+            Require(service.Stats().recompiles == recompiles5,
+                    "T5: cached request recompiled");
+            Require(service.Stats().cacheHits == hits5 + 1u,
+                    "T5: cached request did not count a hit");
+            Require(refl2.pushConstantSizeBytes == refl.pushConstantSizeBytes &&
+                        refl2.bindings.size() == refl.bindings.size(),
+                    "T5: cached reflection must travel with the module");
+
+            // Graphics fixtures: no resource reads -> empty bindings.
+            meta.stage = GuestShaderStage::Vertex;
+            meta.code = VertexCode.data();
+            meta.codeDwords = static_cast<uint32_t>(VertexCode.size());
+            meta.userData = {};
+            std::vector<uint32_t> spirv7;
+            GuestShaderReflection reflVs;
+            Require(service.Recompile(meta, spirv7, reflVs, error),
+                    "T5 vertex recompile failed: " + error);
+            Require(reflVs.bindings.empty(),
+                    "T5: vertex fixture reads no resources");
+        }
+
+        std::printf("M8 T5: reflection gates passed\n");
         return 0;
     } catch (const std::exception& e) {
         std::printf("M8 T3 FAILED: %s\n", e.what());

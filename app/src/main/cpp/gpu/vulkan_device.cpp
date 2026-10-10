@@ -7,6 +7,7 @@
 #include "vulkan_device.h"
 #include "driver_manager.h"
 #include "vulkan_backend.h"
+#include "gpu/shader/shader_recompiler_service.h"
 #include "../core/settings.h"
 #include "../utils/logger.h"
 #include "../utils/breadcrumbs.h"
@@ -15,6 +16,7 @@
 #include <dlfcn.h>
 #include <cstring>
 #include <cstdio>
+#include <map>
 #include <vector>
 #include <algorithm>
 
@@ -239,6 +241,9 @@ void VulkanGpuDevice::Shutdown() {
     std::lock_guard<std::mutex> gpuLock(m_gpuMutex);
     DestroySwapchainLocked();
 
+    // M8 T5: free recompiled-shader objects BEFORE the device goes away.
+    DestroyShaderObjectsLocked();
+
     if (m_window) {
         ANativeWindow_release(m_window);
         m_window = nullptr;
@@ -359,6 +364,17 @@ bool VulkanGpuDevice::BuildDeviceTable(VkDevice dev) {
     PX5_DEV_FN(QueueWaitIdle,          "vkQueueWaitIdle");
     PX5_DEV_FN(WaitForFences,          "vkWaitForFences");
     PX5_DEV_FN(ResetFences,            "vkResetFences");
+    // M8 T5 — guest shader objects. Core 1.0, always resolvable on a
+    // functional device; hard-require them so a driver that cannot host
+    // recompiled shaders is caught HERE, not at first use.
+    PX5_DEV_FN(CreateShaderModule,         "vkCreateShaderModule");
+    PX5_DEV_FN(DestroyShaderModule,        "vkDestroyShaderModule");
+    PX5_DEV_FN(CreateDescriptorSetLayout,  "vkCreateDescriptorSetLayout");
+    PX5_DEV_FN(DestroyDescriptorSetLayout, "vkDestroyDescriptorSetLayout");
+    PX5_DEV_FN(CreatePipelineLayout,       "vkCreatePipelineLayout");
+    PX5_DEV_FN(DestroyPipelineLayout,      "vkDestroyPipelineLayout");
+    PX5_DEV_FN(CreateComputePipelines,     "vkCreateComputePipelines");
+    PX5_DEV_FN(DestroyPipeline,            "vkDestroyPipeline");
 
 #undef PX5_DEV_FN
 
@@ -396,6 +412,367 @@ bool VulkanGpuDevice::BuildDeviceTable(VkDevice dev) {
         }
     }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// M8 T5 — guest shader objects (recompiled SPIR-V -> real Vulkan objects).
+// Honest scope: this materializes VkShaderModule / descriptor-set layouts /
+// pipeline layout / compute pipeline from the T3 service's outputs. It does
+// NOT claim draws or dispatches work end to end — descriptor SETS and
+// command recording for them are the next milestone steps. Object failure
+// is named + counted, never guessed; caches are bounded drop-all (the same
+// policy the recompiler service uses).
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr uint32_t kSpirvMagic = 0x07230203u;
+
+// Pre-driver structural sanity (the same walk the host gates use): magic,
+// version >= 1.0, non-zero bound, instruction stream consistent. Catches
+// garbage BEFORE vkCreateShaderModule; the driver's own validation stays
+// the authority beyond that.
+bool SpirvWordsSane(const uint32_t* words, size_t wordCount,
+                    std::string& err) {
+    if (wordCount < 5) {
+        err = "spirv words shorter than the fixed header";
+        return false;
+    }
+    if (words[0] != kSpirvMagic) {
+        err = "spirv magic mismatch";
+        return false;
+    }
+    if (words[1] < 0x00010000u) {
+        err = "spirv version below 1.0";
+        return false;
+    }
+    if (words[3] == 0u) {
+        err = "spirv bound is zero";
+        return false;
+    }
+    size_t offset = 5u;
+    while (offset < wordCount) {
+        const uint32_t wordCount2 = words[offset] >> 16u;
+        if (wordCount2 == 0u) {
+            err = "spirv instruction stream has zero word count";
+            return false;
+        }
+        offset += wordCount2;
+    }
+    if (offset != wordCount) {
+        err = "spirv instruction stream overruns the word count";
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+uint64_t VulkanGpuDevice::HashWords(const uint32_t* words,
+                                    size_t wordCount) const {
+    uint64_t h = 1469598103934665603ull;
+    const auto mix = [&h](uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+    };
+    mix(static_cast<uint64_t>(wordCount));
+    for (size_t i = 0; i < wordCount; ++i) mix(words[i]);
+    return h;
+}
+
+uint64_t VulkanGpuDevice::HashReflection(
+    const std::vector<uint32_t>& spirvWords,
+    const PX5::Gpu::GuestShaderReflection& reflection,
+    uint32_t vulkanStageFlags) const {
+    uint64_t h = HashWords(spirvWords.data(), spirvWords.size());
+    const auto mix = [&h](uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+    };
+    mix(vulkanStageFlags);
+    mix(reflection.pushConstantSizeBytes);
+    mix(reflection.bindings.size());
+    for (const auto& b : reflection.bindings) {
+        mix((static_cast<uint64_t>(b.type) << 32) | b.set);
+        mix((static_cast<uint64_t>(b.binding) << 32) | b.count);
+        mix(b.readOnly ? 1u : 0u);
+    }
+    return h;
+}
+
+// Caller must hold m_gpuMutex. Public wrappers lock; this core must never
+// re-lock (std::mutex is not recursive — the pipeline path calls this
+// directly for its module).
+bool VulkanGpuDevice::CreateShaderModuleLocked(const uint32_t* words,
+                                               size_t wordCount,
+                                               VkShaderModule* outModule,
+                                               std::string& err) {
+    err.clear();
+    if (outModule) *outModule = VK_NULL_HANDLE;
+    if (!SpirvWordsSane(words, wordCount, err)) {
+        ++m_shaderObjStats.failures;
+        return false;
+    }
+    if (!EnsureLogicalDeviceUnlocked()) {
+        err = "shader module: logical device unavailable";
+        ++m_shaderObjStats.failures;
+        return false;
+    }
+    if (!m_tbl.CreateShaderModule || !m_tbl.DestroyShaderModule) {
+        err = "shader module: device table incomplete";
+        ++m_shaderObjStats.failures;
+        return false;
+    }
+
+    const uint64_t key = HashWords(words, wordCount);
+    {
+        auto it = m_moduleCache.find(key);
+        if (it != m_moduleCache.end()) {
+            ++m_shaderObjStats.moduleHits;
+            if (outModule) *outModule = it->second;
+            return true;
+        }
+    }
+
+    VkShaderModuleCreateInfo ci{};
+    ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    ci.codeSize = wordCount * sizeof(uint32_t);
+    ci.pCode = words;
+    VkShaderModule module = VK_NULL_HANDLE;
+    const VkResult r = m_tbl.CreateShaderModule(m_device, &ci, nullptr,
+                                                &module);
+    if (r != VK_SUCCESS) {
+        err = "vkCreateShaderModule failed result=" +
+              std::to_string(static_cast<int>(r));
+        ++m_shaderObjStats.failures;
+        return false;
+    }
+
+    if (m_moduleCache.size() >= kMaxShaderModules) {
+        // Drop-all eviction (same policy as the recompiler service).
+        // Pipelines hold NON-owning module refs, so nothing else to fix up
+        // here; DestroyShaderObjectsLocked handles full teardown.
+        for (auto& kv : m_moduleCache) {
+            if (kv.second != VK_NULL_HANDLE)
+                m_tbl.DestroyShaderModule(m_device, kv.second, nullptr);
+        }
+        m_moduleCache.clear();
+        ++m_shaderObjStats.moduleEvictions;
+    }
+    m_moduleCache.emplace(key, module);
+    ++m_shaderObjStats.modulesCreated;
+    if (outModule) *outModule = module;
+    return true;
+}
+
+bool VulkanGpuDevice::CreateShaderModuleFromWords(const uint32_t* words,
+                                                  size_t wordCount,
+                                                  VkShaderModule* outModule,
+                                                  std::string& err) {
+    std::lock_guard<std::mutex> lock(m_gpuMutex);
+    return CreateShaderModuleLocked(words, wordCount, outModule, err);
+}
+
+bool VulkanGpuDevice::CreateComputePipelineFromReflection(
+    const std::vector<uint32_t>& spirvWords,
+    const PX5::Gpu::GuestShaderReflection& reflection,
+    uint32_t vulkanStageFlags, VkPipeline* outPipeline,
+    std::string& err) {
+    err.clear();
+    if (outPipeline) *outPipeline = VK_NULL_HANDLE;
+    if (spirvWords.empty()) {
+        err = "compute pipeline: no spirv words";
+        ++m_shaderObjStats.failures;
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(m_gpuMutex);
+    if (!EnsureLogicalDeviceUnlocked()) {
+        err = "compute pipeline: logical device unavailable";
+        ++m_shaderObjStats.failures;
+        return false;
+    }
+
+    const uint64_t key = HashReflection(spirvWords, reflection, vulkanStageFlags);
+    {
+        auto it = m_pipelineCache.find(key);
+        if (it != m_pipelineCache.end()) {
+            ++m_shaderObjStats.pipelineHits;
+            if (outPipeline) *outPipeline = it->second.pipeline;
+            return true;
+        }
+    }
+
+    VkShaderModule module = VK_NULL_HANDLE;
+    if (!CreateShaderModuleLocked(spirvWords.data(), spirvWords.size(),
+                                  &module, err)) {
+        ++m_shaderObjStats.failures;
+        return false;
+    }
+
+    // Descriptor-set layouts, grouped by the reflection's set index.
+    std::map<uint32_t, std::vector<VkDescriptorSetLayoutBinding>> sets;
+    for (const auto& b : reflection.bindings) {
+        VkDescriptorSetLayoutBinding lb{};
+        lb.binding = b.binding;
+        lb.descriptorType = static_cast<VkDescriptorType>(b.type);
+        lb.descriptorCount = (b.count == 0u) ? 1u : b.count;
+        lb.stageFlags = vulkanStageFlags;
+        lb.pImmutableSamplers = nullptr;
+        sets[b.set].push_back(lb);
+    }
+
+    PipelineObjects objects;
+    bool ok = true;
+
+    for (auto& [setId, bindings] : sets) {
+        std::sort(bindings.begin(), bindings.end(),
+                  [](const VkDescriptorSetLayoutBinding& a,
+                     const VkDescriptorSetLayoutBinding& b2) {
+                      return a.binding < b2.binding;
+                  });
+        VkDescriptorSetLayoutCreateInfo ci{};
+        ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        ci.bindingCount = static_cast<uint32_t>(bindings.size());
+        ci.pBindings = bindings.data();
+        VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+        const VkResult r = m_tbl.CreateDescriptorSetLayout(m_device, &ci,
+                                                           nullptr, &layout);
+        if (r != VK_SUCCESS) {
+            err = "vkCreateDescriptorSetLayout(set=" +
+                  std::to_string(setId) + ") failed result=" +
+                  std::to_string(static_cast<int>(r));
+            ok = false;
+            break;
+        }
+        objects.setLayouts.push_back(layout);
+    }
+
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (ok) {
+        VkPushConstantRange pc{};
+        if (reflection.pushConstantSizeBytes > 0u) {
+            pc.stageFlags = vulkanStageFlags;
+            pc.offset = 0u;
+            pc.size = reflection.pushConstantSizeBytes;
+        }
+        VkPipelineLayoutCreateInfo ci{};
+        ci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        ci.setLayoutCount =
+            static_cast<uint32_t>(objects.setLayouts.size());
+        ci.pSetLayouts = objects.setLayouts.data();
+        ci.pushConstantRangeCount =
+            (reflection.pushConstantSizeBytes > 0u) ? 1u : 0u;
+        ci.pPushConstantRanges = (ci.pushConstantRangeCount > 0u) ? &pc
+                                                                  : nullptr;
+        const VkResult r = m_tbl.CreatePipelineLayout(m_device, &ci, nullptr,
+                                                      &layout);
+        if (r != VK_SUCCESS) {
+            err = "vkCreatePipelineLayout failed result=" +
+                  std::to_string(static_cast<int>(r));
+            ok = false;
+        } else {
+            objects.layout = layout;
+        }
+    }
+
+    if (ok) {
+        VkPipelineShaderStageCreateInfo stage{};
+        stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        stage.module = module;
+        stage.pName = "main";  // the SpirvBackend's fixed entry point name
+        VkComputePipelineCreateInfo ci{};
+        ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        ci.stage = stage;
+        ci.layout = layout;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        const VkResult r = m_tbl.CreateComputePipelines(
+            m_device, VK_NULL_HANDLE, 1u, &ci, nullptr, &pipeline);
+        if (r != VK_SUCCESS) {
+            err = "vkCreateComputePipelines failed result=" +
+                  std::to_string(static_cast<int>(r));
+            ok = false;
+        } else {
+            objects.pipeline = pipeline;
+        }
+    }
+
+    if (!ok) {
+        // Named failure: free what this attempt created, keep the caches
+        // clean (the module stays cached — it was created successfully).
+        if (objects.layout != VK_NULL_HANDLE)
+            m_tbl.DestroyPipelineLayout(m_device, objects.layout, nullptr);
+        for (VkDescriptorSetLayout l : objects.setLayouts)
+            m_tbl.DestroyDescriptorSetLayout(m_device, l, nullptr);
+        ++m_shaderObjStats.failures;
+        return false;
+    }
+
+    if (m_pipelineCache.size() >= kMaxComputePipelines) {
+        // Drop-all eviction (same policy as the service cache): destroy
+        // every tracked object, keep the modules (their own cache owns
+        // them).
+        for (auto& kv : m_pipelineCache) {
+            PipelineObjects& po = kv.second;
+            if (po.pipeline != VK_NULL_HANDLE)
+                m_tbl.DestroyPipeline(m_device, po.pipeline, nullptr);
+            if (po.layout != VK_NULL_HANDLE)
+                m_tbl.DestroyPipelineLayout(m_device, po.layout, nullptr);
+            for (VkDescriptorSetLayout l : po.setLayouts)
+                m_tbl.DestroyDescriptorSetLayout(m_device, l, nullptr);
+        }
+        m_pipelineCache.clear();
+        ++m_shaderObjStats.pipelineEvictions;
+    }
+    m_pipelineCache.emplace(key, objects);
+    ++m_shaderObjStats.pipelinesCreated;
+    if (outPipeline) *outPipeline = objects.pipeline;
+    return true;
+}
+
+std::string VulkanGpuDevice::GetShaderObjectStatsString() const {
+    std::lock_guard<std::mutex> lock(m_gpuMutex);
+    char b[192];
+    snprintf(b, sizeof(b),
+             "modules=%llu hits=%llu pipelines=%llu hits=%llu "
+             "evictions=%llu failures=%llu",
+             static_cast<unsigned long long>(
+                 m_shaderObjStats.modulesCreated.load()),
+             static_cast<unsigned long long>(
+                 m_shaderObjStats.moduleHits.load()),
+             static_cast<unsigned long long>(
+                 m_shaderObjStats.pipelinesCreated.load()),
+             static_cast<unsigned long long>(
+                 m_shaderObjStats.pipelineHits.load()),
+             static_cast<unsigned long long>(
+                 m_shaderObjStats.moduleEvictions.load() +
+                 m_shaderObjStats.pipelineEvictions.load()),
+             static_cast<unsigned long long>(
+                 m_shaderObjStats.failures.load()));
+    return std::string(b);
+}
+
+void VulkanGpuDevice::DestroyShaderObjectsLocked() {
+    if (m_device == VK_NULL_HANDLE) {
+        m_moduleCache.clear();
+        m_pipelineCache.clear();
+        return;
+    }
+    for (auto& kv : m_pipelineCache) {
+        PipelineObjects& po = kv.second;
+        if (po.pipeline != VK_NULL_HANDLE)
+            m_tbl.DestroyPipeline(m_device, po.pipeline, nullptr);
+        if (po.layout != VK_NULL_HANDLE)
+            m_tbl.DestroyPipelineLayout(m_device, po.layout, nullptr);
+        for (VkDescriptorSetLayout l : po.setLayouts)
+            m_tbl.DestroyDescriptorSetLayout(m_device, l, nullptr);
+    }
+    m_pipelineCache.clear();
+    for (auto& kv : m_moduleCache) {
+        if (kv.second != VK_NULL_HANDLE)
+            m_tbl.DestroyShaderModule(m_device, kv.second, nullptr);
+    }
+    m_moduleCache.clear();
 }
 
 bool VulkanGpuDevice::EnsureLogicalDevice() {
