@@ -102,6 +102,21 @@ IR definition.
   decoder → shader IR → SPIR-V. Starting shaders before the command
   path is the failure mode this plan forbids.
 
+## Host GPU design constraints (external evidence, 2026-10)
+
+- Target GPUs are TILE-BASED (Adreno GMEM/TBDR), not immediate-mode.
+  PC-proven PS5 ports (AnyPS5 lineage: Dreaming Sarah, Dead Cells
+  PPSA15552, Ghost of Yotei PPSA26344) were validated only on
+  immediate-mode hosts (GTX 1050 Ti, RTX 5070 Ti, Intel HD 620). When
+  the M7/M8 lowering adds barriers and renderpass structure, design
+  for GMEM locality (subpass-local loads/stores) instead of assuming
+  desktop-style full-frame barriers — otherwise Turnip falls to the
+  sysmem path and LRZ stops early.
+- RDNA wave64 is a real semantic, not a size hint: upstream AnyPS5
+  fixes from Oct 2026 (wave64 body assembly, half-wave reductions)
+  show the M8 shader IR must model wave size explicitly and lower
+  reductions across both wave64 and host subgroup widths.
+
 ## M5 evidence gate (PM4 decoder) — **MET**
 
 Host-side, deterministic: a fixed PM4 test stream with known packet

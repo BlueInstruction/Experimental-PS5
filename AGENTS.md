@@ -106,6 +106,20 @@ No Sony firmware, keys, or game assets here. The project runs legally
 obtained software on hardware the owner controls. Reference projects are
 credited in README.
 
+Upstream reference licensing (verify the SPDX before borrowing ANYTHING,
+not just code — headers, tables and comments are licensed content too):
+
+- This repo is GPL-3.0. AnyPS5 (boykopovar/AnyPS5) is GPL-2.0-ONLY —
+  legally incompatible with GPL-3.0. AnyPS5 is DESIGN REFERENCE ONLY:
+  study its architecture, NID facts, PM4/AGC semantics and TechnicalDebt
+  records, then write original PX5 code. Never copy or translate its
+  source into this repo.
+- FEX (FEXCore) is MIT — vendoring via `tools/fetch_fexcore.sh` is fine.
+- box64 and Kyty are MIT — usable if a future path ever needs them.
+- shadPS4 is GPL-2.0 (treat as 2.0-only like AnyPS5 until proven
+  otherwise). MIT vs GPL-2.0-only references have different rules;
+  when in doubt, ask before merging.
+
 ## CI Review Policy
 
 Applies to any AI agent (or human) working on this repository.
