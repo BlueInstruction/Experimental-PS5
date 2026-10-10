@@ -991,7 +991,17 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
 
     VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     appInfo.pApplicationName = "PX5-M7";
+    // Negotiate the highest supported instance version (same rule as
+    // Initialize): vkGetPhysicalDeviceProperties2 is 1.1 core and the
+    // v1.59 driver-identity binding needs it — a 1.0 instance cannot
+    // validly query it (cubic P2, v1.59 review). vkEnumerateInstanceVersion
+    // is a GLOBAL command, valid with a NULL instance; minSdk=28 means the
+    // Android loader is at least 1.1 everywhere this proof can run.
     appInfo.apiVersion       = VK_API_VERSION_1_0;
+    if (auto pfnEnumInstVer = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+            gipa(VK_NULL_HANDLE, "vkEnumerateInstanceVersion"))) {
+        pfnEnumInstVer(&appInfo.apiVersion);
+    }
     VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     ici.pApplicationInfo = &appInfo;          // offscreen: no surface exts
     VkInstance inst = VK_NULL_HANDLE;
