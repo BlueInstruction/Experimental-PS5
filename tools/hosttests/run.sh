@@ -128,4 +128,27 @@ find "$REC/core/shader/recompiler" -name '*.cpp' ! -name 'DummyShaders.cpp' ! -n
 echo "[hosttests] running shader_recompiler_test (M8 T1)"
 "$OUT/shader_recompiler_test"
 
+echo "[hosttests] building shader_recompiler_stages_test (M8 T2)"
+# Same vendored-subtree compile as T1, second entry point exercising the
+# graphics stages (vertex + fragment) through the real recompiler.
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread -DANYPS5_ENABLE_SPIRV_TOOLS=0 \
+    -I"$SHIM" -I"$CPP" \
+    -I"$REC/core/libs" \
+    -I"$REC/core/shader/recompiler" \
+    -I"$REC/core/shader/recompiler/RdnaDecoder/include" \
+    -I"$REC/core/shader/recompiler/ControlFlow/include" \
+    -I"$REC/core/shader/recompiler/IntermediateRepresentation/include" \
+    -I"$REC/core/shader/recompiler/Translation/include" \
+    -I"$REC/core/shader/recompiler/Optimization/include" \
+    -I"$REC/core/shader/recompiler/SpirvBackend/include" \
+    -I"$SPIRVHDRS" \
+    -I"$PORTABLE" \
+    -o "$OUT/shader_recompiler_stages_test" \
+    "$ROOT/tools/hosttests/shader_recompiler_stages_test.cpp" \
+    "$PORTABLE/px5_spirv_optimizer.cpp" \
+    $(cat "$OUT/rec_sources.txt")
+
+echo "[hosttests] running shader_recompiler_stages_test (M8 T2)"
+"$OUT/shader_recompiler_stages_test"
+
 echo "[hosttests] all host tests passed"
