@@ -106,19 +106,21 @@ No Sony firmware, keys, or game assets here. The project runs legally
 obtained software on hardware the owner controls. Reference projects are
 credited in README.
 
-Upstream reference licensing (verify the SPDX before borrowing ANYTHING,
-not just code — headers, tables and comments are licensed content too):
+This repo is GPL-2.0-only (SPDX: GPL-2.0-only, relicensed from
+GPL-3.0 by the copyright holder, 2026-10) — chosen to match the PS5
+ecosystem (AnyPS5, shadPS4 are GPL-2.0-only). Merging code from
+same-license open-source projects needs NO per-copy permission; the
+license itself grants it. The obligations ride along automatically:
 
-- This repo is GPL-3.0. AnyPS5 (boykopovar/AnyPS5) is GPL-2.0-ONLY —
-  legally incompatible with GPL-3.0. AnyPS5 is DESIGN REFERENCE ONLY:
-  study its architecture, NID facts, PM4/AGC semantics and TechnicalDebt
-  records, then write original PX5 code. Never copy or translate its
-  source into this repo.
-- FEX (FEXCore) is MIT — vendoring via `tools/fetch_fexcore.sh` is fine.
-- box64 and Kyty are MIT — usable if a future path ever needs them.
-- shadPS4 is GPL-2.0 (treat as 2.0-only like AnyPS5 until proven
-  otherwise). MIT vs GPL-2.0-only references have different rules;
-  when in doubt, ask before merging.
+- Keep copyright/license headers of copied files intact.
+- Credit the source project in README Credits.
+
+Compatibility map (verified against upstream LICENSE files 2026-10):
+mergeable without friction = AnyPS5, shadPS4 (both GPL-2.0-only),
+FEX/FEXCore, box64, Kyty, fmt, ankerl_unordered_map (MIT),
+libadrenotools, liblinkernsbypass (BSD-2-Clause). NOT mergeable =
+GPL-3-only or Apache-2.0-only sources (some Google projects) — verify
+the SPDX of anything new before importing it.
 
 ## CI Review Policy
 
