@@ -2445,6 +2445,15 @@ bool VulkanGpuDevice::RunM8ComputeReadbackProof(std::string& detailOut) {
         detailOut = "m8: vkCreateInstance failed";
         return false;
     }
+    // Every post-instance failure destroys the instance before returning —
+    // repeated failed probes must not leak Vulkan instances.
+    auto pfnDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(
+        gipa(inst, "vkDestroyInstance"));
+    const auto fail = [&](const std::string& why) {
+        if (pfnDestroyInstance) pfnDestroyInstance(inst, nullptr);
+        detailOut = why;
+        return false;
+    };
 
     auto pfnEnumDevs = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
         gipa(inst, "vkEnumeratePhysicalDevices"));
@@ -2458,14 +2467,12 @@ bool VulkanGpuDevice::RunM8ComputeReadbackProof(std::string& detailOut) {
         gipa(inst, "vkCreateDevice"));
     if (!pfnEnumDevs || !pfnProps || !pfnFams || !pfnMemProps ||
         !pfnCreateDevice) {
-        detailOut = "m8: instance-level fns missing";
-        return false;
+        return fail("m8: instance-level fns missing");
     }
 
     uint32_t nd = 0;
     if (pfnEnumDevs(inst, &nd, nullptr) != VK_SUCCESS || nd == 0) {
-        detailOut = "m8: no physical devices";
-        return false;
+        return fail("m8: no physical devices");
     }
     std::vector<VkPhysicalDevice> devs(nd);
     pfnEnumDevs(inst, &nd, devs.data());
@@ -2476,24 +2483,22 @@ bool VulkanGpuDevice::RunM8ComputeReadbackProof(std::string& detailOut) {
     // bufferDeviceAddress). Below 1.2 the proof refuses by name instead of
     // building a pipeline that cannot legally run.
     if (props.apiVersion < VK_API_VERSION_1_2) {
-        detailOut = std::string("m8: device API ") +
+        return fail(std::string("m8: device API ") +
                     VkVersion(props.apiVersion) +
                     " < 1.2 — bufferDeviceAddress unavailable, the "
-                    "recompiler's BDA ABI cannot run here";
-        return false;
+                    "recompiler's BDA ABI cannot run here");
     }
 
     uint32_t nf = 0;
     pfnFams(pd, &nf, nullptr);
-    if (nf == 0) { detailOut = "m8: no queue families"; return false; }
+    if (nf == 0) return fail("m8: no queue families");
     std::vector<VkQueueFamilyProperties> fams(nf);
     pfnFams(pd, &nf, fams.data());
     uint32_t gfx = 0xFFFFFFFFu;
     for (uint32_t i = 0; i < nf; ++i)
         if (fams[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { gfx = i; break; }
     if (gfx == 0xFFFFFFFFu) {
-        detailOut = "m8: no compute queue family";
-        return false;
+        return fail("m8: no compute queue family");
     }
 
     // Fresh logical device with bufferDeviceAddress ON (core 1.2 feature
@@ -2513,8 +2518,7 @@ bool VulkanGpuDevice::RunM8ComputeReadbackProof(std::string& detailOut) {
     dci.pQueueCreateInfos    = &qci;
     VkDevice dev = VK_NULL_HANDLE;
     if (pfnCreateDevice(pd, &dci, nullptr, &dev) != VK_SUCCESS || !dev) {
-        detailOut = "m8: vkCreateDevice (bufferDeviceAddress) failed";
-        return false;
+        return fail("m8: vkCreateDevice (bufferDeviceAddress) failed");
     }
 
     auto gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
@@ -2924,8 +2928,6 @@ bool VulkanGpuDevice::RunM8ComputeReadbackProof(std::string& detailOut) {
     if (inBuf != VK_NULL_HANDLE) DestroyBuffer(dev, inBuf, nullptr);
     if (outBuf != VK_NULL_HANDLE) DestroyBuffer(dev, outBuf, nullptr);
     if (DestroyDevice) DestroyDevice(dev, nullptr);
-    auto pfnDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(
-        gipa(inst, "vkDestroyInstance"));
     if (pfnDestroyInstance) pfnDestroyInstance(inst, nullptr);
     Breadcrumb::Set("gpu.m8: done ok=%d", ok ? 1 : 0);
 
