@@ -68,6 +68,7 @@ if(ANDROID_ABI STREQUAL "x86_64")
             audio/audio_out_hle.cpp
             input/pad_hle.cpp
             input/controller.cpp
+            loader/nid.cpp
             loader/self_extract.cpp
             loader/self_extract_selftest.cpp
             loader/self_fixtures.cpp
@@ -213,6 +214,7 @@ add_library(
         loader/self_extract.cpp
         loader/self_extract_selftest.cpp
         loader/self_fixtures.cpp
+        loader/nid.cpp
         loader/runtime_linker.cpp
         loader/runtime_linker_selftest.cpp
         gpu/ir/gpu_ir.cpp

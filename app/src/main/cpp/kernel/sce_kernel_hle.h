@@ -2,6 +2,7 @@
 #define PX5_SCE_KERNEL_HLE_H
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -46,9 +47,18 @@ public:
     static KernelHle& GetInstance();
 
     /**
-     * Registers the full symbol table (idempotent).
+     * Registers the full symbol table (idempotent, thread-safe). Every
+     * symbol is also seeded into the NID registry so guest NID-string
+     * imports resolve to the same table.
      */
     void RegisterAll();
+
+    /**
+     * True when InvokeByName(symbol) would route (registration included).
+     * The gate for transparent import dispatch: an import that fails here
+     * stays on the named ledger instead of consuming an HLE call.
+     */
+    bool HasSymbol(const std::string& symbol);
 
     /**
      * Returns the complete symbol table.
@@ -191,6 +201,7 @@ private:
     KernelHle() = default;
 
     std::vector<SymbolEntry> m_table;
+    std::mutex m_registerMutex;   ///< serializes the lazy RegisterAll seed
     bool m_registered = false;
 
     // Direct-memory bump allocator state (window-internal "physical" space).

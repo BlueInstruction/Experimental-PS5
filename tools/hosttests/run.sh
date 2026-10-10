@@ -36,10 +36,14 @@ echo "[hosttests] running memory_range_test"
 "$OUT/memory_range_test"
 
 echo "[hosttests] building import_trap_test"
+# runtime_linker answers import routes only through the v1.47 seam, so the
+# loader test links the NID layer but not the kernel HLE floor (which the
+# nid_dispatch_test exercises directly).
 "$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
     -I"$SHIM" -I"$CPP" \
     -o "$OUT/import_trap_test" \
     "$ROOT/tools/hosttests/import_trap_test.cpp" \
+    "$CPP/loader/nid.cpp" \
     "$CPP/loader/elf_loader.cpp" \
     "$CPP/loader/self_extract.cpp" \
     "$CPP/loader/runtime_linker.cpp" \
@@ -54,6 +58,36 @@ echo "[hosttests] building import_trap_test"
 
 echo "[hosttests] running import_trap_test"
 "$OUT/import_trap_test" "$OUT/import_trap_ledger.log"
+
+echo "[hosttests] building nid_dispatch_test (M9 transparent import dispatch)"
+# The NID layer (AnyPS5 algorithm, golden vectors), the symbol registry and
+# the transparent DispatchImportCall bridge — the seam that lets a guest
+# PLT call reach the real HLE services with its call ABI intact.
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
+    -I"$SHIM" -I"$CPP" \
+    -o "$OUT/nid_dispatch_test" \
+    "$ROOT/tools/hosttests/nid_dispatch_test.cpp" \
+    "$CPP/loader/nid.cpp" \
+    "$CPP/loader/runtime_linker.cpp" \
+    "$CPP/kernel/sce_kernel_hle.cpp" \
+    "$CPP/kernel/syscalls.cpp" \
+    "$CPP/audio/audio_out_hle.cpp" \
+    "$CPP/input/pad_hle.cpp" \
+    "$CPP/input/controller.cpp" \
+    "$CPP/gpu/gnm/gnm_submit.cpp" \
+    "$CPP/gpu/gnm/pm4_decoder.cpp" \
+    "$CPP/gpu/gnm/gnm_state.cpp" \
+    "$CPP/filesystem/vfs.cpp" \
+    "$CPP/memory/memory.cpp" \
+    "$CPP/utils/evidence.cpp" \
+    "$CPP/utils/logger.cpp" \
+    "$CPP/utils/diag_bridge.cpp" \
+    "$CPP/utils/breadcrumbs.cpp" \
+    "$CPP/utils/crash_handler.cpp" \
+    "$SHIM/fexcore_state_stub.cpp"
+
+echo "[hosttests] running nid_dispatch_test"
+"$OUT/nid_dispatch_test"
 
 echo "[hosttests] building pm4_stream_test (M5 gate)"
 "$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \

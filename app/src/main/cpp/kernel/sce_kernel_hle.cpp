@@ -3,6 +3,8 @@
 #include "../audio/audio_out_hle.h"
 #include "../gpu/gnm/gnm_submit.h"
 #include "../input/pad_hle.h"
+#include "../loader/nid.h"
+#include "../loader/runtime_linker.h"
 #include "../memory/memory.h"
 #include "../filesystem/vfs.h"
 #include "syscalls.h"          // GuestSyscalls::AppendOutput (evidence channel)
@@ -54,6 +56,7 @@ KernelHle& KernelHle::GetInstance() {
 }
 
 void KernelHle::RegisterAll() {
+    std::lock_guard<std::mutex> lk(m_registerMutex);
     if (m_registered) return;
     m_table.clear();
 
@@ -102,9 +105,42 @@ void KernelHle::RegisterAll() {
     add("scePadSetLightBar");
 
     m_registered = true;
+    // Seed the NID registry: guest images import these functions by their
+    // 11-char NID strings; the transparent import dispatch resolves those
+    // strings back to the symbols above through exactly this map.
+    for (const auto& s : m_table)
+        Nid::NidRegistry::Instance().RegisterSymbol(s.name);
+    // Install the transparent-dispatch seam. The resolve side scans the
+    // table DIRECTLY (no RegisterAll re-entry — it can be called with the
+    // linker mutex held); the table is immutable past this point. The
+    // invoke side forwards to the same dispatchers the self-tests use.
+    RuntimeLinker::ImportRoute route;
+    route.resolve = [table = &m_table](const std::string& name,
+                                       std::string* symbolOut) -> bool {
+        for (const auto& s : *table)
+            if (name == s.name) {
+                symbolOut->assign(s.name);
+                return true;
+            }
+        return false;
+    };
+    route.invoke = [](const std::string& symbol,
+                      const ImportCall& call) -> uint64_t {
+        return KernelHle::GetInstance().InvokeByName(
+            symbol, call.args[0], call.args[1], call.args[2],
+            call.args[3], call.args[4], call.args[5]);
+    };
+    RuntimeLinker::GetInstance().SetImportRoute(std::move(route));
     PX5_LOGI(LogCategory::KERNEL,
              "libkernel HLE v1 registered: %zu symbols (imports resolve in Phase C)",
              m_table.size());
+}
+
+bool KernelHle::HasSymbol(const std::string& symbol) {
+    RegisterAll();
+    for (const auto& s : m_table)
+        if (symbol == s.name) return true;
+    return false;
 }
 
 size_t KernelHle::SymbolCount() const { return m_table.size(); }

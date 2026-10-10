@@ -427,10 +427,16 @@ public:
         if (Frame) {
             GuestSyscalls::NoteGuestRip(Frame->State.rip);
         }
+        // v1.47 — the transparent import-call range reads 7th+ arguments
+        // off the guest stack, which stands at the call site ([rsp] holds
+        // the return address the stub will ret through).
+        const uint64_t guestRsp =
+            Frame ? Frame->State.gregs[FEXCore::X86State::REG_RSP] : 0;
         return GuestSyscalls::Dispatch(
             static_cast<uint32_t>(Args->Argument[0]),
             Args->Argument[1], Args->Argument[2], Args->Argument[3],
-            Args->Argument[4], Args->Argument[5], Args->Argument[6]);
+            Args->Argument[4], Args->Argument[5], Args->Argument[6],
+            guestRsp);
     }
 
     std::optional<FEXCore::ExecutableFileSectionInfo> LookupExecutableFileSection(
