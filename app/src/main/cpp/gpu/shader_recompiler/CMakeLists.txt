@@ -125,6 +125,7 @@ add_library(px5_shader_recompiler STATIC
 
 target_include_directories(px5_shader_recompiler PUBLIC
         ${PX5_SRC_ROOT}
+        ${PX5_SRC_ROOT}/generated
         ${PX5_SRC_ROOT}/RdnaDecoder/include
         ${PX5_SRC_ROOT}/ControlFlow/include
         ${PX5_SRC_ROOT}/IntermediateRepresentation/include
