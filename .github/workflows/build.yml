@@ -43,12 +43,15 @@ jobs:
     # denied before Gradle even ran). Re-assert the modes here so the
     # build is immune to that class of damage.
     - name: Re-assert executable bits
-      run: chmod +x gradlew tools/fetch_fexcore.sh tools/fetch_adrenotools.sh tools/hosttests/run.sh
+      run: chmod +x gradlew tools/fetch_fexcore.sh tools/fetch_adrenotools.sh tools/fetch_shader_recompiler.sh tools/hosttests/run.sh
 
     # Runs BEFORE the APK build, and deliberately has no toolchain
     # dependency, so a logic regression is reported in seconds instead of
     # surviving a green "it compiled" build. Every other workflow in this
     # repo only compiles; this one executes assertions.
+    - name: Fetch pinned AnyPS5 shader recompiler
+      run: ./tools/fetch_shader_recompiler.sh
+
     - name: Host regression tests (memory ranges + JNI symbol parity)
       run: ./tools/hosttests/run.sh
 

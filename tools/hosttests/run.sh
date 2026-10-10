@@ -94,4 +94,38 @@ echo "[hosttests] running vulkan_backend_test (M7 T1 gate)"
 echo "[hosttests] running JNI symbol parity check"
 python3 "$ROOT/tools/check_jni_symbols.py"
 
+
+if [ ! -f "$ROOT/.deps/anyps5/.pin" ]; then
+    echo "[hosttests] materializing AnyPS5 recompiler pin"
+    "$ROOT/tools/fetch_shader_recompiler.sh"
+fi
+
+echo "[hosttests] building shader_recompiler_test (M8 T1)"
+REC="$ROOT/.deps/anyps5"
+PORTABLE="$ROOT/tools/hosttests/portable"
+SPIRVHDRS="$ROOT/tools/hosttests/spirv"
+# Vendored AnyPS5 recompiler: whole subtree except DummyShaders.cpp (glslang)
+# and SpirvOptimizer.cpp (SPIRV-Tools); port layer supplies both contracts.
+find "$REC/core/shader/recompiler" -name '*.cpp' ! -name 'DummyShaders.cpp' ! -name 'SpirvOptimizer.cpp' ! -name 'Deserialize.cpp' | sort > "$OUT/rec_sources.txt"
+# shellcheck disable=SC2046
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread -DANYPS5_ENABLE_SPIRV_TOOLS=0 \
+    -I"$SHIM" -I"$CPP" \
+    -I"$REC/core/libs" \
+    -I"$REC/core/shader/recompiler" \
+    -I"$REC/core/shader/recompiler/RdnaDecoder/include" \
+    -I"$REC/core/shader/recompiler/ControlFlow/include" \
+    -I"$REC/core/shader/recompiler/IntermediateRepresentation/include" \
+    -I"$REC/core/shader/recompiler/Translation/include" \
+    -I"$REC/core/shader/recompiler/Optimization/include" \
+    -I"$REC/core/shader/recompiler/SpirvBackend/include" \
+    -I"$SPIRVHDRS" \
+    -I"$PORTABLE" \
+    -o "$OUT/shader_recompiler_test" \
+    "$ROOT/tools/hosttests/shader_recompiler_test.cpp" \
+    "$PORTABLE/px5_spirv_optimizer.cpp" \
+    $(cat "$OUT/rec_sources.txt")
+
+echo "[hosttests] running shader_recompiler_test (M8 T1)"
+"$OUT/shader_recompiler_test"
+
 echo "[hosttests] all host tests passed"
