@@ -74,6 +74,11 @@ public:
         uint64_t seq = 0;        // event-sequence stamp (GnmState-owned)
         uint32_t packetOffset = 0;
         uint32_t x = 0, y = 0, z = 0;
+        // Raw DISPATCH packet initiator (body[3], M8 T4). shadPS4's
+        // PM4CmdDispatchDirect makes the real packet body FOUR dwords;
+        // Kyty reads CS_W32_EN[15] from this dword for the wave size.
+        // 0 when the packet carries no initiator dword (older streams).
+        uint32_t initiator = 0;
     };
 
     // Journal entry for NAMED register writes — the only register writes
@@ -118,6 +123,14 @@ public:
     void RecordDispatch(uint32_t x, uint32_t y, uint32_t z,
                         uint32_t packetOffset = 0);
 
+    // The DISPATCH packet carries its own initiator (M8 T4). The decoder
+    // calls this BEFORE RecordDispatch when the packet body has the
+    // initiator dword; RecordDispatch snapshots it into the record and
+    // the value persists (shadPS4 keeps it in cs_program.dispatch_initiator
+    // the same way) until the next DISPATCH packet.
+    void SetDispatchInitiator(uint32_t raw) { dispatch_initiator_ = raw; }
+    uint32_t LastDispatchInitiator() const { return dispatch_initiator_; }
+
     uint64_t DrawCalls()      const { return draw_calls_; }
     uint64_t Dispatches()     const { return dispatches_; }
     uint32_t IndexTypeRaw()   const { return index_type_raw_; }
@@ -156,6 +169,7 @@ private:
     uint32_t index_type_raw_ = 0;
     uint32_t num_instances_ = 0;
     uint32_t dispatch_x_ = 0, dispatch_y_ = 0, dispatch_z_ = 0;
+    uint32_t dispatch_initiator_ = 0;   // last DISPATCH packet initiator (M8 T4)
     uint64_t seq_counter_ = 0;   // monotonic event counter (draws/dispatches/named writes)
     uint64_t named_write_total_ = 0;   // cumulative, eviction-proof
     uint64_t carried_write_total_ = 0; // INDEX_TYPE subset of the above

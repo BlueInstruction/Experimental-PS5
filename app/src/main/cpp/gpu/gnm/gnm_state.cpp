@@ -112,6 +112,7 @@ void GnmState::RecordDispatch(uint32_t x, uint32_t y, uint32_t z,
     rec.seq = ++seq_counter_;
     rec.packetOffset = packetOffset;
     rec.x = x; rec.y = y; rec.z = z;
+    rec.initiator = dispatch_initiator_;   // M8 T4: snapshot last packet initiator
     dispatch_log_.push_back(rec);
     if (dispatch_log_.size() > kMaxDispatchLog) {
         dispatch_log_.erase(dispatch_log_.begin());   // bounded: drop oldest
@@ -143,6 +144,7 @@ void GnmState::Reset() {
     index_type_raw_ = 0;
     num_instances_ = 0;
     dispatch_x_ = dispatch_y_ = dispatch_z_ = 0;
+    dispatch_initiator_ = 0;
     seq_counter_ = 0;
     named_write_total_ = 0;
     carried_write_total_ = 0;

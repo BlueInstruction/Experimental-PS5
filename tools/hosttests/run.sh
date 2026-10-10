@@ -175,4 +175,32 @@ echo "[hosttests] building guest_shader_recompiler_test (M8 T3)"
 echo "[hosttests] running guest_shader_recompiler_test (M8 T3)"
 "$OUT/guest_shader_recompiler_test"
 
+echo "[hosttests] building guest_shader_capture_test (M8 T4)"
+# M8 T4: real PM4 SET_SH streams decode into GnmState and the shader
+# capture layer turns the register state into SPIR-V via the T3 service.
+# Same TU set the arm64 APK compiles, plus the GNM decoder/state sources.
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread -DANYPS5_ENABLE_SPIRV_TOOLS=0 \
+    -I"$CPP" \
+    -I"$REC/core/libs" \
+    -I"$REC/core/shader/recompiler" \
+    -I"$REC/core/shader/recompiler/RdnaDecoder/include" \
+    -I"$REC/core/shader/recompiler/ControlFlow/include" \
+    -I"$REC/core/shader/recompiler/IntermediateRepresentation/include" \
+    -I"$REC/core/shader/recompiler/Translation/include" \
+    -I"$REC/core/shader/recompiler/Optimization/include" \
+    -I"$REC/core/shader/recompiler/SpirvBackend/include" \
+    -I"$SPIRVHDRS" \
+    -I"$PORTABLE" \
+    -o "$OUT/guest_shader_capture_test" \
+    "$ROOT/tools/hosttests/guest_shader_capture_test.cpp" \
+    "$CPP/gpu/shader/shader_capture.cpp" \
+    "$CPP/gpu/shader/shader_recompiler_service.cpp" \
+    "$CPP/gpu/gnm/pm4_decoder.cpp" \
+    "$CPP/gpu/gnm/gnm_state.cpp" \
+    "$PORTABLE/px5_spirv_optimizer.cpp" \
+    $(cat "$OUT/rec_sources.txt")
+
+echo "[hosttests] running guest_shader_capture_test (M8 T4)"
+"$OUT/guest_shader_capture_test"
+
 echo "[hosttests] all host tests passed"

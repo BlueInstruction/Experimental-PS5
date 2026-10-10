@@ -234,12 +234,14 @@ target_include_directories(px5 PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR}/fex/generated)
 
 # ----------------------------------------------------------------------------
-# M8 T3: vendored AnyPS5 RDNA shader recompiler (fetch pin, GPL-2.0-only).
+# M8 T3/T4: vendored AnyPS5 RDNA shader recompiler (fetch pin, GPL-2.0-only).
 # Same discipline as FEX: the tree is NOT vendored in-repo; it is materialized
 # by tools/fetch_shader_recompiler.sh into .deps/anyps5 at a pinned commit
 # (build.yml fetches BEFORE gradle runs). The app touches it ONLY through
-# gpu/shader/shader_recompiler_service.cpp — the M8 T3 host gate proves the
-# service end to end, and no recompiler type ever leaks past that TU.
+# gpu/shader/shader_recompiler_service.cpp (the one TU including recompiler
+# headers); gpu/shader/shader_capture.cpp sits on top and speaks to the
+# service's app-side interface only. The M8 T3/T4 host gates prove both end
+# to end, and no recompiler type ever leaks past that boundary.
 # The x86_64 UI-smoke stub target deliberately stays recompiler-free.
 # ----------------------------------------------------------------------------
 set(PX5_SHADER_RECOMPILER_ROOT
@@ -252,6 +254,7 @@ if(NOT EXISTS "${PX5_SHADER_RECOMPILER_ROOT}/core/shader/recompiler/Recompiler.c
         "first (see AGENTS.md).")
 endif()
 target_sources(px5 PRIVATE
+        gpu/shader/shader_capture.cpp
         gpu/shader/shader_recompiler_service.cpp
         ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/hosttests/portable/px5_spirv_optimizer.cpp)
 file(GLOB_RECURSE PX5_RECOMPILER_SOURCES
