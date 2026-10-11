@@ -76,6 +76,7 @@ void GnmSubmit::ResetForTest() {
     m_irScratch.Clear();
     m_lastLower.Reset();
     m_lastPlan.Reset();
+    m_lastRpPlan.Reset();
     m_lowerings = 0;
     m_captureAttempts = 0;
     m_captureOk = 0;
@@ -146,6 +147,13 @@ void GnmSubmit::RunGpuPathEvidence() {
     // they turn "a game submitted N draws" into per-kind counters the
     // device log can quote, instead of a silent end at GnmState.
     m_lastPlan = PX5::Gpu::PlanVulkanCommands(m_irScratch).stats;
+
+    // ---- M7-TBDR: render-pass structure over the same ops ---------------
+    // GMEM region planning for tiled GPUs (every Adreno generation). Runs
+    // BEFORE any vkCmdDraw exists: draws are still deferred, and when they
+    // materialize they join this structure instead of naive immediate
+    // submissions.
+    m_lastRpPlan = PX5::Gpu::PlanRenderPasses(m_irScratch);
 
     // ---- M8: capture + recompile what the stream programmed ---------------
     // Binaries that ship no shader service (the x86_64 UI-smoke stub, and
@@ -372,6 +380,8 @@ std::string GnmSubmit::GetStatsString() const {
     out += m_lastLower.SummaryString();
     out += "] | plan[last: ";
     out += m_lastPlan.SummaryString();
+    out += "] | rp[last: ";
+    out += m_lastRpPlan.SummaryString();
     out += "] | captures=";
     out += std::to_string(m_captureAttempts);
     out += " ok=";

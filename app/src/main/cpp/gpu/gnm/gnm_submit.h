@@ -39,8 +39,9 @@
 #include "gpu/gnm/pm4_decoder.h"
 // Vulkan-free app layers the submit path now feeds (docs/gpu.md chain):
 // the M6 lowering (GnmState -> GpuOpList), the M7 planner (IR -> command
-// plan, accounting only) and the M8 capture (GnmState -> SPIR-V). None of
-// these headers names a Vulkan type — the IR header guard enforces it.
+// plan, accounting only) + the TBDR/GMEM render-pass plan, and the M8
+// capture (GnmState -> SPIR-V). None of these headers names a Vulkan type
+// — the IR header guard enforces it.
 #include "gpu/ir/gpu_ir.h"
 #include "gpu/shader/shader_capture.h"
 #include "gpu/vulkan_backend.h"
@@ -98,6 +99,9 @@ public:
     // accumulate below.
     const PX5::Gpu::LowerStats&       LastLowerStats() const { return m_lastLower; }
     const PX5::Gpu::BackendPlanStats& LastPlanStats()  const { return m_lastPlan; }
+    const PX5::Gpu::RenderPassPlan&   LastRenderPassPlan() const {
+        return m_lastRpPlan;
+    }
     uint64_t Lowerings()     const { return m_lowerings; }
     uint64_t CaptureAttempts() const { return m_captureAttempts; }
     uint64_t CaptureOk()       const { return m_captureOk; }
@@ -188,6 +192,7 @@ private:
     PX5::Gpu::GpuOpList        m_irScratch{1024};  // bounded lowering target
     PX5::Gpu::LowerStats       m_lastLower;
     PX5::Gpu::BackendPlanStats m_lastPlan;
+    PX5::Gpu::RenderPassPlan   m_lastRpPlan;
     uint64_t         m_lowerings = 0;
     uint64_t         m_captureAttempts = 0;
     uint64_t         m_captureOk = 0;

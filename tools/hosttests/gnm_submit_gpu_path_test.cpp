@@ -354,6 +354,14 @@ int main() {
         const std::string stats3 = submit.GetStatsString();
         Require(stats3.find("modules=2 moduleFails=3") != std::string::npos,
                 "stats string carries the module counters (" + stats3 + ")");
+        // TBDR/GMEM plan over the cumulative IR: the stream order is
+        // dispatch, scissor, draw (x2) then five dispatches + the barrier,
+        // so the scissor+draw regions are TWO passes (each closed by the
+        // next dispatch/boundary); every dispatch stays outside (compute
+        // has no GMEM).
+        Require(stats3.find("rp[last: passes=2 drawOps=2 clearOps=0 "
+                            "inPasses=4 outside=8") != std::string::npos,
+                "stats string carries the render-pass plan (" + stats3 + ")");
 
         submit.SetShaderModuleSink(nullptr);
         submit.ResetForTest();
