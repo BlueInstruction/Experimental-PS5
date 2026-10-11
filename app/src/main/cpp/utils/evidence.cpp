@@ -203,20 +203,25 @@ void AppendLedger(const char* format, ...) {
     std::lock_guard<std::mutex> lk(g_ledgerMutex);
     if (g_ledgerPath.empty()) return;
 
-    // One line: <epoch_ms> <event...> [img=sha256-prefix]
+    // One line: <epoch_ms> <ns> <event...> [img=sha256-prefix]
+    // The namespace tag rides EVERY line: a reader (human or offline tool)
+    // must never have to infer from context whether an event came from the
+    // real-guest path or the synthetic suite — the session namespace
+    // switches mid-file, so per-line tags are the only safe form.
     char body[512];
     va_list ap;
     va_start(ap, format);
     vsnprintf(body, sizeof(body), format, ap);
     va_end(ap);
 
+    const char* ns = g_sessionReal ? "REAL-GUEST" : "SYNTH";
     char line[640];
     if (g_image.valid) {
-        snprintf(line, sizeof(line), "%lld %.8s %s\n",
-                 (long long)(time(nullptr)), g_image.sha256, body);
+        snprintf(line, sizeof(line), "%lld %s %.8s %s\n",
+                 (long long)(time(nullptr)), ns, g_image.sha256, body);
     } else {
-        snprintf(line, sizeof(line), "%lld - %s\n",
-                 (long long)(time(nullptr)), body);
+        snprintf(line, sizeof(line), "%lld %s - %s\n",
+                 (long long)(time(nullptr)), ns, body);
     }
 
     const int fd = open(g_ledgerPath.c_str(),

@@ -9,6 +9,7 @@
 #include "../memory/memory.h"
 #include "../filesystem/vfs.h"
 #include "syscalls.h"          // GuestSyscalls::AppendOutput (evidence channel)
+#include "../utils/evidence.h"
 #include "../utils/logger.h"
 
 #include <cerrno>
@@ -16,6 +17,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <mutex>
 #include <thread>
 #include <unordered_map>
 #include <unistd.h>
@@ -125,6 +127,16 @@ void KernelHle::RegisterAll() {
     add("sceVideoOutIsOutputSupported");
     add("sceVideoOutConfigureOutput");
 
+    // ORBIS crt bootstrap (device evidence 2026-10-11, real guest session):
+    // the game's first three import calls are _init_env (NID bzQExy189ZI)
+    // then atexit twice (NID 8G2LB+A3rzg) — the PS5 startup path. These are
+    // libc-level names, not libSce*: registered here BY NAME; the NID
+    // registry derives their NID strings, so the qualified dynstr names
+    // ('bzQExy189ZI#T#T') the loader reads resolve through them.
+    add("_init_env");
+    add("atexit");
+    add("__cxa_atexit");
+
     m_registered = true;
     // Seed the NID registry: guest images import these functions by their
     // 11-char NID strings; the transparent import dispatch resolves those
@@ -168,6 +180,57 @@ static void Bump(const char* symbol) {
     auto& self = KernelHle::GetInstance();
     for (auto& s : const_cast<std::vector<SymbolEntry>&>(self.Table()))
         if (strcmp(s.name, symbol) == 0) { s.calls++; break; }
+}
+
+// ---------------------------------------------------------------------------
+// ORBIS crt bootstrap HLE (real-guest startup path, see RegisterAll).
+//
+// _init_env(params) — on a real PS5 the crt entry hands the process-
+// parameter block here and libc bootstraps (heap, env, atexit root). PX5
+// owns no guest heap object to construct; the honest implementation
+// records the parameter block (the same pointer the dispatch ledger
+// logged as rdi/a0) and returns 0, matching the crt contract for
+// "environment ready". Anything the guest later needs from that block
+// arrives as further import calls — each lands on the ledger with a name.
+//
+// atexit(func) / __cxa_atexit(func, arg, dso) — guest exit handlers.
+// Stored host-side so the registration is REAL and countable; running
+// them requires a guest exit path (host->guest call frame) that does not
+// exist yet — that absence stays named, never faked.
+// ---------------------------------------------------------------------------
+std::mutex g_crtExitMutex;
+std::vector<std::pair<uint64_t, uint64_t>> g_crtExitCallbacks;
+
+uint64_t HleInitEnv(uint64_t params) {
+    Evidence::AppendLedger("hle _init_env params=0x%llx",
+                           (unsigned long long)params);
+    PX5_LOGI(LogCategory::KERNEL,
+             "[GUEST] _init_env(params=0x%llx) -> 0 (crt bootstrap "
+             "recorded; heap object not constructed)",
+             (unsigned long long)params);
+    return 0;
+}
+
+uint64_t HleAtexit(uint64_t func, uint64_t arg, const char* symbol) {
+    if (func == 0) {
+        // ORBIS atexit(NULL) returns success with nothing registered.
+        Evidence::AppendLedger("hle %s func=NULL -> 0", symbol);
+        return 0;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_crtExitMutex);
+        g_crtExitCallbacks.emplace_back(func, arg);
+    }
+    Evidence::AppendLedger("hle %s func=0x%llx arg=0x%llx stored=%zu",
+                           symbol, (unsigned long long)func,
+                           (unsigned long long)arg,
+                           g_crtExitCallbacks.size());
+    PX5_LOGI(LogCategory::KERNEL,
+             "[GUEST] %s(func=0x%llx arg=0x%llx) -> 0 (registered, %zu "
+             "pending; exit-run path not built yet)",
+             symbol, (unsigned long long)func, (unsigned long long)arg,
+             g_crtExitCallbacks.size());
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +487,11 @@ uint64_t KernelHle::InvokeByImport(const std::string& symbol,
     if (symbol == "sceKernelIsNeoMode")               return IsNeoMode();
     if (symbol == "sceKernelGetCompiledSdkVersion")   return GetCompiledSdkVersion();
     if (symbol == "sceGnmSubmitCommandBuffers")       return GnmSubmitCommandBuffers(a0, a1, a2);
+
+    // --- ORBIS crt bootstrap (real-guest startup path) ---------------------
+    if (symbol == "_init_env")                        return HleInitEnv(a0);
+    if (symbol == "atexit")                           return HleAtexit(a0, 0, "atexit");
+    if (symbol == "__cxa_atexit")                     return HleAtexit(a0, a1, "__cxa_atexit");
 
     // --- sceAudioOut (SceAudioOutHle) --------------------------------------
     auto& audioOut = SceAudioOutHle::AudioOutHle::Instance();

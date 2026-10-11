@@ -408,7 +408,16 @@ ImportTrapEntry::Route ResolveImportRoute(
     if (route.resolve(e.name, symbolOut)) {
         return ImportTrapEntry::Route::KernelHle;
     }
-    const std::string viaNid = Nid::NidRegistry::Instance().Resolve(e.name);
+    // PS5 dynstr import names are QUALIFIED: "<11-char NID>#<ver>#<module-id>"
+    // (device log 2026-10-11: 'bzQExy189ZI#T#T' = _init_env, '8G2LB+A3rzg#T#T'
+    // = atexit; AnyPS5 relinker ImportModule.hpp parses the same shape).
+    // The NID registry keys the 11-char base only, so resolution targets the
+    // substring before the first '#'; the verbatim name stays in the ledger.
+    std::string nidKey = e.name;
+    const auto hash = e.name.find('#');
+    if (hash != std::string::npos) nidKey.resize(hash);
+    const std::string viaNid =
+        Nid::NidRegistry::Instance().Resolve(nidKey);
     if (!viaNid.empty() && route.resolve(viaNid, symbolOut)) {
         return ImportTrapEntry::Route::KernelHle;
     }

@@ -981,6 +981,16 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
         res.exitCode      = rax;
         res.exitedCleanly = false;
     }
+    // v1.60 — the stop is fully named: which mechanism ended the run loop
+    // and where the guest RIP stood when it did. The device ledger's old
+    // "exit=<number> clean=<0/1>" forced reviewers to guess whether the
+    // number was a code or an address; both facts are now explicit fields.
+    const uint64_t guestRip = thread->CurrentFrame->State.rip;
+    res.finalGuestRip = guestRip;
+    if (!res.error.empty())              res.stopReason = "error";
+    else if (res.guestTrap.fired)        res.stopReason = "guest-trap";
+    else if (GuestSyscalls::HasExitCode()) res.stopReason = "exit-group";
+    else                                 res.stopReason = "hlt";
     res.output = GuestSyscalls::TakeOutput();
     // Acquire-load pairs with the handler's release store: if a trap was
     // published, every field of g_lastGuestTrap is visible here.
