@@ -142,6 +142,66 @@ uint8_t ClearFloatToUnorm8(float f);
 VulkanCommandPlan PlanVulkanCommands(const GpuOpList& ops);
 
 // ---------------------------------------------------------------------------
+// TBDR/GMEM render-pass planner.
+//
+// Adreno executes color-attachment work in on-chip tile memory (GMEM) on
+// EVERY generation — old low-end parts and new flagships alike; this
+// planner is GPU-agnostic by construction: it names the pass structure and
+// never queries a device. The load/store decisions are where a tiled
+// architecture wins or loses: a leading Clear folding into the pass load
+// op means the tiles never round-trip to memory between clear and draws.
+//
+// The plan runs BEFORE any vkCmdDraw exists (draws are still deferred by
+// the M7 mapping above): when pipelines land, draws join THIS structure.
+//
+// Region semantics (locked by the host gate):
+//   - a pass OPENS at the first graphics op (Clear/SetScissor/Draw/
+//     DrawIndexed) and CLOSES at the submit boundary or end of list;
+//   - colorLoadOp: kClear when the pass's first color-writing op is a
+//     Clear (fold into the load), kLoad when draws render without a
+//     leading clear (tile contents must survive), kDontCare when nothing
+//     writes color;
+//   - colorStoreOp: kStore when the pass writes color (the result must
+//     leave the tiles), kDontCare otherwise;
+//   - a Clear AFTER a draw inside the same region is counted (clearOps)
+//     and does NOT change the load op — folding a mid-pass clear means a
+//     pass split, a decision named when draws materialize, not guessed;
+//   - Dispatch never enters a pass (compute does not touch tile memory);
+//     boundaries and unknown ops stay outside; all accounted in
+//     opsOutsidePasses.
+// ---------------------------------------------------------------------------
+struct PlannedRenderPass {
+    enum class LoadOp : uint32_t { kClear = 0, kLoad, kDontCare };
+    enum class StoreOp : uint32_t { kStore = 0, kDontCare };
+
+    LoadOp  colorLoadOp  = LoadOp::kDontCare;
+    StoreOp colorStoreOp = StoreOp::kDontCare;
+    uint64_t firstSeq = 0;
+    uint64_t lastSeq  = 0;
+    uint32_t clearOps = 0;
+    uint32_t scissorOps = 0;
+    uint32_t drawOps = 0;
+    uint32_t drawIndexedOps = 0;
+    uint32_t unknownOps = 0;
+
+    uint32_t OpCount() const {
+        return clearOps + scissorOps + drawOps + drawIndexedOps + unknownOps;
+    }
+};
+
+struct RenderPassPlan {
+    std::vector<PlannedRenderPass> passes;
+    uint64_t opsInPasses      = 0;   // sum of every pass's OpCount()
+    uint64_t opsOutsidePasses = 0;   // dispatches + boundaries + unknowns
+    uint64_t opsTotal         = 0;
+
+    void Reset();
+    std::string SummaryString() const;
+};
+
+RenderPassPlan PlanRenderPasses(const GpuOpList& ops);
+
+// ---------------------------------------------------------------------------
 // Readback verification. `data` is the CPU-mapped copy of the target image
 // (vkCmdCopyImageToBuffer into a host-visible buffer, then vkMapMemory):
 // tightly packed width*height pixels, 4 bytes per pixel, byte order

@@ -2052,6 +2052,11 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
 
         const VulkanCommandPlan plan = PlanVulkanCommands(irOps);
         Breadcrumb::Set("gpu.m7: plan %s", plan.stats.SummaryString().c_str());
+        // The TBDR/GMEM view of the same ops (Adreno — every generation):
+        // the one-Clear list plans as a single pass with the clear folded
+        // into the load op, before any vkCmdDraw exists.
+        const Gpu::RenderPassPlan rp = Gpu::PlanRenderPasses(irOps);
+        Breadcrumb::Set("gpu.m7: rp %s", rp.SummaryString().c_str());
         if (!plan.hasClear) {
             err = "plan has no clear (backend contract violated)";
         } else {
@@ -2347,14 +2352,29 @@ bool VulkanGpuDevice::RunM7ClearReadbackProof(std::string& detailOut) {
             if (img   != VK_NULL_HANDLE) DestroyImage(dev, img, nullptr);
 
             if (ok) {
-                char det[160];
+                const char* loadName =
+                    rp.passes.empty() ? "none"
+                        : rp.passes[0].colorLoadOp ==
+                              Gpu::PlannedRenderPass::LoadOp::kClear
+                            ? "clear"
+                        : rp.passes[0].colorLoadOp ==
+                              Gpu::PlannedRenderPass::LoadOp::kLoad
+                            ? "load" : "dontCare";
+                const char* storeName =
+                    rp.passes.empty() ? "none"
+                        : rp.passes[0].colorStoreOp ==
+                              Gpu::PlannedRenderPass::StoreOp::kStore
+                            ? "store" : "dontCare";
+                char det[256];
                 snprintf(det, sizeof(det),
                          "IR Clear readback: pixels %u/%u match "
-                         "(%u,%u,%u,%u) | plan: %s",
+                         "(%u,%u,%u,%u) | plan: %s | rp: %s load=%s "
+                         "store=%s",
                          rb.pixelsMatch, rb.pixelsTotal,
                          plan.clearRgba[0], plan.clearRgba[1],
                          plan.clearRgba[2], plan.clearRgba[3],
-                         plan.stats.SummaryString().c_str());
+                         plan.stats.SummaryString().c_str(),
+                         rp.SummaryString().c_str(), loadName, storeName);
                 err = det;
             }
         }

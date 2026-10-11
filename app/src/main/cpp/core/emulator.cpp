@@ -3,6 +3,10 @@
 #include "memory/memory.h"
 #include "kernel/syscalls.h"
 #include "kernel/sce_kernel_hle.h"
+// Layer contract (gpu_ir.h guard): the GPU IR must never be compiled after
+// Vulkan headers. gnm_submit.h -> gpu_ir.h, so it comes FIRST; only then
+// the Vulkan-backed device header.
+#include "gpu/gnm/gnm_submit.h"
 #include "gpu/vulkan_device.h"
 #include "filesystem/vfs.h"
 #include "audio/audio.h"
@@ -132,6 +136,19 @@ bool Emulator::Initialize(const std::string& baseDir) {
 
     VirtualFileSystem::GetInstance().Initialize(baseDir);
     VulkanGpuDevice::GetInstance().Initialize();   // may fail, reports detail
+    // The submit path's module hop: every successful real-guest capture
+    // materializes a VkShaderModule through CreateShaderModuleFromWords —
+    // the layer that existed with no caller. When the device is down the
+    // sink still answers, with the device's own named error, so the
+    // failure is evidence instead of silence.
+    Gnm::GnmSubmit::GetInstance().SetShaderModuleSink(
+        [](uint32_t stage, uint64_t codeVaddr, const uint32_t* words,
+           size_t wordCount, std::string& err) -> bool {
+            (void)stage; (void)codeVaddr;
+            return VulkanGpuDevice::GetInstance()
+                .CreateShaderModuleFromWords(words, wordCount, nullptr,
+                                             err);
+        });
     // Audio is not implemented; Initialize() returns false and logs why.
     // Startup does not depend on it.
     (void)AudioEngine::GetInstance().Initialize();
@@ -459,6 +476,13 @@ FexCoreIntegration::ExecResult Emulator::ExecuteLoadedGuest() {
         (unsigned long long)res.exitCode,
         res.exitedCleanly ? 1 : 0,
         res.error.empty() ? "none" : res.error.c_str());
+    // T2 evidence, one line per real dispatch stop: the submit-path stats
+    // (per-kind deferral, per-stage capture outcomes) land in the ledger
+    // under the session's REAL-GUEST/SYNTH tag. A device session reads the
+    // whole GPU truth from this line without grepping the verbose log.
+    Evidence::AppendLedger(
+        "gpu-stats %s",
+        Gnm::GnmSubmit::GetInstance().GetStatsString().c_str());
     PX5_LOGI(LogCategory::CORE,
              "[GUEST] dispatch result: started=%d stopped_by=%s "
              "guest_rip=0x%llx exit_code=0x%llx %s",
@@ -516,8 +540,21 @@ std::string Emulator::SelfTestFoundation() {
     if (!CrashHandler::LogsDir().empty())
         Evidence::SetLedgerPath(CrashHandler::LogsDir() + "/px5_evidence.log");
 
-    auto push = [&](const std::string& s){ lines.push_back(s);
-        PX5_LOGI(LogCategory::CORE, "[SYNTH] %s", s.c_str()); };
+    auto push = [&](const std::string& s){
+        lines.push_back(s);
+        PX5_LOGI(LogCategory::CORE, "[SYNTH] %s", s.c_str());
+        // Stream the line NOW ("# " trail protocol of RunIsolated): if a
+        // later step kills the fork child, every completed step is already
+        // on the pipe and the parent's report keeps it. Without this, a
+        // step-9 (ud2) death used to void the whole report — including the
+        // GPU evidence steps that finished before it.
+        if (m_reportTrailFd >= 0) {
+            const std::string wire = "# " + s + "\n";
+            const ssize_t n = ::write(m_reportTrailFd, wire.data(),
+                                      wire.size());
+            (void)n;
+        }
+    };
 
     bool ok = true, fatal = false;
 
@@ -529,20 +566,51 @@ std::string Emulator::SelfTestFoundation() {
     {
         auto& gpu = VulkanGpuDevice::GetInstance();
         const bool vok = gpu.Initialize();
-        lines.push_back(std::string(vok ? "[PASS] 2. Vulkan runtime | "
+        push(std::string(vok ? "[PASS] 2. Vulkan runtime | "
                                         : "[FAIL] 2. Vulkan runtime | ") +
                         gpu.GetSummaryString());
         // Non-fatal: CI/emulators sometimes lack a real GPU driver.
     }
 
-    // --- Step 3: FEXCore context ----------------------------------------
+    // --- Step 3: GPU logical device + offscreen submission proof --------
+    {
+        std::string gpuDetail;
+        const bool gok = VulkanGpuDevice::GetInstance()
+                             .RunOffscreenClearProof(gpuDetail);
+        push(std::string(gok ? "[PASS] 3. GPU submission | "
+                                        : "[FAIL] 3. GPU submission | ") +
+                        gpuDetail);
+        if (!gok) goto done;   // honest: real device must submit commands
+    }
+
+    // --- Step 4: M7 backend gate — IR Clear -> Vulkan -> pixel readback --
+    // The M7 milestone gate (docs/milestones.md): instance -> device ->
+    // queue -> image -> clear -> submit -> fence -> READBACK with expected
+    // pixels. The clear arrives as a GpuOp (the M6 IR type) planned by
+    // gpu/vulkan_backend.cpp — the backend never sees GNM/PM4 types. The
+    // IR list is a synthetic one-Clear list (the decoder's Clear semantics
+    // are still M5-PARTIAL), so this proves the BACKEND chain, not the
+    // decoder — the proof's own detail line says so. Matched pixel count
+    // is the evidence; a created device is not.
+    {
+        std::string m7Detail;
+        const bool m7ok = VulkanGpuDevice::GetInstance()
+                              .RunM7ClearReadbackProof(m7Detail);
+        push(
+            std::string(m7ok ? "[PASS] 4. GPU IR clear readback | "
+                             : "[FAIL] 4. GPU IR clear readback | ") +
+            m7Detail);
+        if (!m7ok) goto done;   // honest: the readback gate IS M7
+    }
+
+    // --- Step 5: FEXCore context ----------------------------------------
     if (!FexCoreIntegration::Initialize()) {
-        lines.push_back("[FAIL] 3. FEXCore context (see logcat FEX tag)");
+        push("[FAIL] 5. FEXCore context (see logcat FEX tag)");
         goto done;
     }
-    lines.push_back("[PASS] 3. FEXCore context + syscall bridge");
+    push("[PASS] 5. FEXCore context + syscall bridge");
 
-    // --- Step 4: raw blob write/exit/hlt --------------------------------
+    // --- Step 6: raw blob write/exit/hlt --------------------------------
     {
         constexpr uint64_t kRawVa = 0x140000000ULL;              // window anchor
         constexpr uint64_t kRawStackTop = 0x148000000ULL;         // inside window
@@ -566,8 +634,8 @@ std::string Emulator::SelfTestFoundation() {
                                                        std::string::npos &&
                            r.exitCode == TEST_GUEST_EXPECTED_EXIT_CODE;
         if (!rawOk) { ok = false; r.error = "raw run did not meet the pass contract"; }
-        lines.push_back(std::string(rawOk ? "[PASS] 4. RAW x86-64 | write+exit42+halt "
-                                          : "[FAIL] 4. RAW x86-64 | ") +
+        push(std::string(rawOk ? "[PASS] 6. RAW x86-64 | write+exit42+halt "
+                                          : "[FAIL] 6. RAW x86-64 | ") +
                         "| out=\"" + r.output.substr(0, 64) + "\"" +
                         "| exitCode=" + std::to_string(r.exitCode) +
                         "| " + (r.error.empty() ? "" : r.error));
@@ -576,27 +644,27 @@ std::string Emulator::SelfTestFoundation() {
         if (!rawOk) goto done;
     }
 
-    // --- Step 5: ELF file round-trip through real loader -----------------
+    // --- Step 7: ELF file round-trip through real loader -----------------
     {
         auto& mm = MemoryManager::GetInstance();
         const std::string elfPath =
             ResolveFixturePath(m_baseDir, "px5_guest.elf");
         if (elfPath.empty()) {
-            lines.push_back("[FAIL] 5. no app-writable dir for the ELF fixture");
+            push("[FAIL] 7. no app-writable dir for the ELF fixture");
             goto done;
         }
 
         std::string ferr;
         if (!WriteFixtureFile(elfPath, TEST_GUEST_ELF, TEST_GUEST_ELF_SIZE,
                               ferr)) {
-            lines.push_back("[FAIL] 5. ELF fixture write failed (" + elfPath +
+            push("[FAIL] 7. ELF fixture write failed (" + elfPath +
                             ") stage=" + ferr);
             goto done;
         }
 
         LoadedElfImage img;
         if (!ElfLoader::LoadElfFile(elfPath, img)) {
-            lines.push_back("[FAIL] 5. loader: " + img.error);
+            push("[FAIL] 7. loader: " + img.error);
             goto done;
         }
         if (img.entryPoint != TEST_GUEST_LOAD_VADDR ||
@@ -604,7 +672,7 @@ std::string Emulator::SelfTestFoundation() {
             // v1.29: the fixture's e_entry is now the true code VA (the
             // old generator double-counted p_offset and the vc29 session
             // executed zeros past the image — the app-killing SIGSEGV).
-            lines.push_back("[FAIL] 5. loader metadata mismatch");
+            push("[FAIL] 7. loader metadata mismatch");
             goto done;
         }
 
@@ -624,14 +692,14 @@ std::string Emulator::SelfTestFoundation() {
             r.started && r.exitCode == 42 &&
             r.output.find(TEST_GUEST_EXPECTED_OUTPUT) != std::string::npos;
 
-        lines.push_back(std::string(elfOk ? "[PASS] 5. ELF pipeline | parse->map->bridge->JIT->write+exit42 "
-                                          : "[FAIL] 5. ELF pipeline |") +
+        push(std::string(elfOk ? "[PASS] 7. ELF pipeline | parse->map->bridge->JIT->write+exit42 "
+                                          : "[FAIL] 7. ELF pipeline |") +
                         " out=\"" + r.output.substr(0, 48) + "\"" +
                         " exit=" + std::to_string(r.exitCode));
         if (!elfOk) goto done;
     }
 
-    // --- Step 5b: SELF container -> real LoadSelf -> guest execution -----
+    // --- Step 7b: SELF container -> real LoadSelf -> guest execution -----
     // Phase C milestone 3: the SAME synthetic container layout the
     // extractor self-test validates wraps the REAL executable guest
     // (TEST_GUEST_ELF_V2). The container goes through the production
@@ -644,7 +712,7 @@ std::string Emulator::SelfTestFoundation() {
         const std::string selfPath =
             ResolveFixturePath(m_baseDir, "px5_guest.self");
         if (selfPath.empty()) {
-            lines.push_back("[FAIL] 5b. no app-writable dir for the SELF fixture");
+            push("[FAIL] 7b. no app-writable dir for the SELF fixture");
             goto done;
         }
 
@@ -657,25 +725,25 @@ std::string Emulator::SelfTestFoundation() {
         const auto built = SelfFixtures::BuildSelfFromWholeElf(
             elfFile, {SelfExtract::kSegFlagSigned});
         if (built.bytes.empty()) {
-            lines.push_back("[FAIL] 5b. SELF fixture build returned empty");
+            push("[FAIL] 7b. SELF fixture build returned empty");
             goto done;
         }
 
         std::string ferr5b;
         if (!WriteFixtureFile(selfPath, built.bytes.data(),
                               built.bytes.size(), ferr5b)) {
-            lines.push_back("[FAIL] 5b. SELF fixture write failed (" +
+            push("[FAIL] 7b. SELF fixture write failed (" +
                             selfPath + ") stage=" + ferr5b);
             goto done;
         }
 
         LoadedElfImage img;
         if (!ElfLoader::LoadSelf(selfPath, img)) {
-            lines.push_back("[FAIL] 5b. SELF->loader: " + img.error);
+            push("[FAIL] 7b. SELF->loader: " + img.error);
             goto done;
         }
         if (!img.isSelf || img.segments.empty() || img.entryPoint == 0) {
-            lines.push_back("[FAIL] 5b. SELF metadata invalid (isSelf/entry/segments)");
+            push("[FAIL] 7b. SELF metadata invalid (isSelf/entry/segments)");
             goto done;
         }
 
@@ -689,7 +757,7 @@ std::string Emulator::SelfTestFoundation() {
         void* ripHost5b = mm.GetHostPointer(img.entryPoint);
         void* spHost5b  = mm.GetHostPointer(kSelfStackTop - 256);
         if (!ripHost5b || !spHost5b) {
-            lines.push_back("[FAIL] 5b. SELF host bridge missing");
+            push("[FAIL] 7b. SELF host bridge missing");
             goto done;
         }
         auto r5b = FexCoreIntegration::ExecuteAtHostRip(
@@ -701,35 +769,35 @@ std::string Emulator::SelfTestFoundation() {
         const bool selfOk =
             r5b.started && r5b.exitCode == TEST_GUEST_V2_EXIT_OK &&
             r5b.output.find(TEST_GUEST_V2_EXPECTED_OUTPUT) != std::string::npos;
-        lines.push_back(std::string(
-                selfOk ? "[PASS] 5b. SELF container pipeline | extract->map->JIT->exec "
-                       : "[FAIL] 5b. SELF container pipeline | ") +
+        push(std::string(
+                selfOk ? "[PASS] 7b. SELF container pipeline | extract->map->JIT->exec "
+                       : "[FAIL] 7b. SELF container pipeline | ") +
                 "out=\"" + r5b.output.substr(0, 40) + "\"" +
                 " exit=" + std::to_string(r5b.exitCode));
         if (!selfOk) goto done;
     }
 
-    // --- Step 6: ADVANCED ELF v2 — real mmap + memory round-trip --------
+    // --- Step 8: ADVANCED ELF v2 — real mmap + memory round-trip --------
     {
         auto& mm = MemoryManager::GetInstance();
         const std::string elfPath =
             ResolveFixturePath(m_baseDir, "px5_guest_v2.elf");
         if (elfPath.empty()) {
-            lines.push_back("[FAIL] 6. no app-writable dir for the ELFv2 fixture");
+            push("[FAIL] 8. no app-writable dir for the ELFv2 fixture");
             goto done;
         }
 
         std::string ferr6;
         if (!WriteFixtureFile(elfPath, TEST_GUEST_ELF_V2,
                               TEST_GUEST_ELF_V2_SIZE, ferr6)) {
-            lines.push_back("[FAIL] 6. ELFv2 fixture write (" + elfPath +
+            push("[FAIL] 8. ELFv2 fixture write (" + elfPath +
                             ") stage=" + ferr6);
             goto done;
         }
 
         LoadedElfImage img;
         if (!ElfLoader::LoadElfFile(elfPath, img)) {
-            lines.push_back("[FAIL] 6. ELFv2 load: " + img.error);
+            push("[FAIL] 8. ELFv2 load: " + img.error);
             goto done;
         }
 
@@ -743,7 +811,7 @@ std::string Emulator::SelfTestFoundation() {
         void* ripHost = mm.GetHostPointer(img.entryPoint);
         void* spHost  = mm.GetHostPointer(kStackTop2 - 256);
         if (!ripHost || !spHost) {
-            lines.push_back("[FAIL] 6. ELFv2 host bridge missing");
+            push("[FAIL] 8. ELFv2 host bridge missing");
             goto done;
         }
         auto r = FexCoreIntegration::ExecuteAtHostRip(
@@ -755,15 +823,15 @@ std::string Emulator::SelfTestFoundation() {
         const bool v2ok =
             r.started && r.exitCode == TEST_GUEST_V2_EXIT_OK &&
             r.output.find(TEST_GUEST_V2_EXPECTED_OUTPUT) != std::string::npos;
-        lines.push_back(std::string(
-                v2ok ? "[PASS] 6. ELFv2 mmap round-trip | "
-                     : "[FAIL] 6. ELFv2 mmap | ") +
+        push(std::string(
+                v2ok ? "[PASS] 8. ELFv2 mmap round-trip | "
+                     : "[FAIL] 8. ELFv2 mmap | ") +
                 "out=\"" + r.output.substr(0, 40) + "\"" +
                 " exit=" + std::to_string(r.exitCode));
         if (!v2ok) goto done;
     }
 
-    // --- Step 7: guest synchronous trap (ud2) routed, app survives ------
+    // --- Step 9: guest synchronous trap (ud2) routed, app survives ------
     // Proves the FEX frontend signal contract on Android end-to-end:
     // guest ud2 -> FEXCore SynchronousFaultData + dispatcher GuestSignal
     // block -> host SIGILL -> PX5 fault router -> clean unwind. Before this
@@ -799,7 +867,7 @@ std::string Emulator::SelfTestFoundation() {
                             r.guestTrap.siCode  == TEST_GUEST_UD2_SICODE;
         char trapLine[160];
         snprintf(trapLine, sizeof(trapLine),
-                 "%s 7. Guest trap routing | ud2 -> %s | signal=%u trapNo=%u "
+                 "%s 9. Guest trap routing | ud2 -> %s | signal=%u trapNo=%u "
                  "si_code=%u guestRIP=0x%llx | app survived",
                  trapOk ? "[PASS]" : "[FAIL]",
                  r.guestTrap.fired ? "routed+unwound" : "NOT ROUTED",
@@ -810,38 +878,7 @@ std::string Emulator::SelfTestFoundation() {
         if (!trapOk) goto done;
     }
 
-    // --- Step 8: GPU logical device + offscreen submission proof --------
-    {
-        std::string gpuDetail;
-        const bool gok = VulkanGpuDevice::GetInstance()
-                             .RunOffscreenClearProof(gpuDetail);
-        lines.push_back(std::string(gok ? "[PASS] 8. GPU submission | "
-                                        : "[FAIL] 8. GPU submission | ") +
-                        gpuDetail);
-        if (!gok) goto done;   // honest: real device must submit commands
-    }
-
-    // --- Step 8b: M7 backend gate — IR Clear -> Vulkan -> pixel readback --
-    // The M7 milestone gate (docs/milestones.md): instance -> device ->
-    // queue -> image -> clear -> submit -> fence -> READBACK with expected
-    // pixels. The clear arrives as a GpuOp (the M6 IR type) planned by
-    // gpu/vulkan_backend.cpp — the backend never sees GNM/PM4 types. The
-    // IR list is a synthetic one-Clear list (the decoder's Clear semantics
-    // are still M5-PARTIAL), so this proves the BACKEND chain, not the
-    // decoder — the proof's own detail line says so. Matched pixel count
-    // is the evidence; a created device is not.
-    {
-        std::string m7Detail;
-        const bool m7ok = VulkanGpuDevice::GetInstance()
-                              .RunM7ClearReadbackProof(m7Detail);
-        lines.push_back(
-            std::string(m7ok ? "[PASS] 8b. GPU IR clear readback | "
-                             : "[FAIL] 8b. GPU IR clear readback | ") +
-            m7Detail);
-        if (!m7ok) goto done;   // honest: the readback gate IS M7
-    }
-
-    // --- Step 9: libkernel HLE DirectMemory exercise ---------------------
+    // --- Step 10: libkernel HLE DirectMemory exercise ---------------------
     {
         auto& kHle = SceKernelHle::KernelHle::GetInstance();
         kHle.RegisterAll();
@@ -850,7 +887,7 @@ std::string Emulator::SelfTestFoundation() {
         uint64_t rc = kHle.AllocateDirectMemory(0, 0, 4096, 4096,
                                                 reinterpret_cast<uint64_t>(&phys));
         if (rc != SceKernelHle::SCE_OK) {
-            lines.push_back("[FAIL] 9. libkernel DM allocate rc=" + std::to_string(rc));
+            push("[FAIL] 10. libkernel DM allocate rc=" + std::to_string(rc));
             goto done;
         }
         const uint64_t mapped =
@@ -875,15 +912,15 @@ std::string Emulator::SelfTestFoundation() {
         hleOk = hleOk && wrc == sizeof(tag) &&
                 GuestSyscalls::TakeOutput().find("SCE-HLE") != std::string::npos;
 
-        lines.push_back(std::string(hleOk ? "[PASS] 9. libkernel HLE | "
-                                          : "[FAIL] 9. libkernel HLE | ") +
+        push(std::string(hleOk ? "[PASS] 10. libkernel HLE | "
+                                          : "[FAIL] 10. libkernel HLE | ") +
                         kHle.GetSummaryString() +
                         " phys=0x" + ([&]{ char b[24];
                             snprintf(b,sizeof(b),"%llx",(unsigned long long)phys); return std::string(b);}()));
         if (!hleOk) goto done;
     }
 
-    // --- Step 10: NID gate — first PS5-style import call lands on a
+    // --- Step 11: NID gate — first PS5-style import call lands on a
     // bionic-native HLE function (v1.31). Guest bytes call the reserved
     // gate syscall; GuestSyscalls routes to RuntimeLinker; the registered
     // HLE function returns 7+35=42; the guest exits with it. This is the
@@ -923,7 +960,7 @@ std::string Emulator::SelfTestFoundation() {
                             gst.gateCalls == 1 && gst.resolvedHle == 1;
         char gline[192];
         snprintf(gline, sizeof(gline),
-                 "%s 10. NID gate | guest->gate-syscall->bionic HLE->exit%llu "
+                 "%s 11. NID gate | guest->gate-syscall->bionic HLE->exit%llu "
                  "| nid=0x%08llx gateCalls=%llu resolvedHle=%llu",
                  gateOk ? "[PASS]" : "[FAIL]",
                  (unsigned long long)r10.exitCode,
@@ -934,7 +971,7 @@ std::string Emulator::SelfTestFoundation() {
         if (!gateOk) goto done;
     }
 
-    // --- Step 11: the evidence primitive itself (v1.41). The foundation
+    // --- Step 12: the evidence primitive itself (v1.41). The foundation
     // suite's SHA-256 must be proven on-device BEFORE any image hash can
     // be trusted: FIPS 180-4 known-answer vectors, including the 55-byte
     // padding boundary and a full second block.
@@ -942,7 +979,7 @@ std::string Emulator::SelfTestFoundation() {
         const bool shaOk = Evidence::SelfTest();
         char sline[128];
         snprintf(sline, sizeof(sline),
-                 "%s 11. SHA-256 evidence primitive | FIPS 180-4 KAT "
+                 "%s 12. SHA-256 evidence primitive | FIPS 180-4 KAT "
                  "(empty/abc/55B/64B)",
                  shaOk ? "[PASS]" : "[FAIL]");
         push(sline);
@@ -951,8 +988,10 @@ std::string Emulator::SelfTestFoundation() {
 
     verdict = "PASS";
 done:
-    lines.push_back(FexCoreIntegration::GetSyscallStatsString());
-    lines.push_back(std::string("VERDICT: ") + verdict);
+    // The tail lines stream too: a child death cannot strand the syscall
+    // counters in the dead child's memory.
+    push(FexCoreIntegration::GetSyscallStatsString());
+    push(std::string("VERDICT: ") + verdict);
 
     std::string report;
     for (size_t i = 0; i < lines.size(); ++i)

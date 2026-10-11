@@ -26,13 +26,22 @@ uint8_t ClearFloatToUnorm8(float f) {
 void BackendPlanStats::Reset() { *this = BackendPlanStats{}; }
 
 std::string BackendPlanStats::SummaryString() const {
-    char b[160];
+    // Per-kind deferral is the point: "deferred=6" hides WHERE the guest
+    // stream stops; the split (draw/drawIndexed/dispatch/scissor) is what
+    // a device session quotes to name the next blocker.
+    char b[224];
     snprintf(b, sizeof(b),
-             "ops=%llu clear=%llu boundary=%llu deferred=%llu unknown=%llu",
+             "ops=%llu clear=%llu boundary=%llu deferred=%llu"
+             "(scissor=%llu draw=%llu drawIndexed=%llu dispatch=%llu)"
+             " unknown=%llu",
              static_cast<unsigned long long>(opsReceived),
              static_cast<unsigned long long>(clearOps),
              static_cast<unsigned long long>(boundaryOps),
              static_cast<unsigned long long>(DeferredTotal()),
+             static_cast<unsigned long long>(scissorOpsDeferred),
+             static_cast<unsigned long long>(drawOpsDeferred),
+             static_cast<unsigned long long>(drawIndexedOpsDeferred),
+             static_cast<unsigned long long>(dispatchOpsDeferred),
              static_cast<unsigned long long>(unknownOps));
     return std::string(b);
 }
@@ -108,6 +117,122 @@ VulkanCommandPlan PlanVulkanCommands(const GpuOpList& ops) {
         default:                    ++st.unknownOps;           break;
         }
     }
+
+    return plan;
+}
+
+void RenderPassPlan::Reset() { *this = RenderPassPlan{}; }
+
+std::string RenderPassPlan::SummaryString() const {
+    uint64_t clears = 0, draws = 0;
+    for (const PlannedRenderPass& p : passes) {
+        clears += p.clearOps;
+        draws += static_cast<uint64_t>(p.drawOps) + p.drawIndexedOps;
+    }
+    char b[160];
+    snprintf(b, sizeof(b),
+             "passes=%llu drawOps=%llu clearOps=%llu inPasses=%llu "
+             "outside=%llu",
+             static_cast<unsigned long long>(passes.size()),
+             static_cast<unsigned long long>(draws),
+             static_cast<unsigned long long>(clears),
+             static_cast<unsigned long long>(opsInPasses),
+             static_cast<unsigned long long>(opsOutsidePasses));
+    return std::string(b);
+}
+
+RenderPassPlan PlanRenderPasses(const GpuOpList& ops) {
+    RenderPassPlan plan;
+    PlannedRenderPass cur;
+    bool passOpen = false;
+
+    // The pass's first COLOR-WRITING op decides the load op (see header).
+    bool sawColorWriter = false;
+    bool firstColorWriterIsClear = false;
+
+    auto closePass = [&]() {
+        if (!passOpen) return;
+        cur.colorLoadOp = !sawColorWriter
+                              ? PlannedRenderPass::LoadOp::kDontCare
+                          : firstColorWriterIsClear
+                              ? PlannedRenderPass::LoadOp::kClear
+                              : PlannedRenderPass::LoadOp::kLoad;
+        cur.colorStoreOp = sawColorWriter
+                               ? PlannedRenderPass::StoreOp::kStore
+                               : PlannedRenderPass::StoreOp::kDontCare;
+        plan.opsInPasses += cur.OpCount();
+        plan.passes.push_back(cur);
+        passOpen = false;
+        cur = PlannedRenderPass{};
+        sawColorWriter = false;
+        firstColorWriterIsClear = false;
+    };
+
+    for (const GpuOp& op : ops.Ops()) {
+        ++plan.opsTotal;
+
+        switch (op.kind) {
+        case OpKind::kClear:
+            if (!passOpen) {
+                passOpen = true;
+                cur.firstSeq = op.seq;
+            }
+            if (!sawColorWriter) firstColorWriterIsClear = true;
+            sawColorWriter = true;
+            ++cur.clearOps;
+            cur.lastSeq = op.seq;
+            break;
+
+        case OpKind::kSetScissor:
+            if (!passOpen) {
+                passOpen = true;
+                cur.firstSeq = op.seq;
+            }
+            ++cur.scissorOps;
+            cur.lastSeq = op.seq;
+            break;
+
+        case OpKind::kDraw:
+        case OpKind::kDrawIndexed: {
+            if (!passOpen) {
+                passOpen = true;
+                cur.firstSeq = op.seq;
+            }
+            if (!sawColorWriter) firstColorWriterIsClear = false;
+            sawColorWriter = true;
+            if (op.kind == OpKind::kDraw) ++cur.drawOps;
+            else                                       ++cur.drawIndexedOps;
+            cur.lastSeq = op.seq;
+            break;
+        }
+
+        case OpKind::kBarrier:
+            // Scope 0 closes the pass: the submit boundary ends the tile
+            // region. Reserved scopes stay unknown, outside any pass.
+            closePass();
+            ++plan.opsOutsidePasses;
+            break;
+
+        case OpKind::kDispatch:
+            // Compute never enters a render pass — no tile-memory state.
+            closePass();
+            ++plan.opsOutsidePasses;
+            break;
+
+        default:
+            // Unknown op inside an open graphics region: counted WITH the
+            // pass (it belongs to the stream region), never guessed into a
+            // command; outside a pass it stays outside.
+            if (!passOpen) {
+                ++plan.opsOutsidePasses;
+            } else {
+                ++cur.unknownOps;
+                cur.lastSeq = op.seq;
+            }
+            break;
+        }
+    }
+    closePass();
 
     return plan;
 }

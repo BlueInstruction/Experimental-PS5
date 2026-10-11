@@ -46,8 +46,11 @@ using PX5::Gpu::GpuOpList;
 using PX5::Gpu::LowerGnmStateToIR;
 using PX5::Gpu::LowerStats;
 using PX5::Gpu::OpKind;
+using PX5::Gpu::PlanRenderPasses;
 using PX5::Gpu::PlanVulkanCommands;
+using PX5::Gpu::PlannedRenderPass;
 using PX5::Gpu::ReadbackCheck;
+using PX5::Gpu::RenderPassPlan;
 using PX5::Gpu::VerifyClearReadback;
 using PX5::Gpu::VulkanCommand;
 using PX5::Gpu::VulkanCommandPlan;
@@ -358,6 +361,117 @@ int main() {
             !tinyChk.allMatch && tinyChk.firstBadByte == 15,
         "2x2 buffer: 3/4 match, firstBadByte=15 (A channel, pixel 3)");
 
+    // ==== Section 8: TBDR/GMEM render-pass planner =========================
+    printf("\nRender-pass plan (TBDR/GMEM regions, before any vkCmdDraw):\n");
+
+    // A. leading clear folds into the load op — the TBDR win: tiles never
+    //    round-trip between the clear and the draw.
+    {
+        GpuOpList ops;
+        ops.Push(MakeClear(1u, 0.0f, 0.0f, 1.0f, 1.0f));
+        GpuOp d{};
+        d.kind = OpKind::kDraw; d.seq = 2u; d.count = 3u;
+        ops.Push(d);
+        ops.Push(MakeBarrier(3u));
+        const RenderPassPlan rp = PlanRenderPasses(ops);
+        chk(rp.opsTotal == 3 && rp.opsInPasses == 2 &&
+                rp.opsOutsidePasses == 1,
+            "A: clear+draw inside the pass, boundary outside");
+        chk(rp.passes.size() == 1 &&
+                rp.passes[0].colorLoadOp == PlannedRenderPass::LoadOp::kClear &&
+                rp.passes[0].colorStoreOp == PlannedRenderPass::StoreOp::kStore &&
+                rp.passes[0].clearOps == 1 && rp.passes[0].drawOps == 1,
+            "A: leading clear -> loadOp=CLEAR folded, storeOp=STORE");
+    }
+
+    // B. draws without a leading clear keep the tile contents: LOAD.
+    {
+        GpuOpList ops;
+        GpuOp d{};
+        d.kind = OpKind::kDraw; d.seq = 1u; d.count = 3u;
+        ops.Push(d);
+        ops.Push(MakeBarrier(2u));
+        const RenderPassPlan rp = PlanRenderPasses(ops);
+        chk(rp.passes.size() == 1 &&
+                rp.passes[0].colorLoadOp == PlannedRenderPass::LoadOp::kLoad &&
+                rp.passes[0].colorStoreOp == PlannedRenderPass::StoreOp::kStore,
+            "B: draw-only pass -> loadOp=LOAD (GMEM contents preserved)");
+    }
+
+    // C. scissor-only region writes no color: DONT_CARE both ways.
+    {
+        GpuOpList ops;
+        GpuOp sc{};
+        sc.kind = OpKind::kSetScissor; sc.seq = 1u;
+        ops.Push(sc);
+        ops.Push(MakeBarrier(2u));
+        const RenderPassPlan rp = PlanRenderPasses(ops);
+        chk(rp.passes.size() == 1 &&
+                rp.passes[0].colorLoadOp ==
+                    PlannedRenderPass::LoadOp::kDontCare &&
+                rp.passes[0].colorStoreOp ==
+                    PlannedRenderPass::StoreOp::kDontCare &&
+                rp.passes[0].scissorOps == 1,
+            "C: scissor-only pass -> no color traffic named");
+    }
+
+    // D. compute never enters a pass.
+    {
+        GpuOpList ops;
+        GpuOp dp{};
+        dp.kind = OpKind::kDispatch; dp.seq = 1u;
+        ops.Push(dp);
+        ops.Push(MakeBarrier(2u));
+        const RenderPassPlan rp = PlanRenderPasses(ops);
+        chk(rp.passes.empty() && rp.opsOutsidePasses == 2 &&
+                rp.opsTotal == 2,
+            "D: dispatch + boundary stay outside every pass");
+    }
+
+    // E. a mid-pass clear is counted and does NOT change the load decision.
+    {
+        GpuOpList ops;
+        ops.Push(MakeClear(1u, 1.0f, 0.0f, 0.0f, 1.0f));
+        GpuOp d{};
+        d.kind = OpKind::kDraw; d.seq = 2u; d.count = 3u;
+        ops.Push(d);
+        ops.Push(MakeClear(3u, 0.0f, 1.0f, 0.0f, 1.0f));
+        GpuOp d2{};
+        d2.kind = OpKind::kDraw; d2.seq = 4u; d2.count = 3u;
+        ops.Push(d2);
+        ops.Push(MakeBarrier(5u));
+        const RenderPassPlan rp = PlanRenderPasses(ops);
+        chk(rp.passes.size() == 1 &&
+                rp.passes[0].clearOps == 2 && rp.passes[0].drawOps == 2 &&
+                rp.passes[0].colorLoadOp == PlannedRenderPass::LoadOp::kClear,
+            "E: mid-pass clear counted; load op still the LEADING clear");
+    }
+
+    // F. a boundary splits regions: two passes, both LOAD (no clear).
+    {
+        GpuOpList ops;
+        GpuOp d{};  d.kind = OpKind::kDraw;  d.seq = 1u; d.count = 3u;
+        GpuOp d2{}; d2.kind = OpKind::kDraw; d2.seq = 3u; d2.count = 3u;
+        ops.Push(d);
+        ops.Push(MakeBarrier(2u));
+        ops.Push(d2);
+        ops.Push(MakeBarrier(4u));
+        const RenderPassPlan rp = PlanRenderPasses(ops);
+        chk(rp.passes.size() == 2 &&
+                rp.passes[0].colorLoadOp == PlannedRenderPass::LoadOp::kLoad &&
+                rp.passes[1].colorLoadOp == PlannedRenderPass::LoadOp::kLoad,
+            "F: submit boundary splits two LOAD passes");
+    }
+
+    // G. empty list, honest zeroes.
+    {
+        GpuOpList ops;
+        const RenderPassPlan rp = PlanRenderPasses(ops);
+        chk(rp.passes.empty() && rp.opsTotal == 0 &&
+                rp.opsInPasses == 0 && rp.opsOutsidePasses == 0,
+            "G: empty IR -> empty pass plan");
+    }
+
     printf("\n");
     if (fails == 0) {
         // Honest shape: this is the T1 core gate, NOT the M7 milestone gate
@@ -367,8 +481,9 @@ int main() {
         printf("    clear plan = barrier + clear + submit boundary\n");
         printf("    deferred ops counted by kind, never guessed\n");
         printf("    readback rule: exact bytes, last clear wins\n");
+        printf("    TBDR/GMEM pass regions: load/store named before any draw\n");
         printf("M7 device gate (T3 readback): NOT CLAIMED HERE — pending\n");
-        printf("the on-device proof run (foundation suite step 8b).\n");
+        printf("the on-device proof run (foundation suite step 4).\n");
         return 0;
     }
     printf("FAILED (%d failure%s)\n", fails, fails == 1 ? "" : "s");

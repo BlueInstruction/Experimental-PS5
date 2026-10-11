@@ -259,16 +259,112 @@ int main() {
         Require(submit.CaptureOutcomes().size() <= 8u, "outcome ring bounded");
 
         // ---- Stats string carries the evidence ---------------------------
+        // plan[last:] names each deferred kind (T2: "deferred per type"),
+        // cap[...] names the per-stage capture outcomes (SPIR-V words or
+        // the named error).
         const std::string stats = submit.GetStatsString();
         Require(stats.find("ir[last:") != std::string::npos &&
                     stats.find("plan[last:") != std::string::npos &&
                     stats.find("captures=5") != std::string::npos &&
                     stats.find("ok=2") != std::string::npos,
                 "stats string carries the GPU-path evidence");
+        // Last plan is cumulative (2 dispatches from stream1 + 4 from
+        // streamBad = 6 dispatches, 2 scissors, 2 draws, 1 boundary).
+        Require(stats.find("deferred=10(scissor=2 draw=2 drawIndexed=0 "
+                           "dispatch=6)") != std::string::npos,
+                "plan summary splits the deferral by kind (" + stats + ")");
+        Require(stats.find("cap[CS@") != std::string::npos &&
+                    stats.find("w,VS@") != std::string::npos &&
+                    stats.find("w,") != std::string::npos &&
+                    stats.find("fail:shader capture: code unreadable @0x") !=
+                        std::string::npos,
+                "stats string carries the per-stage capture ring (" +
+                    stats + ")");
 
         submit.ResetForTest();
         Require(submit.Lowerings() == 0u && submit.CaptureAttempts() == 0u,
                 "reset clears the GPU-path evidence");
+
+        // ---- Module hop: the orphaned layer gets its caller -------------
+        // CreateShaderModuleFromWords had no caller; the sink is the seam.
+        // Success path: fresh stream -> CS + VS captures -> two sink calls
+        // with the SPIR-V words; second identical submit is pinned (capture
+        // AND module) and never reaches the sink again.
+        std::vector<std::pair<uint32_t, size_t>> moduleCalls;
+        bool moduleFail = false;
+        submit.SetShaderMemoryReaderForTest(MapReader(mem));
+        submit.SetLogTagForTest("[submit-gpu-path] ");
+        submit.SetShaderModuleSink(
+            [&](uint32_t stage, uint64_t vaddr, const uint32_t* words,
+                size_t n, std::string& err) -> bool {
+                (void)vaddr;
+                Require(words != nullptr && n > 5u,
+                        "sink receives the SPIR-V words");
+                moduleCalls.push_back({stage, n});
+                if (moduleFail) {
+                    err = "hosttest: fake device unavailable";
+                    return false;
+                }
+                return true;
+            });
+
+        Require(submit.SubmitBuffer(stream1.data(), stream1.size(),
+                                    "cb[0]", &err),
+                "sink-path submission 1 rejected: " + err);
+        Require(moduleCalls.size() == 2u,
+                "sink called once per captured stage (CS + VS), got " +
+                    std::to_string(moduleCalls.size()));
+        Require(submit.ModulesMaterialized() == 2u &&
+                    submit.ModuleFailures() == 0u,
+                "module counters track the sink");
+
+        const size_t callsAfterFirst = moduleCalls.size();
+        Require(submit.SubmitBuffer(stream1.data(), stream1.size(),
+                                    "cb[0]", &err),
+                "sink-path submission 2 rejected");
+        Require(moduleCalls.size() == callsAfterFirst,
+                "pinned capture + module skips the sink on replay");
+        Require(submit.CaptureSkips() == 2u, "replay counted as skips");
+
+        // Failure path: a module failure is NOT pinned — the leg retries
+        // within the same per-vaddr budget (3), then pins by budget.
+        moduleFail = true;
+        constexpr uint64_t kSinkVaddr = 0x44000000ull;
+        mem[kSinkVaddr] =
+            std::vector<uint32_t>(ComputeCode.begin(), ComputeCode.end());
+        std::vector<uint32_t> streamSink =
+            BuildComputeBlock(kSinkVaddr) /* CS only */;
+        for (int i = 0; i < 5; ++i) {
+            Require(submit.SubmitBuffer(streamSink.data(),
+                                        streamSink.size(),
+                                        "cb[sink]", &err),
+                    "sink-fail submission rejected");
+        }
+        // First sink stream made 2 calls (CS + VS success path); the
+        // failing CS added exactly 3 (budget), replays added none.
+        Require(moduleCalls.size() == 5u,
+                "module failure retries bounded to the budget (calls=" +
+                    std::to_string(moduleCalls.size()) + ")");
+        Require(submit.ModulesMaterialized() == 2u,
+                "successes unchanged by the failing stage");
+        Require(submit.ModuleFailures() == 3u,
+                "module failures counted (fails=" +
+                    std::to_string(submit.ModuleFailures()) + ")");
+
+        const std::string stats3 = submit.GetStatsString();
+        Require(stats3.find("modules=2 moduleFails=3") != std::string::npos,
+                "stats string carries the module counters (" + stats3 + ")");
+        // TBDR/GMEM plan over the cumulative IR: the stream order is
+        // dispatch, scissor, draw (x2) then five dispatches + the barrier,
+        // so the scissor+draw regions are TWO passes (each closed by the
+        // next dispatch/boundary); every dispatch stays outside (compute
+        // has no GMEM).
+        Require(stats3.find("rp[last: passes=2 drawOps=2 clearOps=0 "
+                            "inPasses=4 outside=8") != std::string::npos,
+                "stats string carries the render-pass plan (" + stats3 + ")");
+
+        submit.SetShaderModuleSink(nullptr);
+        submit.ResetForTest();
 
         printf("\nGNM submit GPU-path gate PASS\n");
         printf("  IR: 4 ops (dispatch/scissor/draw/barrier) from a real "
