@@ -8,7 +8,7 @@
 
 | Tier | Where | Proves | Examples |
 |---|---|---|---|
-| T1 host tests | `tools/hosttests/run.sh` (no device needed) | logic correctness, ABI parity, deterministic decode | `import_trap_test`, `memory_range_test`, JNI parity (45/45 symbols), pm4 stream test (M5), GPU IR lowering (M6) |
+| T1 host tests | `tools/hosttests/run.sh` (no device needed) | logic correctness, ABI parity, deterministic decode | `import_trap_test`, `memory_range_test`, JNI parity (46/46 symbols), pm4 stream test (M5), GPU IR lowering (M6), submit-path gate (`gnm_submit_gpu_path_test`: decode → IR → planner → capture → SPIR-V), M8 T1-T7 shader gates |
 | T2 device evidence | `px5_main.log` + event stream from a real run | behaviour on ARM64 hardware | driver preload via SHARED namespace, GPU proof PASS, crash reports with `pc=` |
 | T3 readback/pixel proof | offscreen render + readback | the render path produces specific bytes | M7 gate, M8 gate |
 

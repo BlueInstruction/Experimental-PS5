@@ -16,6 +16,21 @@
 #endif
 #include <utils/logger.h>
 
+namespace {
+
+using PX5::Gpu::GuestShaderStage;
+
+[[maybe_unused]] const char* StageName(uint32_t stage) {
+    switch (static_cast<GuestShaderStage>(stage)) {
+        case GuestShaderStage::Compute:  return "CS";
+        case GuestShaderStage::Vertex:   return "VS";
+        case GuestShaderStage::Fragment: return "PS";
+        default:                         return "?";
+    }
+}
+
+} // namespace
+
 namespace PX5::Gnm {
 
 GnmSubmit& GnmSubmit::GetInstance() {
@@ -58,6 +73,16 @@ void GnmSubmit::ResetForTest() {
     m_dwordsDecoded = 0;
     m_errors.clear();
     m_logTag = "";
+    m_irScratch.Clear();
+    m_lastLower.Reset();
+    m_lastPlan.Reset();
+    m_lowerings = 0;
+    m_captureAttempts = 0;
+    m_captureOk = 0;
+    m_captureSkips = 0;
+    for (auto& memo : m_stageMemo) memo = StageMemo{};
+    m_captureOutcomes.clear();
+    m_testShaderReader = nullptr;
 }
 
 bool GnmSubmit::SubmitBuffer(const uint32_t* dwords, size_t dwordCount,
@@ -94,7 +119,109 @@ bool GnmSubmit::SubmitBuffer(const uint32_t* dwords, size_t dwordCount,
     }
     // Stream errors are evidence, not fatal: partial decode of a malformed
     // buffer still yields real stats. The error ring carries the reasons.
+
+    // GPU-path evidence: the decoded state now walks the REAL chain that
+    // ends at Vulkan — M6 lowering, M7 planner accounting, M8 shader
+    // capture. Accounting only: nothing materializes, nothing renders
+    // (the planner defers pipeline-needing ops by design; that deferral
+    // count IS the honest distance to the first guest-driven frame).
+    RunGpuPathEvidence();
+
     return true;
+}
+
+void GnmSubmit::RunGpuPathEvidence() {
+    // ---- M6: cumulative state -> ordered IR (bounded list) ----------------
+    m_lastLower = PX5::Gpu::LowerGnmStateToIR(m_state, m_irScratch);
+    ++m_lowerings;
+
+    // ---- M7: IR -> command-plan accounting (Vulkan-free) ------------------
+    // The plan is NOT executed here: executing clear ops needs a target
+    // image the runtime path does not own yet, and every pipeline-needing
+    // op is deferred by the M7-T1-locked mapping. The stats ARE the point:
+    // they turn "a game submitted N draws" into per-kind counters the
+    // device log can quote, instead of a silent end at GnmState.
+    m_lastPlan = PX5::Gpu::PlanVulkanCommands(m_irScratch).stats;
+
+    // ---- M8: capture + recompile what the stream programmed ---------------
+    // Binaries that ship no shader service (the x86_64 UI-smoke stub, and
+    // the host HLE tests that link gnm_submit without the M8 stack) compile
+    // this leg down to a named skip: lowering + planning still run,
+    // captures stay at zero. Every real ABI (arm64 engine, the full host
+    // gates) runs the full leg.
+#ifndef PX5_NO_SHADER_SERVICE
+    for (uint32_t s = 0; s < kCaptureStages; ++s) {
+        const auto stage = static_cast<GuestShaderStage>(s);
+        StageMemo& memo = m_stageMemo[s];
+
+        const PX5::Gpu::ShaderCaptureResult captured =
+            PX5::Gpu::ShaderCapture::ExtractShader(m_state, stage);
+        if (!captured.hasProgram) continue;   // stream never loaded it
+
+        // Memoization: same program + pinned success, or retry budget
+        // spent -> skip. Never re-read a stable program per submit.
+        if (memo.tried && memo.vaddr == captured.codeVaddr &&
+            (memo.ok || memo.attempts >= kMaxCaptureAttemptsPerVaddr)) {
+            ++m_captureSkips;
+            continue;
+        }
+
+        if (!memo.tried || memo.vaddr != captured.codeVaddr) {
+            memo = StageMemo{};
+            memo.vaddr = captured.codeVaddr;
+            memo.tried = true;
+        }
+        ++memo.attempts;
+        ++m_captureAttempts;
+
+        // Guest-memory reader: the test seam when installed, otherwise the
+        // same resolution policy descriptors use (MemoryManager window on
+        // device; all-or-nothing range check, named failure otherwise).
+        PX5::Gpu::ShaderCapture::MemoryReader reader = m_testShaderReader;
+        if (!reader) {
+            reader = [this](uint64_t vaddr, uint32_t maxDwords,
+                            std::vector<uint32_t>& out) {
+                const size_t bytes =
+                    static_cast<size_t>(maxDwords) * sizeof(uint32_t);
+                const void* host = Resolve(vaddr, bytes);
+                if (!host) return false;
+                const uint32_t* dwords =
+                    static_cast<const uint32_t*>(host);
+                out.assign(dwords, dwords + maxDwords);
+                return true;
+            };
+        }
+
+        std::vector<uint32_t> spirv;
+        std::string error;
+        CaptureOutcome outcome;
+        outcome.stage = s;
+        outcome.codeVaddr = captured.codeVaddr;
+        outcome.ok = PX5::Gpu::ShaderCapture::CaptureAndRecompile(
+            m_state, stage, reader, spirv, error);
+        if (outcome.ok) {
+            outcome.spirvWords = static_cast<uint32_t>(spirv.size());
+            memo.ok = true;
+            ++m_captureOk;
+            PX5_LOGI(LogCategory::GPU,
+                     "%sGPU path: %s @0x%llX -> SPIR-V (%u words)",
+                     m_logTag, StageName(s),
+                     (unsigned long long)outcome.codeVaddr,
+                     outcome.spirvWords);
+        } else {
+            outcome.error = error;
+            PX5_LOGI(LogCategory::GPU,
+                     "%sGPU path: %s @0x%llX capture failed: %s",
+                     m_logTag, StageName(s),
+                     (unsigned long long)outcome.codeVaddr,
+                     error.c_str());
+        }
+        if (m_captureOutcomes.size() >= kMaxCaptureOutcomes) {
+            m_captureOutcomes.erase(m_captureOutcomes.begin());
+        }
+        m_captureOutcomes.push_back(std::move(outcome));
+    }
+#endif // PX5_UI_SMOKE_STUB
 }
 
 int64_t GnmSubmit::SubmitDescriptors(uint64_t count, uint64_t descriptorsPtr,
@@ -199,7 +326,21 @@ std::string GnmSubmit::GetStatsString() const {
                   (unsigned long long)m_cumulative.dispatches,
                   (unsigned long long)m_state.TotalRegisterWrites(),
                   (unsigned long long)m_cumulative.streamErrors);
-    return std::string(head);
+    std::string out(head);
+    // GPU-path evidence: the last lowering/planning pass over the real
+    // submissions, plus lifetime capture accounting. These numbers are the
+    // per-kind "deferred draw" truth — the honest distance to a frame.
+    out += " | ir[last: ";
+    out += m_lastLower.SummaryString();
+    out += "] | plan[last: ";
+    out += m_lastPlan.SummaryString();
+    out += "] | captures=";
+    out += std::to_string(m_captureAttempts);
+    out += " ok=";
+    out += std::to_string(m_captureOk);
+    out += " skips=";
+    out += std::to_string(m_captureSkips);
+    return out;
 }
 
 } // namespace PX5::Gnm

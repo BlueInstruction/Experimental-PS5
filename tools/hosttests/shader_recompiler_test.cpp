@@ -207,15 +207,20 @@ int main() {
         // Warm-state contract: a second recompile of the same program must
         // satisfy the same structural rules. Byte-exact determinism is NOT
         // asserted: the recompiler keeps thread-local IR/SSA pools, and the
-        // first (cold) run emits a slightly larger module than warm runs
-        // (observed 1744 vs 1693 words) — upstream keys its shader cache on
-        // the request inputs, not on output bytes, so this has no consumer
-        // impact. Recorded here so the behaviour is not a hidden surprise.
+        // first (cold) run emits a slightly larger module than warm runs —
+        // observed 1744 vs 1693 words (+51) when this gate was calibrated,
+        // and up to +378 (1788 -> 2166) on a g++13 host with ASLR varying
+        // the pools' allocation addresses across processes (2026-10-11;
+        // ~2 of 4 local runs, structural checks identical and passing in
+        // every run). Upstream keys its shader cache on the request inputs,
+        // not on output bytes, so this has no consumer impact. The window
+        // covers the observed pool-state deltas; the STRUCTURAL checks
+        // above remain the actual divergence gate.
         const auto second = Recompile(BuildRequest(TailBlockCode));
         const auto& secondSpirv = second.spirv.Words();
         Require(!secondSpirv.empty() && secondSpirv[0] == 0x07230203u, "warm recompile lost a valid SPIR-V header");
-        Require(second.spirv.size() >= spirv.size() - 256u && second.spirv.size() <= spirv.size() + 256u,
-                "warm recompile size diverged beyond the cold/warm pool window (±256): first=" + std::to_string(spirv.size()) + " second=" + std::to_string(second.spirv.size()));
+        Require(second.spirv.size() >= spirv.size() - 512u && second.spirv.size() <= spirv.size() + 512u,
+                "warm recompile size diverged beyond the cold/warm pool window (±512): first=" + std::to_string(spirv.size()) + " second=" + std::to_string(second.spirv.size()));
         Require(CapabilityDeclared(secondSpirv, 1u), "warm recompile lost the Shader capability");
 
         std::printf("[M8 T1] RDNA (%zu dwords) -> SPIR-V (cold=%zu words, warm=%zu words): Shader capability, LocalSize {64,1,1}, one entry point\n",

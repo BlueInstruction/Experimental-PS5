@@ -14,11 +14,17 @@ PacketRecord trace (bounded)  +  GnmState  ← current, existing types
   ↓  gnm_state.cpp          — packets → device state
 GnmState (register banks, index type, instances, draw/dispatch records,
           event-seq timeline, named-write journal)
-  ↓  gpu/ir/gpu_ir.cpp      — state + records → render ops  (M6, PASS)
-SetRenderTarget / SetViewport / SetScissor / BindPipeline /
-BindResource / Draw / DrawIndexed / Dispatch / CopyImage / Clear / Barrier
-  ↓  vulkan_backend (M7)     — render ops → Vulkan
+  ↓  gnm_submit.cpp (per submission, since the submit-path wiring)      
+  │      — LowerGnmStateToIR (M6) then PlanVulkanCommands accounting (M7)
+  ↓
+gpu/ir/gpu_ir.h ops (M6, PASS)                 shader lane (M8, GATED):
+SetRenderTarget / SetViewport / SetScissor /    GnmState SH banks
+BindResource / Draw / DrawIndexed / Dispatch /    ↓  shader_capture.cpp (T4)
+CopyImage / Clear / Barrier                     guest RDNA dwords + declared ABI
+  ↓  vulkan_backend (M7)     — render ops → Vulkan plan
+                                                ↓  shader_recompiler_service.cpp (T3)
 VkInstance → VkPhysicalDevice → VkDevice → VkQueue → images → submit
+                                                vendored recompiler → SPIR-V
   ↓
 Adreno (proprietary ICD or imported Turnip) → framebuffer
   ↓  videoout (M9)
@@ -27,12 +33,14 @@ Android Surface
 
 Naming note: the M6 op list lives in `gpu/ir/gpu_ir.h` (`GpuOp`,
 `OpKind`, `GpuOpList`, `LowerGnmStateToIR`). The vocabulary is COMMITTED
-— the M7 backend is to be built against these types (nothing consumes
-them on device yet; `frames=0` stands). One addition to the earlier draft
-list: `DrawIndexed` is its own op (GnmState records indexed draws via
-DRAW_INDEX_2; a single "Draw" would erase a real distinction the guest
-stream carries). A header-level guard rejects any Vulkan include in the
-IR definition.
+and the M7 backend is built against these types; since the submit-path
+wiring, real submissions lower their state to this IR and run the M7
+planner over it for per-kind accounting (nothing executes the plan in
+the runtime path yet; `frames=0` stands). One addition to the earlier
+draft list: `DrawIndexed` is its own op (GnmState records indexed draws
+via DRAW_INDEX_2; a single "Draw" would erase a real distinction the
+guest stream carries). A header-level guard rejects any Vulkan include
+in the IR definition.
 
 ## What exists today (honest)
 
@@ -79,11 +87,28 @@ IR definition.
   `tools/hosttests/vulkan_backend_test.cpp` (M7-T1). The planner TU
   never includes Vulkan headers; `gpu/vulkan_device.cpp` is the one
   sanctioned Vulkan-seeing IR consumer (PX5_GPU_BACKEND_CONSUMER).
+- `gpu/gnm/gnm_submit.cpp` (submit-path wiring): after every decoded
+  buffer the REAL submission path (what `sceGnmSubmitCommandBuffers`
+  serves) walks the chain that ends at Vulkan — accounting only:
+  `LowerGnmStateToIR` over the cumulative state, `PlanVulkanCommands`
+  for per-kind deferral counts, and `ShaderCapture::CaptureAndRecompile`
+  for each stage the stream programmed (memoized per program vaddr;
+  bounded retries on unreadable code; outcomes in a bounded ring and in
+  `GetStatsString()`). Locked by
+  `tools/hosttests/gnm_submit_gpu_path_test.cpp`. Binaries without the
+  shader service (x86_64 stub, HLE-only host tests) compile the capture
+  leg down to a named skip (`PX5_NO_SHADER_SERVICE`).
 - `gpu/vulkan_device.cpp`: REAL host Vulkan — instance/device init on
   Adreno 750, swapchain in both orientations, self-contained
-  fork-safe clear-submit proof (own render node fd, full teardown).
-  This is M7 infrastructure, ahead of its milestone, with no IR
-  feeding it yet (`frames=0` in every device session).
+  fork-safe clear-submit proof (own render node fd, full teardown),
+  the M7 clear-readback proof (synthetic one-Clear IR list, step 8b)
+  and the M8 compute dispatch proof (synthetic fixture shader →
+  SPIR-V → `VkShaderModule` → compute pipeline → `vkCmdDispatch` →
+  readback, JNI-triggered). The shader-object layer
+  (`CreateShaderModuleFromWords`, `CreateComputePipelineFromReflection`,
+  `CreateGraphicsPipelineFromReflection` with a real
+  `vkCreateGraphicsPipelines` call) exists but has no caller yet —
+  no guest SPIR-V reaches it in the runtime path.
 - `gpu/driver_manager.cpp` + libadrenotools: driver slot import,
   SHARED linker-namespace load, /proc/self/maps verification
   (`driverVerified=yes` on Turnip v26.3.0-R4, 2026-09-05). Host
@@ -92,15 +117,25 @@ IR definition.
 ## What does NOT exist (do not fake it)
 
 - IR-driven rendering: nothing turns a decoded draw into VkPipeline +
-  vkCmdDraw. Any framebuffer content today is host-clear only.
+  vkCmdDraw. `vkCmdDraw`/`vkCmdDrawIndexed` appear nowhere in app/src;
+  the M7 planner defers draw/drawIndexed/dispatch/scissor ops by kind
+  (counted, never guessed), and the graphics-pipeline layer has no
+  runtime caller. Any framebuffer content today is host-clear only.
 - IR ops without evidence: SetRenderTarget / SetViewport / BindPipeline /
   BindResource / CopyImage / Clear exist as committed TYPES only. The
   lowering emits none of them, because no named register semantics back
   them yet — emitting them from raw bank dwords would be inventing
   semantics, which this layer forbids.
-- Shader recompiler: absent by design until M8 — PS5 shader binary →
-  decoder → shader IR → SPIR-V. Starting shaders before the command
-  path is the failure mode this plan forbids.
+- Guest shaders through the pipeline: the M8 stack is host-gated and
+  the submit path captures what the guest programs — but every SPIR-V
+  so far comes from FIXTURE programs; no guest game shader has been
+  recompiled, no guest SPIR-V has become a `VkShaderModule`, and no
+  device session has logged one. The on-device dispatch proof runs a
+  synthetic compute shader.
+- Guest SPIR-V → VkShaderModule in the runtime path: the device layer's
+  shader-object APIs exist and are CI-compiled, but nothing calls them
+  with captured guest SPIR-V yet (that connection is the next link
+  after a device session proves the capture leg on real guest data).
 
 ## Host GPU design constraints (external evidence, 2026-10)
 
@@ -185,13 +220,31 @@ and M7 stays GATED. The gate run also doubles as the Vulkan capability
 record (measured device/driver/api/vendor/deviceID in every detail
 line — never a requirement).
 
-## M8 evidence gate (shader recompiler)
+## M8 evidence gate (shader recompiler) — **GATED**
 
 A known PS5 shader binary decodes to IR whose SPIR-V, compiled and
 executed on device, reproduces a reference triangle/test pattern in an
 offscreen render target (readback-compared). Research references for
 system structure: KytyPS5, shadPS4 — architecture is understood, not
 copied; ownership of every layer stays in this document's terms.
+
+What exists now (post-merge + submit-path wiring): the recompiler is
+vendored and compiles into the arm64 APK; T1-T7 host gates cover
+fixture shaders through the full pipeline (RDNA → SPIR-V), the app
+service, capture from real PM4 SET_SH streams, reflection vocabulary,
+the graphics-pipeline-desc validator and the dispatch-proof contract;
+the submit path lowers/plans/captures per submission (see the wiring
+bullet above). What is MISSING for the gate: a device session feeding a
+GUEST shader binary through capture → SPIR-V → VkShaderModule →
+pipeline → executed → readback-verified output. Fixture and synthetic
+proofs do not satisfy this gate.
+
+Known pre-existing property (named, not new): the vendored recompiler
+keeps thread-local IR/SSA pools whose output size varies with
+allocation addresses — the T1 warm/cold window was recalibrated to
+±512 after observing a +378-word delta on a g++13 host (structural
+checks passed in every run); see
+`tools/hosttests/shader_recompiler_test.cpp`.
 
 ## Milestone order (why command-processor first)
 

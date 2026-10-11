@@ -69,7 +69,7 @@ HLE:  guest libSce* call → NID gate (syscall trap) → HLE function
         → structured result → guest registers
 ```
 
-## Current honest layer status (2026-09-06, vc51)
+## Current honest layer status (2026-10-11, post PR #6 + submit-path wiring)
 
 | Layer | Status | Evidence |
 |---|---|---|
@@ -78,12 +78,13 @@ HLE:  guest libSce* call → NID gate (syscall trap) → HLE function
 | Host Vulkan init + swapchain + clear-submit proof | works on device | self-contained GPU proof PASS |
 | PM4 decoder → GnmState | **M5 PASS** (12/12 packets, T1) | `tools/hosttests/pm4_stream_test.cpp` in `run.sh`; SET_SH_REG_OFFSET/DRAW_INDEX_2 semantics partial by design (see docs/gpu.md) |
 | GPU IR | **M6 PASS** (5/5 ops, T1) | `tools/hosttests/gpu_ir_test.cpp` in `run.sh`; vocabulary committed in `gpu/ir/gpu_ir.h`, Vulkan-free by header guard |
-| IR-driven Vulkan rendering | absent | `frames=0` in every session |
+| IR-driven Vulkan rendering | absent | `frames=0` in every session; `vkCmdDraw`/`vkCmdDrawIndexed` nowhere in app/src; M7 planner defers draws by kind (counted) |
 | SELF/ELF loader, runtime linker | real code, unvalidated past load | load path blocked behind CPU dispatch fault |
 | Guest memory model | real code | `tools/hosttests/memory_range_test.cpp` |
 | CPU execution (M1 gate) | **BLOCKED on device** | SIGSEGV si_addr=0x4 at `ExecuteThread`, in-process and isolated, since v1.15 (see `docs/cpu.md`) |
-| Kernel HLE | foundation only | `sce_kernel_hle.cpp`, NID gate loud-fail policy |
-| Audio / Shader recompiler / Compatibility | absent | honest "not implemented" labels in UI |
+| Kernel HLE | foundation + sceVideoOut/sceAudioOut/scePad HLE | `sce_kernel_hle.cpp`, `videoout_hle.cpp`, `audio_out_hle.cpp` (host gate), `pad_hle.cpp` (host gate); device-side unverified |
+| Shader recompiler (M8) | **GATED** — vendored, host-gated T1-T7 + submit-path wiring | guest RDNA→SPIR-V on host fixtures only; no guest shader recompiled, no guest SPIR-V→VkShaderModule yet; see docs/gpu.md |
+| Compatibility | absent | honest "not implemented" labels in UI |
 
 A user-visible feature that depends on an absent layer must say so in
 its UI string. Diagnostics must never present host-infrastructure
