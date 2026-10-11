@@ -445,14 +445,27 @@ FexCoreIntegration::ExecResult Emulator::ExecuteLoadedGuest() {
     // v1.41 — the result (clean exit, guest trap or host crash escape) is
     // a ledger event too: the reviewer reads the whole session from one
     // file without trusting the verbose log's interpretation.
+    // v1.60 — honest fields: the old line ("exit=<u64> clean=<0/1>") made
+    // the code field and the final RAX indistinguishable, and "clean" was
+    // error.empty(), NOT exitedCleanly — a HLT stop logged as clean=1.
+    // stopped_by names the stop mechanism, guest_rip names the location,
+    // exit_group=1 appears only when exit_group was really captured.
     Evidence::AppendLedger(
-        "dispatch result started=%d exit=%llu clean=%d error=%s",
-        res.started ? 1 : 0, (unsigned long long)res.exitCode,
-        res.error.empty() ? 1 : 0,
+        "dispatch result started=%d stopped_by=%s guest_rip=0x%llx "
+        "exit_code=0x%llx exit_group=%d error=%s",
+        res.started ? 1 : 0,
+        res.stopReason ? res.stopReason : "unknown",
+        (unsigned long long)res.finalGuestRip,
+        (unsigned long long)res.exitCode,
+        res.exitedCleanly ? 1 : 0,
         res.error.empty() ? "none" : res.error.c_str());
     PX5_LOGI(LogCategory::CORE,
-             "[GUEST] dispatch result: started=%d exitCode=%llu %s",
-             res.started ? 1 : 0, (unsigned long long)res.exitCode,
+             "[GUEST] dispatch result: started=%d stopped_by=%s "
+             "guest_rip=0x%llx exit_code=0x%llx %s",
+             res.started ? 1 : 0,
+             res.stopReason ? res.stopReason : "unknown",
+             (unsigned long long)res.finalGuestRip,
+             (unsigned long long)res.exitCode,
              res.error.empty() ? "(no error text)" : res.error.c_str());
 
     // Release the stack region again for reproducibility across runs.

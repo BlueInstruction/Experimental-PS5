@@ -23,10 +23,20 @@
 
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace PX5;
+
+// The crt-exit registration store lives in the kernel HLE TU (external
+// linkage by design so this test can verify the registration is REAL —
+// callbacks stored, not silently dropped).
+namespace PX5::SceKernelHle {
+extern std::mutex g_crtExitMutex;
+extern std::vector<std::pair<uint64_t, uint64_t>> g_crtExitCallbacks;
+}
 
 static int fails = 0;
 static void chk(bool ok, const char* what) {
@@ -58,6 +68,16 @@ int main() {
     chk(Nid::ComputeNidString("scePadOpen").size() == 11,
         "NID strings are exactly 11 characters");
 
+    // Device-observed golden vectors (REDMAGIC 10 Air, evidence session
+    // 2026-10-11): the game's first import calls carried the qualified
+    // dynstr names 'bzQExy189ZI#T#T' and '8G2LB+A3rzg#T#T'. The bases are
+    // the real PS5 NIDs of _init_env and atexit — cross-checked against
+    // AnyPS5's aerolib-derived table (GPL-2.0 reference), not invented.
+    chk(Nid::ComputeNidString("_init_env") == "bzQExy189ZI",
+        "_init_env -> bzQExy189ZI (device-observed import)");
+    chk(Nid::ComputeNidString("atexit") == "8G2LB+A3rzg",
+        "atexit -> 8G2LB+A3rzg (device-observed import)");
+
     chk(Nid::IsNidString("xk0AcarP3V4"), "IsNidString accepts a real NID");
     chk(!Nid::IsNidString("scePadOpen"),
         "IsNidString rejects a readable symbol name");
@@ -83,6 +103,10 @@ int main() {
         "unknown NID resolves to empty (not a guess)");
     chk(Nid::NidRegistry::Instance().Resolve("scePadOpen").empty(),
         "readable name is NOT a NID lookup input");
+    chk(Nid::NidRegistry::Instance().Resolve("bzQExy189ZI") == "_init_env",
+        "device-observed crt NID resolves to _init_env");
+    chk(Nid::NidRegistry::Instance().Resolve("8G2LB+A3rzg") == "atexit",
+        "device-observed crt NID resolves to atexit");
 
     // ------------------------------------------------------------------
     // 3. DispatchImportCall — the transparent bridge.
@@ -172,6 +196,47 @@ int main() {
         "untranslated stack refuses (no guess)");
     chk(!stackCall.ReadStackArg(0, nullptr),
         "null out-pointer refuses");
+
+    // ------------------------------------------------------------------
+    // 5. Qualified dynstr names — the EXACT strings the device log recorded
+    //    ('bzQExy189ZI#T#T', '8G2LB+A3rzg#T#T'). The suffix is the real PS5
+    //    qualified-import shape (<NID>#<ver>#<module-id>); before the strip
+    //    fix these resolved to nothing even though the NIDs are known.
+    //    The call sequence mirrors the device session: _init_env(argc block),
+    //    atexit(NULL), atexit(real guest function).
+    // ------------------------------------------------------------------
+    printf("\nQualified PS5 import names (device session replay):\n");
+    ImportTrapEntry initEnvQ;
+    initEnvQ.name = "bzQExy189ZI#T#T";
+    ImportTrapEntry atexitQ;
+    atexitQ.name = "8G2LB+A3rzg#T#T";
+    rl.SetImportTraps(0x5C000000ull, 0x5C000000ull + 2 * 16,
+                      {initEnvQ, atexitQ});
+
+    ImportCall devCall;
+    devCall.args[0] = 0x147fffd80ull;   // the argc-block pointer from the log
+    const uint64_t initEnvRet = rl.DispatchImportCall(0, devCall);
+    chk(initEnvRet == 0, "_init_env('bzQExy189ZI#T#T') dispatches -> 0");
+
+    ImportCall nullCall;
+    nullCall.args[0] = 0;
+    chk(rl.DispatchImportCall(1, nullCall) == 0,
+        "atexit(NULL) via '8G2LB+A3rzg#T#T' -> 0 (nothing stored)");
+
+    ImportCall regCall;
+    regCall.args[0] = 0x1402e7070ull;   // the guest function from the log
+    chk(rl.DispatchImportCall(1, regCall) == 0,
+        "atexit(func) via '8G2LB+A3rzg#T#T' -> 0 (registered)");
+    {
+        std::lock_guard<std::mutex> lk(
+            PX5::SceKernelHle::g_crtExitMutex);
+        const size_t pending =
+            PX5::SceKernelHle::g_crtExitCallbacks.size();
+        chk(pending >= 1,
+            "guest exit callback actually stored host-side (not dropped)");
+    }
+    chk(rl.DispatchImportCall(0, devCall) == 0,
+        "repeat _init_env dispatch keeps the cached route");
 
     // ------------------------------------------------------------------
     printf("\n%s\n", fails == 0

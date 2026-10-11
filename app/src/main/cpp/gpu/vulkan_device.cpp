@@ -292,10 +292,11 @@ std::string VulkanGpuDevice::GetSummaryString() const {
                     : std::string(" | ") + m_caps.lastError);
     char buf[256];
     snprintf(buf, sizeof(buf),
-             "Vulkan: ACTIVE | %s | API %s | driver %s | GPUs=%u vendor=0x%04x",
+             "Vulkan: ACTIVE | %s | API %s | driver %s | GPUs=%u "
+             "vendor=0x%04x dev=0x%04x",
              m_caps.deviceName.c_str(), m_caps.apiVersionStr.c_str(),
              m_caps.driverVersionStr.c_str(), m_caps.physicalDevices,
-             m_caps.vendorId);
+             m_caps.vendorId, m_caps.deviceId);
     // Identity appended outside the fixed buffer: driverName/driverInfo
     // are 256-byte fields, the summary must never truncate them.
     return std::string(buf) +

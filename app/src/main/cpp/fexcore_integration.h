@@ -22,8 +22,14 @@ struct GuestTrapInfo {
  */
 struct ExecResult {
     bool        started   = false;      ///< FEXCore created and ran a thread
-    bool        exitedCleanly = false;  ///< exit_group captured OR HLT reached
-    uint64_t    exitCode  = 0;          ///< From GuestSyscalls (when captured)
+    bool        exitedCleanly = false;  ///< exit_group captured (ONLY that —
+                                        ///< an HLT stop is NOT a clean exit)
+    uint64_t    exitCode  = 0;          ///< exit_group code when captured,
+                                        ///< otherwise the final guest RAX
+    const char* stopReason = "unknown"; ///< "exit-group" | "hlt" |
+                                        ///< "guest-trap" | "error"
+    uint64_t    finalGuestRip = 0;      ///< guest RIP as FEXCore reports it
+                                        ///< when the run loop returned
     std::string output;                 ///< Guest stdout/stderr text
     double      elapsedMs = 0.0;        ///< Execution duration in milliseconds
     std::string error;                  ///< Non-empty => start/run failure reason
