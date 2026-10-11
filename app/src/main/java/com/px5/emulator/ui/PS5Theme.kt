@@ -19,21 +19,24 @@ import com.px5.emulator.R
 import com.px5.emulator.core.Px5Settings
 
 // ---------------------------------------------------------------------------
-// PX5 palette — Steam Deck OS dark base with PS5 accent blend.
+// PX5 palette — AMOLED-first identity (v1.61).
 //
-// Visual direction: Steam Deck OS-inspired dark UI with light PS5 accents.
-//   * Deep navy/slate backgrounds  <- Steam Deck
-//   * Elevated warm card surfaces  <- Steam Deck library cards
-//   * PS5 blue stays primary; a teal secondary accents evidence/DIAG panels
+// Visual direction: premium console dark, tuned for OLED phone panels.
+//   * Dark mode is TRUE BLACK (#000000) — AMOLED pixels off, no misty
+//     gray veils, no washed-out elevation fog. Depth comes from hairlines
+//     and surface steps, not from brightening the background.
+//   * Light mode is a CLEAN neutral gray — no foggy blue-white, no
+//     translucent haze; crisp contrast between surfaces and text.
+//   * The PS5 blue stays the interactive accent; monochrome leads.
 // ---------------------------------------------------------------------------
 
 // ---- Raw brand constants (dark is the identity; accents shared) ----------
-val PS5DarkBackground = Color(0xFF121212)   // Vita3K dark
-val PS5DarkSurface    = Color(0xFF1E1E1E)   // Vita3K surface
-val PS5AccentBlue     = Color(0xFF0078D7)   // Vita3K blue
+val PS5DarkBackground = Color(0xFF000000)   // AMOLED black
+val PS5DarkSurface    = Color(0xFF0A0A0C)   // first elevation step
+val PS5AccentBlue     = Color(0xFF2E8CFF)   // interactive accent
 
 // Legacy aliases kept for non-composable references.
-val PS5CardBackground = Color(0xFF1E1E1E)
+val PS5CardBackground = Color(0xFF0E0E10)
 
 // Font families
 val TitilliumFontFamily = FontFamily.Default
@@ -68,44 +71,44 @@ data class PX5Colors(
 val DarkPX5Colors = PX5Colors(
     background      = PS5DarkBackground,
     surface         = PS5DarkSurface,
-    sheet           = PS5DarkSurface,
-    card            = PS5DarkBackground,
-    control         = Color(0xFF2A2A2A),
-    controlStrong   = Color(0xFF333333),
-    hairline        = Color(0xFF2A2A2A),
-    scrim           = Color.Black.copy(alpha = 0.65f),
-    text            = Color(0xFFE0E0E0),
-    textSecondary   = Color(0xFFA0A0A0),
+    sheet           = Color(0xFF101013),
+    card            = Color(0xFF0E0E10),
+    control         = Color(0xFF19191D),
+    controlStrong   = Color(0xFF232328),
+    hairline        = Color(0xFF1F1F24),
+    scrim           = Color.Black.copy(alpha = 0.72f),
+    text            = Color(0xFFECECEF),
+    textSecondary   = Color(0xFF9B9BA3),
     accent          = PS5AccentBlue,
     accentGlow      = PS5AccentBlue,
     teal            = PS5AccentBlue,
-    success         = Color(0xFF4CAF50),
-    danger          = Color(0xFFF44336),
-    infoMono        = Color(0xFF81D4FA),
+    success         = Color(0xFF69F0AE),
+    danger          = Color(0xFFFF5252),
+    infoMono        = Color(0xFF8FD0FF),
     fadeTop         = Color.Black.copy(alpha = 0.5f),
-    fadeBottom      = Color(0xFF121212),
+    fadeBottom      = Color(0xFF000000),
     backdropAlpha   = 0.35f
 )
 
 val LightPX5Colors = PX5Colors(
-    background      = Color(0xFFF5F5F5),
+    background      = Color(0xFFF4F5F7),
     surface         = Color(0xFFFFFFFF),
     sheet           = Color(0xFFFFFFFF),
-    card            = Color(0xFFEEEEEE),
-    control         = Color(0xFFE0E0E0),
-    controlStrong   = Color(0xFFCCCCCC),
-    hairline        = Color(0xFFE0E0E0),
+    card            = Color(0xFFEDEEF1),
+    control         = Color(0xFFE4E6EA),
+    controlStrong   = Color(0xFFD6D9DF),
+    hairline        = Color(0xFFE2E4E9),
     scrim           = Color.Black.copy(alpha = 0.5f),
-    text            = Color(0xFF212121),
-    textSecondary   = Color(0xFF757575),
+    text            = Color(0xFF17181B),
+    textSecondary   = Color(0xFF5F6368),
     accent          = PS5AccentBlue,
     accentGlow      = PS5AccentBlue,
     teal            = PS5AccentBlue,
-    success         = Color(0xFF4CAF50),
-    danger          = Color(0xFFF44336),
-    infoMono        = Color(0xFF0288D1),
+    success         = Color(0xFF1B8A4B),
+    danger          = Color(0xFFD32F2F),
+    infoMono        = Color(0xFF0B6BC2),
     fadeTop         = Color.White.copy(alpha = 0.5f),
-    fadeBottom      = Color(0xFFF5F5F5),
+    fadeBottom      = Color(0xFFF4F5F7),
     backdropAlpha   = 0.10f
 )
 
@@ -193,7 +196,7 @@ fun PX5Theme(content: @Composable () -> Unit) {
             surface = colors.surface,
             onBackground = colors.text,
             onSurface = colors.text,
-            surfaceVariant = Color(0xFFDCE3EE),
+            surfaceVariant = Color(0xFFE9EBEF),
             onSurfaceVariant = colors.textSecondary
         )
     }

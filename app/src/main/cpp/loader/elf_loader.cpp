@@ -383,13 +383,28 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
     size_t trapInstalled = 0;
     if (!pend.empty()) {
         constexpr uint64_t kStubStride = 16;
-        // Fixed, far-from-image placement: 512 MiB into the guest window.
-        // Clears the image, its brk growth and the ~128 MiB stack/TLS
-        // neighborhood; the window is 4 GiB wide.
-        const uint64_t stubBase =
-            MemoryManager::GetInstance().GetGuestBase() + 0x20000000ull;
-        const uint64_t stubBytes = pend.size() * kStubStride;
         auto& memRef = MemoryManager::GetInstance();
+        // Preferred, far-from-image placement: 512 MiB into the guest
+        // window. Clears the image, its brk growth and the ~128 MiB
+        // stack/TLS neighborhood of a 4 GiB window.
+        //
+        // v1.61 — the placement is now WINDOW-AWARE. It used to assume a
+        // 4 GiB window unconditionally; the 2026-10-11 device session ran
+        // with a 256 MiB window (the foundation suite's own reservation
+        // won the idempotent Initialize race) and every stub map was
+        // rejected as "outside window" — all 815 game imports stayed
+        // unresolved and no HLE service was ever callable. Fallback: the
+        // top of the actual window, 16 MiB below its exclusive end, which
+        // stays clear of the stack neighborhood in either size.
+        const uint64_t stubBytes = pend.size() * kStubStride;
+        const uint64_t guestBase = memRef.GetGuestBase();
+        const uint64_t winEnd = memRef.GetGuestEnd();
+        uint64_t stubBase = guestBase + 0x20000000ull;
+        const uint64_t guard = 0x1000000ull;  // 16 MiB under the ceiling
+        if (winEnd == 0 || guestBase == 0 ||
+            stubBase + stubBytes + guard > winEnd) {
+            stubBase = winEnd - stubBytes - guard;
+        }
         const bool overlapsImage =
             stubBase < out.imageHighVa + 4096 &&
             stubBase + stubBytes > out.imageLowVa;
@@ -402,6 +417,12 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
                      "range — install refused, slots stay as linked",
                      pend.size(),
                      static_cast<unsigned>(kPx5ImportCallSlots));
+        } else if (winEnd == 0 || stubBase < guestBase) {
+            PX5_LOGW(LogCategory::LOADER,
+                     "REL: no guest window for the import-trap region "
+                     "(base=0x%llx end=0x%llx) — slots stay 0",
+                     (unsigned long long)guestBase,
+                     (unsigned long long)winEnd);
         } else if (overlapsImage) {
             PX5_LOGW(LogCategory::LOADER,
                      "REL: import-trap region 0x%llx overlaps the image — "

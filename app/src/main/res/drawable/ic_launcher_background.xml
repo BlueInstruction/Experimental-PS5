@@ -1,9 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- PX5 launcher background - diagonal gradient matched to the logo card edges -->
+<!-- PX5 launcher background — AMOLED black (v1.61). The tile is true
+     black so OLED panels switch the pixels off; depth comes from the
+     foreground's hairline ring, not from a gradient. -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
-    <gradient
-        android:startColor="#00C5FE"
-        android:endColor="#4321DE"
-        android:angle="135" />
+    <solid android:color="#000000" />
 </shape>

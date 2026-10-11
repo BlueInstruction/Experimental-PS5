@@ -12,7 +12,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
@@ -26,12 +25,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.px5.emulator.PX5Application
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.io.File
 
 /**
  * PS5LogsScreen — live log viewer in the spirit of Dolphin's log page and
@@ -71,34 +66,13 @@ fun PS5LogsScreen(
     var fileSizes by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
 
-    val sinks = listOf("App", "Engine", "Crashes")
+    val sinks = Px5LogTail.SINK_NAMES
 
     suspend fun reload() {
         busy = true
-        val pair = withContext(Dispatchers.IO) {
-            val dir = PX5Application.getLogDirectory(context)
-            val (f, cap) = when (selectedSink) {
-                0 -> File(dir, "px5_diagnostic.log") to 96_000
-                1 -> latestEngineLog(dir) to 96_000
-                else -> File(dir, "px5_crash_latest.log") to 96_000
-            }
-            val text = runCatching {
-                if (f.isFile) tail(f, cap) else ""
-            }.getOrDefault("")
-            val sizeLine = buildString {
-                val diag = File(dir, "px5_diagnostic.log")
-                val eng = latestEngineLog(dir)
-                append("app=")
-                append(if (diag.isFile) humanSize(diag.length()) else "—")
-                append("  engine=")
-                append(if (eng.isFile) humanSize(eng.length()) else "—")
-                val crashes = PX5Application.listCrashLogs(context).size
-                append("  crashDumps=").append(crashes)
-            }
-            text to sizeLine
-        }
-        logText = pair.first
-        fileSizes = pair.second
+        val text = Px5LogTail.read(context, selectedSink)
+        logText = text
+        fileSizes = Px5LogTail.sizeLine(context)
         busy = false
     }
 
@@ -291,7 +265,7 @@ fun PS5LogsScreen(
                             text = line,
                             fontSize = 11.sp,
                             lineHeight = 15.sp,
-                            color = lineColor(line),
+                            color = Px5LogTail.lineColor(line),
                             fontFamily = FontFamily.Monospace
                         )
                     }
@@ -301,48 +275,9 @@ fun PS5LogsScreen(
     }
 }
 
-/** Engine sink: the newest file of the px5_main.log rotating set. */
-private fun latestEngineLog(dir: File): File {
-    val newest = File(dir, "px5_main.log")
-    if (newest.isFile) return newest
-    // Rotation may have advanced; find the freshest .N shard.
-    return (1..4).map { File(dir, "px5_main.log.$it") }
-        .filter { it.isFile }
-        .maxByOrNull { it.lastModified() }
-        ?: newest
-}
+/** Engine sink helper moved to Px5LogTail (shared with the in-game overlay). */
 
-/** Reads at most [cap] bytes from the end of [f]; never throws. */
-private fun tail(f: File, cap: Int): String {
-    val len = f.length()
-    if (len <= cap) return f.readText()
-    val start = len - cap
-    val bytes = ByteArray(cap)
-    var read = 0
-    f.inputStream().use { ins ->
-        ins.skip(start)
-        while (read < cap) {
-            val r = ins.read(bytes, read, cap - read)
-            if (r < 0) break
-            read += r
-        }
-    }
-    // Drop the first (almost certainly partial) line.
-    return String(bytes, 0, read).substringAfter('\n', "")
-}
-
-private fun humanSize(b: Long): String = when {
-    b >= 1L shl 20 -> "%.1f MB".format(b / 1048576.0)
-    b >= 1L shl 10 -> "%.1f KB".format(b / 1024.0)
-    else -> "${b}B"
-}
-
-/** Evidence coloring: failures red, passes green, warnings amber. */
-private fun lineColor(line: String): Color = when {
-    line.contains("[FAIL]", true) || line.contains("ERROR", true) ||
-            line.startsWith("VERDICT: FAIL", true) -> Color(0xFFFF5252)
-    line.contains("[PASS]", true) || line.startsWith("VERDICT: PASS", true) ||
-            line.contains("verified", true) -> Color(0xFF69F0AE)
-    line.contains("WARN", true) -> Color(0xFFFFC400)
-    else -> Color(0xFFB9C4D6)
-}
+// ---------------------------------------------------------------------------
+// (tail / humanSize / lineColor live in Px5LogTail.kt — one implementation
+// for the Logs screen and the in-game overlay.)
+// ---------------------------------------------------------------------------

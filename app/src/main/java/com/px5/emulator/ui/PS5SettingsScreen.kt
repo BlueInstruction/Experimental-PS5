@@ -409,10 +409,9 @@ private fun LazyListScope.audioSection(soundManager: SoundManager) {
         var soundEffectsEnabled by remember { mutableStateOf(soundManager.isSoundEnabled) }
         var bgMusicEnabled by remember { mutableStateOf(soundManager.isBgMusicEnabled) }
         SettingsHeader("Audio")
-        // The engine opens no audio stream at all (AudioEngine::Initialize
-        // returns false). Saying "AAudio (system)" here told the user a
-        // driver was in use; these toggles only affect UI sounds.
-        SettingsItemText("Guest audio", "Not implemented - guest output is silent")
+        // v1.61 — the stale "guest output is silent" claim is gone: the
+        // sceAudioOut HLE stream is live in real sessions (v1.60 device
+        // evidence). These toggles govern the PS5 shell sounds only.
         SettingsToggleItem(
             title = "UI sound effects",
             subtitle = "",
@@ -424,7 +423,7 @@ private fun LazyListScope.audioSection(soundManager: SoundManager) {
         )
         SettingsToggleItem(
             title = "Background music",
-            subtitle = "",
+            subtitle = "Launcher only — silent in-game",
             checked = bgMusicEnabled,
             onCheckedChange = {
                 bgMusicEnabled = it

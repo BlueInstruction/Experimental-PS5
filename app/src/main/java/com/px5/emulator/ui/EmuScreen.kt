@@ -84,20 +84,16 @@ fun EmuScreen(
     fexCoreStatus: String,
     fexCoreWrapper: FexCoreWrapper?,
     gameViewModel: com.px5.emulator.GameViewModel? = null,
-    onBackClick: () -> Unit,
-    onOpenLogs: () -> Unit = {}
+    onBackClick: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val activity = context as? android.app.Activity
 
-    // v1.37 — opening the diagnostics & log viewer from INSIDE the game
-    // must never end the session: mark the peek so the stage's dispose
-    // path keeps the landscape lock and the session alive.
-    val openLogsInSession = {
-        Px5Settings.gameSessionPeeking = true
-        onOpenLogs()
-    }
+    // v1.61 — the in-game log viewer is an OVERLAY on this stage, not a
+    // navigation destination. Opening it never disposes this composable,
+    // so the render surface stays attached and the game never reloads.
+    var logOverlay by remember { mutableStateOf(false) }
 
     var renderStats by remember { mutableStateOf("renderer idle") }
     var fpsText by remember { mutableStateOf("") }
@@ -131,10 +127,10 @@ fun EmuScreen(
     // v1.36 — Eden semantics for the system back gesture: it IS the console
     // button. In-game it opens the pause menu (or resumes from it); during
     // boot/failure it leaves the stage; in pad-edit mode it leaves editing.
-    // The old floating top-bar buttons are gone — this gesture plus the pad's
-    // PS button are the only stage-level controls, matching Eden/Vita3K.
+    // v1.61 — with the log overlay open, back closes the overlay first.
     BackHandler {
         when {
+            logOverlay -> logOverlay = false
             padEditing -> padEditing = false
             menuOpen -> menuOpen = false          // back in menu == resume
             bootDone && bootError == null -> menuOpen = true
@@ -147,15 +143,19 @@ fun EmuScreen(
 
     // ---- stage shell: force landscape + immersive, restore on exit --------
     // v1.37 — the game session gate. Entering the stage opens a game
-    // session; while it is active the WHOLE app stays landscape, including
-    // the diagnostics & log screen (an orientation flip mid-session
-    // recreates the surface under the engine and crashes the game).
-    // Navigating to the in-game log viewer disposes this composable, so
-    // the dispose path only ends the session when it is a REAL exit —
-    // the peek marker set by the menu's log row distinguishes the two.
+    // session; while it is active the WHOLE app stays landscape.
+    // v1.61 — the in-game log viewer is an overlay, so the stage is only
+    // ever disposed by a REAL exit; the legacy peek marker is cleared on
+    // entry and honored on dispose purely as a stale-state guard.
     DisposableEffect(Unit) {
         Px5Settings.setGameSessionActive(true)
         Px5Settings.gameSessionPeeking = false
+        // v1.61 — the PS5 shell ambience never plays over a game: kill the
+        // background music the moment a session opens (SoundManager ALSO
+        // self-gates; this covers the "music already playing at launch" case).
+        try {
+            com.px5.emulator.SoundManager.getInstance(context).pauseBgMusic()
+        } catch (_: Throwable) {}
         activity?.requestedOrientation =
             ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         val controller = activity?.window?.let { win ->
@@ -167,6 +167,11 @@ fun EmuScreen(
         onDispose {
             if (!Px5Settings.gameSessionPeeking) {
                 Px5Settings.setGameSessionActive(false)
+                // v1.61 — the shell ambience returns the moment the session
+                // ends (no activity onResume fires on in-app navigation).
+                try {
+                    com.px5.emulator.SoundManager.getInstance(context).startBgMusic()
+                } catch (_: Throwable) {}
                 activity?.let { Px5Settings.applyOrientation(it) }
                 controller?.show(WindowInsetsCompat.Type.systemBars())
             }
@@ -265,8 +270,12 @@ fun EmuScreen(
                 .longVersionCode.toInt()
         } catch (_: Throwable) { 0 }
 
-        // -- stage 1: once-per-version CPU experiments (in-process, safe
-        //    since v1.24; flags written BEFORE the run — no crash loops) --
+        // -- stage 1: once-per-version engine readiness checks (in-process,
+        //    safe since v1.24; flags written BEFORE the run — no crash loops)
+        //    v1.61 — the boot UI narrates a GAME LOAD, not a test bench: the
+        //    per-test stage names live only in the event log now. Evidence
+        //    collection is unchanged; the loading screen stops calling it
+        //    "Testing GPU driver" mid-load.
         val prefs = context.getSharedPreferences(
                 "px5_engine_settings", android.content.Context.MODE_PRIVATE)
         if (EmuScreenBoot.conformanceDecidedVc != currentVc) {
@@ -277,7 +286,7 @@ fun EmuScreen(
                         "(verdict: see the log / crash report of the session " +
                         "that first ran this build)")
             } else {
-                setStage(0.10f, "Checking CPU bridge")
+                setStage(0.10f, "Preparing engine")
                 prefs.edit().putInt("cpuGateInprocVc", currentVc).apply()
                 com.px5.emulator.core.PX5EventLog.event("conformance", "auto_run",
                         "STARTING once for vc=$currentVc (in-process)")
@@ -297,7 +306,7 @@ fun EmuScreen(
                 if (rep.startsWith("PASSED") &&
                     prefs.getInt("foundationTestVc", -1) != currentVc) {
                     prefs.edit().putInt("foundationTestVc", currentVc).apply()
-                    setStage(0.16f, "Running foundation suite")
+                    setStage(0.16f, "Preparing engine")
                     com.px5.emulator.core.PX5EventLog.event("foundation",
                             "auto_run", "STARTING once for vc=$currentVc — " +
                             "in-process, no fork: 10-step foundation suite.")
@@ -320,12 +329,12 @@ fun EmuScreen(
             }
         }
 
-        // -- stage 2: driver / loader self-tests (once per process) -------
+        // -- stage 2: driver / loader readiness (once per process) --------
         if (EmuScreenBoot.bootDiagnosticsDone) {
             gpuProof = "SKIP | already ran this process (see Logs)"
         } else {
             EmuScreenBoot.bootDiagnosticsDone = true
-            setStage(0.24f, "Testing GPU driver")
+            setStage(0.24f, "Preparing engine")
             gpuProof = withContext(Dispatchers.Default) {
                 try { wrapper.nativeRunGpuProof() } catch (t: Throwable) { "FAIL | ${t.message}" }
             }
@@ -334,19 +343,19 @@ fun EmuScreen(
             // M8 dispatch proof: recompiled RDNA contract -> SPIR-V -> real
             // dispatch -> byte-exact readback (the first guest shader code
             // that has ever executed on the GPU stack).
-            setStage(0.30f, "Testing shader recompiler dispatch")
+            setStage(0.30f, "Preparing engine")
             m8DispatchProof = withContext(Dispatchers.Default) {
                 try { wrapper.nativeRunM8DispatchProof() } catch (t: Throwable) { "FAIL | ${t.message}" }
             }
             com.px5.emulator.core.PX5EventLog.event("gameBoot", "m8_dispatch_proof",
                     "result=${m8DispatchProof?.take(160)}")
-            setStage(0.34f, "Testing GNM decoder")
+            setStage(0.34f, "Preparing engine")
             gnmSelfTest = withContext(Dispatchers.Default) {
                 try { wrapper.nativeRunGnmSelfTest() } catch (t: Throwable) { "FAIL | ${t.message}" }
             }
             com.px5.emulator.core.PX5EventLog.event("gameBoot", "gnm_selftest",
                     "result=${gnmSelfTest?.lineSequence()?.firstOrNull() ?: "?"}")
-            setStage(0.42f, "Testing SELF loader")
+            setStage(0.42f, "Preparing engine")
             loaderSelfTest = withContext(Dispatchers.Default) {
                 try { wrapper.nativeRunLoaderSelfTest() } catch (t: Throwable) { "FAIL | ${t.message}" }
             }
@@ -355,7 +364,7 @@ fun EmuScreen(
         }
 
         // -- stage 3: locate eboot.bin (java.io + SAF) --------------------
-        setStage(0.50f, "Locating eboot.bin")
+        setStage(0.50f, "Loading game")
         if (ebootMissing) {
             bootError = "This folder has no eboot.bin. A valid PS5 game " +
                     "dump (with eboot.bin) is required to start."
@@ -391,7 +400,7 @@ fun EmuScreen(
         }
 
         // -- stage 4: isolated image verification -------------------------
-        setStage(0.60f, "Verifying game image")
+        setStage(0.60f, "Loading game")
         val probe = withContext(Dispatchers.Default) {
             try {
                 wrapper.nativeLoadExecutableIsolated(target)
@@ -417,7 +426,7 @@ fun EmuScreen(
         }
 
         // -- stage 5: map for real (this process executes it) -------------
-        setStage(0.75f, "Mapping game image")
+        setStage(0.75f, "Loading game")
         val ok = withContext(Dispatchers.Default) {
             try {
                 wrapper.nativeLoadExecutable(target)
@@ -509,15 +518,9 @@ fun EmuScreen(
     }
 
     // ---- v1.32 console gestures --------------------------------------------
-    // System back NEVER kills the session directly: it opens/toggles the
-    // in-game menu (Eden behavior). Exiting lives in the menu.
-    androidx.activity.compose.BackHandler(enabled = true) {
-        when {
-            padEditing -> padEditing = false
-            bootError != null -> onBackClick()
-            else -> menuOpen = !menuOpen
-        }
-    }
+    // v1.61 — the single BackHandler above now owns the full chain
+    // (log overlay → pad edit → menu → exit). The second handler this
+    // section used to carry shadowed it and is gone.
 
     val animatedBootProgress by animateFloatAsState(
         targetValue = bootProgress.coerceIn(0f, 1f),
@@ -612,7 +615,7 @@ fun EmuScreen(
                 progress01 = animatedBootProgress,
                 error = bootError,
                 onRetry = { bootRetryToken++ },
-                onOpenLogs = openLogsInSession,
+                onOpenLogs = { logOverlay = true },
                 onExit = onBackClick
             )
         }
@@ -641,10 +644,36 @@ fun EmuScreen(
                 },
                 onOpenLogs = {
                     menuOpen = false
-                    openLogsInSession()
+                    logOverlay = true      // v1.61: overlay, never navigation
                 },
                 onExit = onBackClick
             )
+        }
+
+        // ---- overlay layer 4b: the in-game log viewer (v1.61) --------------
+        // SharpDroid-style terminal floating OVER the running game. The stage
+        // never disposes here — the surface stays attached, the game keeps
+        // running, and closing the overlay resumes play with zero reload.
+        androidx.compose.animation.AnimatedVisibility(
+            visible = logOverlay,
+            enter = fadeIn(tween(150)) + androidx.compose.animation.slideInVertically(
+                tween(200)) { it / 3 },
+            exit = fadeOut(tween(150)) + androidx.compose.animation.slideOutVertically(
+                tween(200)) { it / 3 },
+            modifier = Modifier.matchParentSize()
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.35f))
+                    .pointerInput(Unit) {
+                        // Tap the visible game area (scrim) to close.
+                        detectTapGestures { logOverlay = false }
+                    },
+                contentAlignment = Alignment.BottomCenter
+            ) {
+                EmuLogOverlay(onDismiss = { logOverlay = false })
+            }
         }
 
         // ---- overlay layer 5: pad edit toolbar -------------------------------
@@ -659,7 +688,7 @@ fun EmuScreen(
                     .padding(horizontal = 14.dp, vertical = 8.dp)
             ) {
                 Text(
-                    "EDIT LAYOUT — drag any control; positions persist",
+                    "EDIT LAYOUT — drag controls",
                     fontSize = 10.sp, color = Color(0xFFE2C74B),
                     fontFamily = TitilliumFontFamily
                 )
@@ -987,7 +1016,9 @@ private fun EmuInGameMenu(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         "PSX5",
-                        color = PS5AccentBlue, fontSize = 11.sp,
+                        // v1.61 — the wordmark is monochrome now (the brand
+                        // moved to AMOLED black); it is not an accent button.
+                        color = c.textSecondary, fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = TitilliumFontFamily,
                         letterSpacing = 2.sp

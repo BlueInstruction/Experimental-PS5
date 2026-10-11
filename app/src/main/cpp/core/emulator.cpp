@@ -517,7 +517,15 @@ std::string Emulator::GetStatusString() const {
 void Emulator::EnsureMemoryWindow(std::vector<std::string>& report,
                                   bool& ok, bool& fatal) {
     (void)ok;
-    if (!MemoryManager::GetInstance().Initialize(256)) {
+    // v1.61 — the suite used to reserve a 256 MiB window while the real
+    // guest path reserves the 4 GiB default. Initialize() is idempotent,
+    // so whichever ran first FIXED the window for the whole process: the
+    // 2026-10-11 device session then rejected the import-trap stubs at
+    // guestBase+0x20000000 ("outside window"), leaving all 815 game
+    // imports unresolved — scePad/sceAudioOut/sceVideoOut HLE unreachable,
+    // i.e. the on-screen pad could never reach the game. One window size
+    // everywhere: the guest-path default.
+    if (!MemoryManager::GetInstance().Initialize()) {
         report.push_back("[FAIL] 1. Memory window reservation");
         fatal = true;
         return;

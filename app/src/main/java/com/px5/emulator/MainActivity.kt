@@ -799,13 +799,15 @@ fun AppNavigation(
 
             composable("emulation?path={path}") { backStackEntry ->
                 val path = backStackEntry.arguments?.getString("path") ?: ""
+                // v1.61 — the in-game log viewer is a stage overlay now;
+                // navigating away from a running game (the old
+                // "logs" route from here) reloaded it on every peek.
                 EmuScreen(
                     path = path,
                     gameViewModel = gameViewModel,
                     fexCoreStatus = fexCoreStatus,
                     fexCoreWrapper = fexCoreWrapper,
-                    onBackClick = { navController.popBackStack() },
-                    onOpenLogs = { navController.navigate("logs") }
+                    onBackClick = { navController.popBackStack() }
                 )
             }
         }
