@@ -127,6 +127,28 @@ public:
         m_testShaderReader = std::move(fn);
     }
 
+    // ---- Shader-module sink (M8 T5 caller seam) -------------------------
+    //
+    // VulkanGpuDevice::CreateShaderModuleFromWords existed with NO caller:
+    // guest SPIR-V stopped at the capture leg. The engine registers this
+    // sink (Emulator::Initialize) and every successful REAL capture then
+    // materializes a VkShaderModule from the guest words — the exact
+    // "SPIR-V from the real guest -> shader module" hop, counted and
+    // logged per stage. Absent sink = named absence (accounting only);
+    // a failing sink is evidence too (named error, bounded retries via
+    // the same per-vaddr memo budget as the capture).
+    // Not cleared by ResetForTest: it is configuration, not evidence —
+    // an in-process self-test must not silently un-register the
+    // production path for the next real boot in the same process.
+    using ShaderModuleSink = std::function<bool(
+        uint32_t stage, uint64_t codeVaddr, const uint32_t* spirvWords,
+        size_t wordCount, std::string& err)>;
+    void SetShaderModuleSink(ShaderModuleSink fn) {
+        m_shaderModuleSink = std::move(fn);
+    }
+    uint64_t ModulesMaterialized() const { return m_modulesMaterialized; }
+    uint64_t ModuleFailures()     const { return m_moduleFailures; }
+
 private:
     GnmSubmit() = default;
 
@@ -148,6 +170,7 @@ private:
         uint32_t attempts = 0;
         bool     ok = false;
         bool     tried = false;
+        bool     moduleOk = false;   // sink delivered a VkShaderModule
     };
     static constexpr uint32_t kCaptureStages = 3;   // CS, VS, PS
     static constexpr uint32_t kMaxCaptureAttemptsPerVaddr = 3;
@@ -172,6 +195,9 @@ private:
     StageMemo        m_stageMemo[kCaptureStages];
     std::vector<CaptureOutcome> m_captureOutcomes;  // bounded ring (last 8)
     PX5::Gpu::ShaderCapture::MemoryReader m_testShaderReader;  // empty => default
+    ShaderModuleSink m_shaderModuleSink;             // empty => accounting only
+    uint64_t         m_modulesMaterialized = 0;
+    uint64_t         m_moduleFailures = 0;
 };
 
 } // namespace PX5::Gnm

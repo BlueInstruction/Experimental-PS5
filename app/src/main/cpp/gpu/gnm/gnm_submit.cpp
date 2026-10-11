@@ -83,6 +83,10 @@ void GnmSubmit::ResetForTest() {
     for (auto& memo : m_stageMemo) memo = StageMemo{};
     m_captureOutcomes.clear();
     m_testShaderReader = nullptr;
+    // m_shaderModuleSink deliberately survives ResetForTest: it is engine
+    // configuration (the production module path), not test evidence.
+    m_modulesMaterialized = 0;
+    m_moduleFailures = 0;
 }
 
 bool GnmSubmit::SubmitBuffer(const uint32_t* dwords, size_t dwordCount,
@@ -158,10 +162,17 @@ void GnmSubmit::RunGpuPathEvidence() {
             PX5::Gpu::ShaderCapture::ExtractShader(m_state, stage);
         if (!captured.hasProgram) continue;   // stream never loaded it
 
-        // Memoization: same program + pinned success, or retry budget
-        // spent -> skip. Never re-read a stable program per submit.
-        if (memo.tried && memo.vaddr == captured.codeVaddr &&
-            (memo.ok || memo.attempts >= kMaxCaptureAttemptsPerVaddr)) {
+        // Memoization: same program + pinned success — the pin requires the
+        // capture AND, when a sink is registered, the module hop — or the
+        // retry budget spent -> skip. Never re-read a stable program per
+        // submit; a module failure keeps the leg alive until the budget
+        // pins it (bounded, named each time).
+        const bool sameVaddr = memo.tried && memo.vaddr == captured.codeVaddr;
+        const bool capturePinned = sameVaddr && memo.ok &&
+                                   (!m_shaderModuleSink || memo.moduleOk);
+        const bool budgetSpent   = sameVaddr &&
+                                   memo.attempts >= kMaxCaptureAttemptsPerVaddr;
+        if (capturePinned || budgetSpent) {
             ++m_captureSkips;
             continue;
         }
@@ -208,6 +219,33 @@ void GnmSubmit::RunGpuPathEvidence() {
                      m_logTag, StageName(s),
                      (unsigned long long)outcome.codeVaddr,
                      outcome.spirvWords);
+            // Module hop: the guest SPIR-V crosses to a real VkShaderModule
+            // through the registered sink (CreateShaderModuleFromWords).
+            // With no sink this leg is a named absence, not a silence.
+            if (m_shaderModuleSink) {
+                std::string modErr;
+                const bool modOk = m_shaderModuleSink(
+                    s, outcome.codeVaddr, spirv.data(), spirv.size(),
+                    modErr);
+                if (modOk) {
+                    memo.moduleOk = true;
+                    ++m_modulesMaterialized;
+                    PX5_LOGI(LogCategory::GPU,
+                             "%sGPU path: %s @0x%llX -> VkShaderModule "
+                             "(%u words)",
+                             m_logTag, StageName(s),
+                             (unsigned long long)outcome.codeVaddr,
+                             outcome.spirvWords);
+                } else {
+                    ++m_moduleFailures;
+                    PX5_LOGW(LogCategory::GPU,
+                             "%sGPU path: %s @0x%llX VkShaderModule "
+                             "failed: %s",
+                             m_logTag, StageName(s),
+                             (unsigned long long)outcome.codeVaddr,
+                             modErr.c_str());
+                }
+            }
         } else {
             outcome.error = error;
             PX5_LOGI(LogCategory::GPU,
@@ -360,6 +398,10 @@ std::string GnmSubmit::GetStatsString() const {
         }
     }
     out += "]";
+    out += " | modules=";
+    out += std::to_string(m_modulesMaterialized);
+    out += " moduleFails=";
+    out += std::to_string(m_moduleFailures);
     return out;
 }
 

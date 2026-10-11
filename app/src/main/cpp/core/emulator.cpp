@@ -133,6 +133,19 @@ bool Emulator::Initialize(const std::string& baseDir) {
 
     VirtualFileSystem::GetInstance().Initialize(baseDir);
     VulkanGpuDevice::GetInstance().Initialize();   // may fail, reports detail
+    // The submit path's module hop: every successful real-guest capture
+    // materializes a VkShaderModule through CreateShaderModuleFromWords —
+    // the layer that existed with no caller. When the device is down the
+    // sink still answers, with the device's own named error, so the
+    // failure is evidence instead of silence.
+    Gnm::GnmSubmit::GetInstance().SetShaderModuleSink(
+        [](uint32_t stage, uint64_t codeVaddr, const uint32_t* words,
+           size_t wordCount, std::string& err) -> bool {
+            (void)stage; (void)codeVaddr;
+            return VulkanGpuDevice::GetInstance()
+                .CreateShaderModuleFromWords(words, wordCount, nullptr,
+                                             err);
+        });
     // Audio is not implemented; Initialize() returns false and logs why.
     // Startup does not depend on it.
     (void)AudioEngine::GetInstance().Initialize();
