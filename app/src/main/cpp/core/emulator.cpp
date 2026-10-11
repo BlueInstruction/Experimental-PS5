@@ -3,8 +3,11 @@
 #include "memory/memory.h"
 #include "kernel/syscalls.h"
 #include "kernel/sce_kernel_hle.h"
-#include "gpu/vulkan_device.h"
+// Layer contract (gpu_ir.h guard): the GPU IR must never be compiled after
+// Vulkan headers. gnm_submit.h -> gpu_ir.h, so it comes FIRST; only then
+// the Vulkan-backed device header.
 #include "gpu/gnm/gnm_submit.h"
+#include "gpu/vulkan_device.h"
 #include "filesystem/vfs.h"
 #include "audio/audio.h"
 #include "../tests/test_guest.h"
