@@ -83,6 +83,13 @@ constexpr uint32_t kPx5ImportCallBase   = 0x5C510000u;
 constexpr uint32_t kPx5ImportCallSlots  = 0x00010000u;
 constexpr uint32_t kPx5ImportCallEnd    = kPx5ImportCallBase + kPx5ImportCallSlots;
 
+// v1.62 — guest ABI stub range (see loader/guest_abi.h). Disjoint from the
+// import-call range and from every real x86-64 Linux number. The stub id
+// rides the syscall number exactly like import calls do.
+constexpr uint32_t kPx5AbiStubBase      = 0x5C530000u;
+constexpr uint32_t kPx5AbiStubSlots     = 0x00010000u;
+constexpr uint32_t kPx5AbiStubEnd       = kPx5AbiStubBase + kPx5AbiStubSlots;
+
 /**
  * A transparent import call as it arrives from the guest stub (v1.47).
  * The six SysV register arguments come through the syscall-argument path
@@ -150,9 +157,14 @@ struct ImportTrapEntry {
     /// Unresolved = no HLE decision made yet; KernelHle = routed to the
     /// HLE symbol table (resolvedSymbol names it); Unavailable = this
     /// import is named but PX5 implements nothing behind it (ledger path).
-    enum class Route : uint8_t { Unresolved = 0, KernelHle, Unavailable };
+    /// v1.62 — GuestAbi = the slot was redirected at a real guest-space
+    /// ABI object (abiVa holds it): data imports never dispatch, they are
+    /// read as memory, so this route is set at load time, not call time.
+    enum class Route : uint8_t { Unresolved = 0, KernelHle, Unavailable,
+                                 GuestAbi };
     Route       route = Route::Unresolved;
     std::string resolvedSymbol;  ///< HLE symbol when route == KernelHle
+    uint64_t    abiVa = 0;       ///< object VA when route == GuestAbi
 };
 
 /**
@@ -371,6 +383,7 @@ private:
     // legacy trap path).
     uint64_t m_importHleCalls   = 0; ///< dispatched into the HLE surface
     uint64_t m_importUnresolved = 0; ///< named-but-unimplemented (RAX=0)
+    uint64_t m_abiResolved = 0;      ///< v1.62 slots redirected at ABI objects
 
     // v1.47 — the import-route seam (see SetImportRoute). Read under
     // m_mutex; installed once by the HLE surface's registration, never

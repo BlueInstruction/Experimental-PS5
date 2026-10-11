@@ -1,5 +1,7 @@
 #include "sce_kernel_hle.h"
 
+#include "libc_hle.h"
+
 #include "../audio/audio_out_hle.h"
 #include "../gpu/gnm/gnm_submit.h"
 #include "../gpu/videoout_hle.h"
@@ -136,6 +138,9 @@ void KernelHle::RegisterAll() {
     add("_init_env");
     add("atexit");
     add("__cxa_atexit");
+
+    // v1.62 — the libc/libc++ tranche rides the same table + counters.
+    LibcHle::Instance().CollectSymbols(&m_table);
 
     m_registered = true;
     // Seed the NID registry: guest images import these functions by their
@@ -620,6 +625,10 @@ uint64_t KernelHle::InvokeByImport(const std::string& symbol,
     if (symbol == "sceVideoOutConfigureOutput")
         return s32(videoOut.ConfigureOutput(static_cast<int32_t>(a0), a1,
                                             a2));
+
+    // --- libc/libc++ tranche (v1.62) ----------------------------------------
+    if (LibcHle::Instance().HasSymbol(symbol))
+        return LibcHle::Instance().Invoke(symbol, call);
 
     return static_cast<uint64_t>(kErrInval);
 }

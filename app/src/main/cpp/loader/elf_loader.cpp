@@ -1,6 +1,8 @@
 #include "elf_loader.h"
 #include "self_extract.h"
 #include "runtime_linker.h"
+#include "guest_abi.h"
+#include "nid.h"
 #include "../utils/crash_handler.h"
 #include "../utils/logger.h"
 #include "../utils/breadcrumbs.h"
@@ -381,6 +383,7 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
     // named-ledger behavior (RAX=0, guest keeps running).
     // ------------------------------------------------------------------
     size_t trapInstalled = 0;
+    size_t abiResolvedTotal = 0;   // v1.62 — slots redirected at ABI objects
     if (!pend.empty()) {
         constexpr uint64_t kStubStride = 16;
         auto& memRef = MemoryManager::GetInstance();
@@ -557,7 +560,76 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
                              (unsigned long long)firstBadSlotVa,
                              (unsigned long long)firstBadGot);
                 }
+
+                // ----------------------------------------------------------------
+                // v1.62 — guest ABI objects. The 2026-10-11 session proved
+                // the wall: ~372 of these slots are DATA relocations
+                // (typeinfo vtables, exception RTTI, stdio statics) and a
+                // 16-byte call stub is not a valid object for them — the
+                // guest read stub bytes as a vtable pointer and the exit
+                // field carried a guest VA. Build the guest-space ABI
+                // module and redirect every data slot whose name it
+                // provides at the real object (write + readback, same
+                // discipline as above). Data slots that resolve here never
+                // reach the dispatch ledger: the guest reads them as
+                // memory. Function-shaped ABI symbols (exception dtors,
+                // __cxa_pure_virtual, the personality) resolve too — their
+                // stubs are real callable guest code.
+                // ----------------------------------------------------------------
+                GuestAbi::BuildResult abi = GuestAbi::Build(
+                    "guest_abi", stubBase, stubBase + stubBytes);
+                if (!abi.ok) {
+                    PX5_LOGW(LogCategory::LOADER,
+                             "GUEST-ABI: build refused (%s) — data slots "
+                             "keep the call-stub redirection; the guest "
+                             "will read stub bytes as data",
+                             abi.error.c_str());
+                }
+                size_t abiResolved = 0;
+                uint64_t firstAbiSlotVa = 0;
+                if (abi.ok) {
+                    for (auto& t : traps) {
+                        if (t.name.empty()) continue;
+                        std::string base =
+                            t.name.substr(0, t.name.find('#'));
+                        std::string readable = base;
+                        if (Nid::IsNidString(base)) {
+                            readable = Nid::NidRegistry::Instance()
+                                           .Resolve(base);
+                        }
+                        if (readable.empty()) continue;
+                        uint64_t objVa = 0;
+                        if (!GuestAbi::Resolve(readable, &objVa)) continue;
+                        if (!vaWritableSeg(t.slotVa)) continue;
+                        void* slotHost = memRef.GetHostPointer(t.slotVa);
+                        if (!slotHost) continue;
+                        memcpy(slotHost, &objVa, sizeof objVa);
+                        uint64_t back = 0;
+                        memcpy(&back, slotHost, sizeof back);
+                        if (back != objVa) {
+                            if (firstAbiSlotVa == 0)
+                                firstAbiSlotVa = t.slotVa;
+                            continue;
+                        }
+                        t.route = ImportTrapEntry::Route::GuestAbi;
+                        t.abiVa = objVa;
+                        t.resolvedSymbol = readable;
+                        ++abiResolved;
+                    }
+                    PX5_LOGI(LogCategory::LOADER,
+                             "GUEST-ABI: slots redirected=%zu/%zu "
+                             "readbackMismatch=%s — typeinfo/RTTI/static "
+                             "imports now read real objects",
+                             abiResolved, traps.size(),
+                             firstAbiSlotVa ? "YES" : "no");
+                    if (firstAbiSlotVa != 0) {
+                        Evidence::AppendLedger(
+                            "guest abi slot write mismatch first slotVa=0x%llx",
+                            (unsigned long long)firstAbiSlotVa);
+                    }
+                }
                 trapInstalled = traps.size();
+                abiResolvedTotal = abi.ok ? abiResolved : 0;
                 RuntimeLinker::GetInstance().SetImportTraps(
                     stubBase, stubBase + stubBytes, std::move(traps));
 
@@ -588,6 +660,7 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
     out.relocSkippedOther = skippedOther;
     out.relocWriteRefused = refused;
     out.relocImportTraps = trapInstalled;
+    out.relocAbiResolved = abiResolvedTotal;
     out.relocWeakZero = weakZero;
 
     PX5_LOGI(LogCategory::LOADER,
@@ -602,14 +675,16 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
     PX5_LOGI(LogCategory::LOADER,
              "REL: applied=%llu unresolvedImports=%llu "
              "(R_64=%u GLOB_DAT=%u JUMP_SLOT=%u other=%u) trapped=%llu "
-             "weakZero=%llu weakRefused=%llu skippedOther=%llu "
-             "writeRefused=%llu — trapped = named-ledger path, the rest "
-             "of the worklist waits on HLE",
+             "abiResolved=%llu weakZero=%llu weakRefused=%llu "
+             "skippedOther=%llu writeRefused=%llu — trapped = named-ledger "
+             "path, abiResolved = real guest ABI objects, the rest of the "
+             "worklist waits on HLE",
              (unsigned long long)applied,
              (unsigned long long)unresolved,
              unresolvedByType[0], unresolvedByType[1],
              unresolvedByType[2], unresolvedByType[3],
              (unsigned long long)out.relocImportTraps,
+             (unsigned long long)out.relocAbiResolved,
              (unsigned long long)weakZero,
              (unsigned long long)weakRefused,
              (unsigned long long)skippedOther,

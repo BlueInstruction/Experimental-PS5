@@ -111,6 +111,9 @@ struct LoadedElfImage {
     // semantics; crt NULL-checks rely on it). unresolvedImports ==
     // traps + weakZero when every slot write succeeded.
     uint64_t             relocImportTraps = 0;
+    // v1.62 — UNDEF slots redirected at real guest-space ABI objects
+    // (typeinfo vtables / exception RTTI / statics) instead of call stubs.
+    uint64_t             relocAbiResolved = 0;
     uint64_t             relocWeakZero = 0;
 
     size_t TotalMemSize() const { return imageHighVa - imageLowVa; }

@@ -45,6 +45,7 @@ echo "[hosttests] building import_trap_test"
     "$ROOT/tools/hosttests/import_trap_test.cpp" \
     "$CPP/loader/nid.cpp" \
     "$CPP/loader/elf_loader.cpp" \
+    "$CPP/loader/guest_abi.cpp" \
     "$CPP/loader/self_extract.cpp" \
     "$CPP/loader/runtime_linker.cpp" \
     "$CPP/memory/memory.cpp" \
@@ -74,7 +75,9 @@ echo "[hosttests] building nid_dispatch_test (M9 transparent import dispatch)"
     "$CPP/loader/nid.cpp" \
     "$CPP/loader/runtime_linker.cpp" \
     "$CPP/kernel/sce_kernel_hle.cpp" \
+    "$CPP/kernel/libc_hle.cpp" \
     "$CPP/kernel/syscalls.cpp" \
+    "$CPP/loader/guest_abi.cpp" \
     "$CPP/audio/audio_out_hle.cpp" \
     "$CPP/input/pad_hle.cpp" \
     "$CPP/input/controller.cpp" \
@@ -110,7 +113,9 @@ echo "[hosttests] building videoout_hle_test (M10 T1 sceVideoOut HLE)"
     "$ROOT/tools/hosttests/videoout_hle_test.cpp" \
     "$CPP/gpu/videoout_hle.cpp" \
     "$CPP/kernel/sce_kernel_hle.cpp" \
+    "$CPP/kernel/libc_hle.cpp" \
     "$CPP/kernel/syscalls.cpp" \
+    "$CPP/loader/guest_abi.cpp" \
     "$CPP/loader/nid.cpp" \
     "$CPP/loader/runtime_linker.cpp" \
     "$CPP/audio/audio_out_hle.cpp" \
