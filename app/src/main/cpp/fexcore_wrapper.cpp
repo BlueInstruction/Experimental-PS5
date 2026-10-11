@@ -685,7 +685,13 @@ Java_com_px5_emulator_core_FexCoreWrapper_nativeRunFoundationSelfTest(
             // pre-fork FEXCore context built by the multithreaded parent.
             PX5::FexCoreIntegration::ResetForChild();
             t.step("engine rebuild ok — SelfTestFoundation enter");
+            // Stream the self-test step lines through the trail: if a later
+            // step kills this child, every completed step (including the
+            // GPU/M7 evidence steps that now run first) survives in the
+            // parent's report instead of dying with the child's memory.
+            PX5::Emulator::GetInstance().SetReportTrailFd(t.fd);
             const std::string r = PX5::Emulator::GetInstance().SelfTestFoundation();
+            PX5::Emulator::GetInstance().SetReportTrailFd(-1);
             t.step("SelfTestFoundation returned (%zu chars)", r.size());
             return r;
         },
