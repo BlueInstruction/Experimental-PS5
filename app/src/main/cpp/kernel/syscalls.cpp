@@ -2,6 +2,7 @@
 #include "../fexcore_integration.h"
 #include "../memory/memory.h"
 #include "../loader/runtime_linker.h"
+#include "../loader/guest_abi.h"
 #include "../utils/logger.h"
 #include "../utils/evidence.h"
 
@@ -388,6 +389,21 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
     // the six registers FEXCore hands us are the caller's untouched SysV
     // arguments after the stub's rcx->r10 shuffle: a1..a6 arrive intact
     // and the call-ABI stack stands at guestRsp for 7th+ arguments.
+    // v1.62 — guest ABI stubs. The loader-emitted C++ ABI objects contain
+    // small guest stubs (mov eax, kPx5AbiStubBase+id; syscall; ret) whose
+    // only job is to NAME the ABI path the guest actually took: a typeinfo
+    // dtor ran, do_catch was consulted, __cxa_pure_virtual was entered.
+    // First hit per id is logged by name; repeats are counted. Every stub
+    // returns 0 — honest "no-op / no-match" semantics until the exception
+    // tranche lands; what() carries its empty string in the stub itself.
+    if (nr >= kPx5AbiStubBase && nr < kPx5AbiStubEnd) {
+        const uint64_t ret =
+            GuestAbi::DispatchStub(static_cast<uint64_t>(nr - kPx5AbiStubBase));
+        std::lock_guard<std::mutex> lk(g_stateMutex);
+        g_stats.handledCalls++;
+        return ret;
+    }
+
     if (nr >= kPx5ImportCallBase && nr < kPx5ImportCallEnd) {
         ImportCall call;
         call.args[0] = a0;

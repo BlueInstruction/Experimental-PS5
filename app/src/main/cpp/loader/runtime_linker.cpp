@@ -286,6 +286,11 @@ void RuntimeLinker::SetImportTraps(uint64_t regionBase, uint64_t regionEnd,
     m_trapDistinct  = 0;
     m_trapLedgered  = 0;
     m_trapOob       = 0;
+    // v1.62 — count the slots the loader redirected at real guest-space
+    // ABI objects; the summary distinguishes them from ledger traps.
+    m_abiResolved = 0;
+    for (const auto& e : m_importTraps)
+        if (e.route == ImportTrapEntry::Route::GuestAbi) ++m_abiResolved;
 }
 
 namespace {
@@ -539,7 +544,8 @@ std::string RuntimeLinker::GetImportTrapSummary() {
                       " (distinct=" + std::to_string(m_trapDistinct) +
                       ")" +
                       " hle-calls=" + std::to_string(m_importHleCalls) +
-                      " unresolved=" + std::to_string(m_importUnresolved);
+                      " unresolved=" + std::to_string(m_importUnresolved) +
+                      " abi-objects=" + std::to_string(m_abiResolved);
     if (show == 0) return out;
     out += " top:";
     char one[128];
