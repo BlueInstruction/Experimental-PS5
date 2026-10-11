@@ -340,6 +340,26 @@ std::string GnmSubmit::GetStatsString() const {
     out += std::to_string(m_captureOk);
     out += " skips=";
     out += std::to_string(m_captureSkips);
+    // Per-stage capture ring (last 8, oldest first): "ok <words>w" or the
+    // exact named failure. This is the T2 evidence a device session reads
+    // straight from the stats line — no other log needed.
+    out += " | cap[";
+    for (size_t i = 0; i < m_captureOutcomes.size(); ++i) {
+        const CaptureOutcome& o = m_captureOutcomes[i];
+        if (i) out += ",";
+        char stageHead[32];
+        std::snprintf(stageHead, sizeof(stageHead), "%s@%llX:",
+                      StageName(o.stage), (unsigned long long)o.codeVaddr);
+        out += stageHead;
+        if (o.ok) {
+            out += std::to_string(o.spirvWords);
+            out += "w";
+        } else {
+            out += "fail:";
+            out += o.error.substr(0, 48);
+        }
+    }
+    out += "]";
     return out;
 }
 

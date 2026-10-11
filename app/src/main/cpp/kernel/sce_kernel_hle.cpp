@@ -429,6 +429,11 @@ uint64_t KernelHle::GnmSubmitCommandBuffers(uint64_t count,
         PX5_LOGW(LogCategory::GPU,
                  "sceGnmSubmitCommandBuffers(count=%llu) rc=%lld: %s",
                  (unsigned long long)count, (long long)rc, err.c_str());
+        // Evidence on the failure path too: a device session must not lose
+        // the per-kind deferral/capture counters just because one submit
+        // returned an error.
+        PX5_LOGW(LogCategory::GPU, "sceGnmSubmitCommandBuffers stats: %s",
+                 Gnm::GnmSubmit::GetInstance().GetStatsString().c_str());
     } else {
         PX5_LOGI(LogCategory::GPU,
                  "sceGnmSubmitCommandBuffers ok: %s",

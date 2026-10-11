@@ -4,6 +4,7 @@
 #include "kernel/syscalls.h"
 #include "kernel/sce_kernel_hle.h"
 #include "gpu/vulkan_device.h"
+#include "gpu/gnm/gnm_submit.h"
 #include "filesystem/vfs.h"
 #include "audio/audio.h"
 #include "../tests/test_guest.h"
@@ -459,6 +460,13 @@ FexCoreIntegration::ExecResult Emulator::ExecuteLoadedGuest() {
         (unsigned long long)res.exitCode,
         res.exitedCleanly ? 1 : 0,
         res.error.empty() ? "none" : res.error.c_str());
+    // T2 evidence, one line per real dispatch stop: the submit-path stats
+    // (per-kind deferral, per-stage capture outcomes) land in the ledger
+    // under the session's REAL-GUEST/SYNTH tag. A device session reads the
+    // whole GPU truth from this line without grepping the verbose log.
+    Evidence::AppendLedger(
+        "gpu-stats %s",
+        Gnm::GnmSubmit::GetInstance().GetStatsString().c_str());
     PX5_LOGI(LogCategory::CORE,
              "[GUEST] dispatch result: started=%d stopped_by=%s "
              "guest_rip=0x%llx exit_code=0x%llx %s",

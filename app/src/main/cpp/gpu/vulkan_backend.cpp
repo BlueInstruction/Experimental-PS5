@@ -26,13 +26,22 @@ uint8_t ClearFloatToUnorm8(float f) {
 void BackendPlanStats::Reset() { *this = BackendPlanStats{}; }
 
 std::string BackendPlanStats::SummaryString() const {
-    char b[160];
+    // Per-kind deferral is the point: "deferred=6" hides WHERE the guest
+    // stream stops; the split (draw/drawIndexed/dispatch/scissor) is what
+    // a device session quotes to name the next blocker.
+    char b[224];
     snprintf(b, sizeof(b),
-             "ops=%llu clear=%llu boundary=%llu deferred=%llu unknown=%llu",
+             "ops=%llu clear=%llu boundary=%llu deferred=%llu"
+             "(scissor=%llu draw=%llu drawIndexed=%llu dispatch=%llu)"
+             " unknown=%llu",
              static_cast<unsigned long long>(opsReceived),
              static_cast<unsigned long long>(clearOps),
              static_cast<unsigned long long>(boundaryOps),
              static_cast<unsigned long long>(DeferredTotal()),
+             static_cast<unsigned long long>(scissorOpsDeferred),
+             static_cast<unsigned long long>(drawOpsDeferred),
+             static_cast<unsigned long long>(drawIndexedOpsDeferred),
+             static_cast<unsigned long long>(dispatchOpsDeferred),
              static_cast<unsigned long long>(unknownOps));
     return std::string(b);
 }

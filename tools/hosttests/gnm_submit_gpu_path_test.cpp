@@ -259,12 +259,27 @@ int main() {
         Require(submit.CaptureOutcomes().size() <= 8u, "outcome ring bounded");
 
         // ---- Stats string carries the evidence ---------------------------
+        // plan[last:] names each deferred kind (T2: "deferred per type"),
+        // cap[...] names the per-stage capture outcomes (SPIR-V words or
+        // the named error).
         const std::string stats = submit.GetStatsString();
         Require(stats.find("ir[last:") != std::string::npos &&
                     stats.find("plan[last:") != std::string::npos &&
                     stats.find("captures=5") != std::string::npos &&
                     stats.find("ok=2") != std::string::npos,
                 "stats string carries the GPU-path evidence");
+        // Last plan is cumulative (2 dispatches from stream1 + 4 from
+        // streamBad = 6 dispatches, 2 scissors, 2 draws, 1 boundary).
+        Require(stats.find("deferred=10(scissor=2 draw=2 drawIndexed=0 "
+                           "dispatch=6)") != std::string::npos,
+                "plan summary splits the deferral by kind (" + stats + ")");
+        Require(stats.find("cap[CS@") != std::string::npos &&
+                    stats.find("w,VS@") != std::string::npos &&
+                    stats.find("w,") != std::string::npos &&
+                    stats.find("fail:shader capture: code unreadable @0x") !=
+                        std::string::npos,
+                "stats string carries the per-stage capture ring (" +
+                    stats + ")");
 
         submit.ResetForTest();
         Require(submit.Lowerings() == 0u && submit.CaptureAttempts() == 0u,
