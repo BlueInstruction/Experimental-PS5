@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- PX5 launcher background — AMOLED black (v1.61). The tile is true
-     black so OLED panels switch the pixels off; depth comes from the
-     foreground's hairline ring, not from a gradient. -->
+<!-- PX5 launcher background — artwork edge navy. The foreground is the
+     full-bleed navy rounded artwork; this layer only shows in the
+     sliver between the artwork's baked corner radius and the launcher
+     mask, so it takes the artwork's own edge color (#1B1E28) and no
+     mask shape leaves a halo. -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
-    <solid android:color="#000000" />
+    <solid android:color="#1B1E28" />
 </shape>
