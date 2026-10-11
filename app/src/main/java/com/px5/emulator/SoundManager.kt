@@ -8,8 +8,19 @@ import android.util.Log
 
 /**
  * Sound manager for PS5-style UI audio (navigation, activation, background music).
+ *
+ * v1.61 — the whole surface is SESSION-AWARE: while a game session is
+ * active (Px5Settings.isGameSessionActive) every UI sound, including the
+ * background music, is silent. The PS5 shell ambience belongs to the
+ * launcher screens; nothing may play OVER a running game's own audio.
  */
 class SoundManager private constructor(private val context: Context) {
+
+    /** True while a game is running — every UI sound stays silent. */
+    private val inGameSession: Boolean
+        get() = try {
+            com.px5.emulator.core.Px5Settings.isGameSessionActive()
+        } catch (_: Throwable) { false }
 
     private var soundPool: SoundPool? = null
     private var navSoundId: Int = 0
@@ -94,7 +105,7 @@ class SoundManager private constructor(private val context: Context) {
     }
 
     fun playNavigationSound() {
-        if (!isSoundEnabled || navSoundId == 0) return
+        if (!isSoundEnabled || inGameSession || navSoundId == 0) return
         try {
             soundPool?.play(navSoundId, 0.6f, 0.6f, 1, 0, 1.0f)
         } catch (e: Exception) {
@@ -103,7 +114,7 @@ class SoundManager private constructor(private val context: Context) {
     }
 
     fun playActivationSound() {
-        if (!isSoundEnabled || actSoundId == 0) return
+        if (!isSoundEnabled || inGameSession || actSoundId == 0) return
         try {
             soundPool?.play(actSoundId, 0.9f, 0.9f, 1, 0, 1.0f)
         } catch (e: Exception) {
@@ -112,7 +123,10 @@ class SoundManager private constructor(private val context: Context) {
     }
 
     fun startBgMusic() {
-        if (!isBgMusicEnabled) return
+        // v1.61 — never over a game: onResume fires on every return to the
+        // foreground, including mid-session (log share sheet, home gesture).
+        // The gate lives HERE, not at the callers, so no screen can forget it.
+        if (!isBgMusicEnabled || inGameSession) return
         try {
             if (bgPlayer == null) {
                 initBgMusic()
