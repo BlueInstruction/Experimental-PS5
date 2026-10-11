@@ -65,10 +65,14 @@ struct BuildResult {
  * MemoryManager::Shutdown — the same lifecycle the import-stub region
  * already has.
  * @param label Memory mapping label for evidence
+ * @param avoidBase Inclusive start of a guest range the region must not
+ *        overlap (the import-stub region); 0 = nothing to avoid
+ * @param avoidEnd Exclusive end of the avoided range
  * @return BuildResult; ok=false names the failure and leaves the
  *         registry EMPTY (callers must not consult Resolve)
  */
-BuildResult Build(const char* label);
+BuildResult Build(const char* label, uint64_t avoidBase = 0,
+                  uint64_t avoidEnd = 0);
 
 /**
  * Resolves an ABI symbol name (exact mangled form, e.g. "_ZTVSt9exception")

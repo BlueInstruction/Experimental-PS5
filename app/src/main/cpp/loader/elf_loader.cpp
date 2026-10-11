@@ -576,8 +576,8 @@ void ApplyDynamicRelocations(const uint8_t* data, size_t size,
                 // __cxa_pure_virtual, the personality) resolve too — their
                 // stubs are real callable guest code.
                 // ----------------------------------------------------------------
-                GuestAbi::BuildResult abi =
-                    GuestAbi::Build("guest_abi");
+                GuestAbi::BuildResult abi = GuestAbi::Build(
+                    "guest_abi", stubBase, stubBase + stubBytes);
                 if (!abi.ok) {
                     PX5_LOGW(LogCategory::LOADER,
                              "GUEST-ABI: build refused (%s) — data slots "

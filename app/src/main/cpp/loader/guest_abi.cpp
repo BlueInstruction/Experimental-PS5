@@ -144,7 +144,7 @@ void WriteStub(uint8_t* p, size_t id, uint64_t whatStringVa) {
 
 } // namespace
 
-BuildResult Build(const char* label) {
+BuildResult Build(const char* label, uint64_t avoidBase, uint64_t avoidEnd) {
     BuildResult res;
     std::lock_guard<std::mutex> lk(g_mutex);
 
@@ -252,11 +252,25 @@ BuildResult Build(const char* label) {
     // fallbacks walk downward from the window ceiling like the stub region.
     const uint64_t anchor = guestBase + 0x21000000ull;
     const uint64_t guard = 0x1000000ull;
+    // Candidates, each rejection-checked against the avoided range (the
+    // import-stub region): below it, above it, then the window-top fallback.
+    const bool hasAvoid = avoidBase != 0 && avoidEnd > avoidBase;
+    auto overlapsAvoid = [&](uint64_t lo, uint64_t hi) {
+        return hasAvoid && lo < avoidEnd && hi > avoidBase;
+    };
     uint64_t regionVa = 0;
-    if (anchor >= guestBase && anchor + blobBytes + guard <= winEnd) {
+    const uint64_t anchorLo = anchor;
+    const uint64_t anchorHi = anchor + blobBytes;
+    if (anchor >= guestBase && anchorHi + guard <= winEnd &&
+        !overlapsAvoid(anchorLo, anchorHi)) {
         regionVa = anchor;
+    } else if (hasAvoid && avoidBase > guestBase + blobBytes &&
+               !overlapsAvoid(avoidBase - blobBytes, avoidBase)) {
+        regionVa = (avoidBase - blobBytes) & ~uint64_t(0xFFF);
+        if (regionVa < guestBase) regionVa = 0;
     } else if (winEnd > blobBytes + guard) {
-        regionVa = (winEnd - blobBytes - guard) & ~uint64_t(0xFFF);
+        const uint64_t lo = (winEnd - blobBytes - guard) & ~uint64_t(0xFFF);
+        if (!overlapsAvoid(lo, lo + blobBytes)) regionVa = lo;
     }
     if (regionVa == 0 || regionVa < guestBase) {
         res.error = "no window space for the ABI region";
