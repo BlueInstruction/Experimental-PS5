@@ -94,6 +94,10 @@ if(ANDROID_ABI STREQUAL "x86_64")
     # entry points (the M8 dispatch proof needs the vendored recompiler)
     # compile down to named refusals instead of undefined symbols.
     target_compile_definitions(px5 PRIVATE PX5_UI_SMOKE_STUB=1)
+    # No shader service on this ABI: gnm_submit's M8 capture leg compiles
+    # down to a named skip (lowering + planner still run). Kept separate
+    # from PX5_UI_SMOKE_STUB so the guard names the actual condition.
+    target_compile_definitions(px5 PRIVATE PX5_NO_SHADER_SERVICE=1)
     # z: SELF extractor inflate/deflate (NDK ships libz).
     target_link_libraries(px5 ${log-lib} ${android-lib} z)
     return()

@@ -63,7 +63,11 @@ echo "[hosttests] building nid_dispatch_test (M9 transparent import dispatch)"
 # The NID layer (AnyPS5 algorithm, golden vectors), the symbol registry and
 # the transparent DispatchImportCall bridge — the seam that lets a guest
 # PLT call reach the real HLE services with its call ABI intact.
+# gnm_submit now walks the IR + planner per submission: the two
+# recompiler-free TUs it needs ride along; PX5_NO_SHADER_SERVICE names the
+# capture leg's honest skip (no M8 service in this binary).
 "$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
+    -DPX5_NO_SHADER_SERVICE \
     -I"$SHIM" -I"$CPP" \
     -o "$OUT/nid_dispatch_test" \
     "$ROOT/tools/hosttests/nid_dispatch_test.cpp" \
@@ -75,6 +79,8 @@ echo "[hosttests] building nid_dispatch_test (M9 transparent import dispatch)"
     "$CPP/input/pad_hle.cpp" \
     "$CPP/input/controller.cpp" \
     "$CPP/gpu/gnm/gnm_submit.cpp" \
+    "$CPP/gpu/ir/gpu_ir.cpp" \
+    "$CPP/gpu/vulkan_backend.cpp" \
     "$CPP/gpu/videoout_hle.cpp" \
     "$CPP/gpu/gnm/pm4_decoder.cpp" \
     "$CPP/gpu/gnm/gnm_state.cpp" \
@@ -95,7 +101,10 @@ echo "[hosttests] building videoout_hle_test (M10 T1 sceVideoOut HLE)"
 # validation order, the 1920x1080 open default, the RegisterBuffers2
 # chain, flip status accounting and the honesty boundary (flips retire,
 # no display engine claimed).
+# Same gnm_submit TU closure as nid_dispatch_test (IR + planner ride along,
+# capture leg named-skip via PX5_NO_SHADER_SERVICE).
 "$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
+    -DPX5_NO_SHADER_SERVICE \
     -I"$SHIM" -I"$CPP" \
     -o "$OUT/videoout_hle_test" \
     "$ROOT/tools/hosttests/videoout_hle_test.cpp" \
@@ -108,6 +117,8 @@ echo "[hosttests] building videoout_hle_test (M10 T1 sceVideoOut HLE)"
     "$CPP/input/pad_hle.cpp" \
     "$CPP/input/controller.cpp" \
     "$CPP/gpu/gnm/gnm_submit.cpp" \
+    "$CPP/gpu/ir/gpu_ir.cpp" \
+    "$CPP/gpu/vulkan_backend.cpp" \
     "$CPP/gpu/gnm/pm4_decoder.cpp" \
     "$CPP/gpu/gnm/gnm_state.cpp" \
     "$CPP/filesystem/vfs.cpp" \
@@ -292,6 +303,41 @@ echo "[hosttests] building dispatch_proof_contract_test (M8 T7 contract)"
 
 echo "[hosttests] running dispatch_proof_contract_test (M8 T7 contract)"
 "$OUT/dispatch_proof_contract_test"
+
+echo "osttests] building gnm_submit_gpu_path_test (submit-path wiring gate)"
+# The REAL submit TU (GnmSubmit - what sceGnmSubmitCommandBuffers serves)
+# walking the full chain per submission: PM4 decode -> GnmState -> M6 IR ->
+# M7 planner accounting -> M8 capture -> SPIR-V through the vendored
+# recompiler. Fixtures are synthetic; the TUs and the flow are the APK's.
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread -DPX5_HOST_TEST \
+    -DANYPS5_ENABLE_SPIRV_TOOLS=0 \
+    -I"$SHIM" -I"$CPP" \
+    -I"$REC/core/libs" \
+    -I"$REC/core/shader/recompiler" \
+    -I"$REC/core/shader/recompiler/RdnaDecoder/include" \
+    -I"$REC/core/shader/recompiler/ControlFlow/include" \
+    -I"$REC/core/shader/recompiler/IntermediateRepresentation/include" \
+    -I"$REC/core/shader/recompiler/Translation/include" \
+    -I"$REC/core/shader/recompiler/Optimization/include" \
+    -I"$REC/core/shader/recompiler/SpirvBackend/include" \
+    -I"$SPIRVHDRS" \
+    -I"$PORTABLE" \
+    -o "$OUT/gnm_submit_gpu_path_test" \
+    "$ROOT/tools/hosttests/gnm_submit_gpu_path_test.cpp" \
+    "$CPP/gpu/gnm/gnm_submit.cpp" \
+    "$CPP/gpu/gnm/gnm_state.cpp" \
+    "$CPP/gpu/gnm/pm4_decoder.cpp" \
+    "$CPP/gpu/ir/gpu_ir.cpp" \
+    "$CPP/gpu/vulkan_backend.cpp" \
+    "$CPP/gpu/shader/shader_capture.cpp" \
+    "$CPP/gpu/shader/shader_recompiler_service.cpp" \
+    "$CPP/utils/logger.cpp" \
+    "$CPP/utils/diag_bridge.cpp" \
+    "$PORTABLE/px5_spirv_optimizer.cpp" \
+    $(cat "$OUT/rec_sources.txt")
+
+echo "osttests] running gnm_submit_gpu_path_test (submit-path wiring gate)"
+"$OUT/gnm_submit_gpu_path_test"
 
 echo "[hosttests] building audio_out_hle_test (sceAudioOut HLE)"
 # ORBIS audio-out semantics: port table, format decode, volume/Std-mix math,

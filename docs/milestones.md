@@ -121,12 +121,36 @@ The gate run itself needs the device: until a real session logs
 in every session = gate unmet. `driverVerified=yes` is explicitly NOT
 this milestone's evidence.
 
-## M8 — Shader Recompiler — **ABSENT** (by design, after M5-M7)
+## M8 — Shader Recompiler — **GATED** (T1-T7 + submit-path wiring host-gated; device gate unmet)
 
 Gate: known PS5 shader binary → decoder → shader IR → SPIR-V →
 executes on device → reference pattern reproduced in readback.
 Research references: KytyPS5, shadPS4 (structure study, layer
 ownership per docs/architecture.md).
+
+Status: the recompiler is VENDORED (AnyPS5 @ 262c0316, GPL-2.0-only,
+`gpu/shader_recompiler/`; guest RDNA in, SPIR-V out), compiles into the
+arm64 APK (CI Build APK PASS), and is host-gated end to end: T1/T2
+fixtures through the real pipeline, T3 app service (bounded cache,
+stats, reflection), T4 capture from real PM4 SET_SH streams (the
+guest's own declarations — RSRC2.USER_SGPR, NUM_THREAD, the DISPATCH
+initiator wave bit, SPI_PS_IN_CONTROL_0 interpolators — drive the
+recompile inputs), T5 reflection → app descriptor vocabulary, T6
+graphics-pipeline-desc validator, T7 dispatch-proof contract bytes.
+The submit path now walks the real chain per submission:
+`GnmSubmit` decode → M6 lowering → M7 planner (per-kind deferral
+counts) → T4 capture (SPIR-V word count or a named failure per stage,
+memoized per program, bounded retries) — locked by
+`tools/hosttests/gnm_submit_gpu_path_test.cpp`. Binaries that ship no
+shader service (x86_64 UI-smoke stub, HLE-only host tests) compile the
+capture leg down to a named skip (`PX5_NO_SHADER_SERVICE`).
+
+Honest scope: every recompiled shader so far is a FIXTURE (synthetic
+RDNA), never a guest game binary; the on-device M8 dispatch proof
+executes a synthetic compute shader and proves the plumbing, not
+M8. GATED until a device session logs a GUEST shader binary through
+capture → SPIR-V → `VkShaderModule` → pipeline → executed →
+readback-verified output.
 
 ## M9 — VideoOut — **STARTED (host side only)**
 
