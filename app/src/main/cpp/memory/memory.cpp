@@ -243,12 +243,56 @@ bool MemoryManager::MapMemoryImpl_Unlocked(uint64_t vaddr, size_t size,
     if (hostFlags & MemoryFlags::PAGE_WRITE) prot |= PROT_WRITE;
     if (hostFlags & MemoryFlags::PAGE_EXEC)  prot |= PROT_EXEC;
 
-    char* hostLo = static_cast<char*>(m_hostWindow) + (vaLo - m_guestBase);
-    if (mprotect(hostLo, vaHi - vaLo, prot) != 0) {
-        PX5_LOGE(LogCategory::MEMORY,
-                 "mprotect failed for VA 0x%llx: %s",
-                 (unsigned long long)vaLo, strerror(errno));
-        return false;
+    // v1.71: mprotect never DOWNGRADES an already-committed page.
+    // A later segment's page-rounded range can share its first page with an
+    // earlier segment's committed tail: the eboot's PT_LOAD[4] .bss ends
+    // mid-page (..0x1404c6e48) and PT_LOAD[9] starts at 0x1404c6e50 — the
+    // same 4K page, declared with no rights. Painting [vaLo,vaHi) with only
+    // the new prot sealed that page PROT_NONE and the game died at
+    // vmovups [0x1404c6bd0] (v1.70 device log). Overlaps get new|existing
+    // (ORBIS keeps the live side accessible); only untouched gaps get the
+    // new prot alone. The registry below still records MAP_FIXED semantics.
+    {
+        uint64_t cur = vaLo;
+        auto it = m_allocations.upper_bound(vaLo);   // first base > vaLo
+        if (it != m_allocations.begin()) --it;       // candidate predecessor
+        else if (!m_allocations.empty()) it = m_allocations.begin();
+        for (; it != m_allocations.end() && it->first < vaHi; ++it) {
+            const auto& blk = it->second;
+            if (blk.va + blk.size <= vaLo) continue; // predecessor short of vaLo
+            const uint64_t bLo = std::max<uint64_t>(blk.va, vaLo);
+            const uint64_t bHi = std::min<uint64_t>(blk.va + blk.size, vaHi);
+            if (bLo > cur) {
+                char* gap = static_cast<char*>(m_hostWindow) + (cur - m_guestBase);
+                if (mprotect(gap, bLo - cur, prot) != 0) {
+                    PX5_LOGE(LogCategory::MEMORY,
+                             "mprotect failed for VA 0x%llx: %s",
+                             (unsigned long long)cur, strerror(errno));
+                    return false;
+                }
+            }
+            int uprot = prot;
+            if (blk.flags & MemoryFlags::PAGE_READ)  uprot |= PROT_READ;
+            if (blk.flags & MemoryFlags::PAGE_WRITE) uprot |= PROT_WRITE;
+            if (blk.flags & MemoryFlags::PAGE_EXEC)  uprot |= PROT_EXEC;
+            char* h = static_cast<char*>(m_hostWindow) + (bLo - m_guestBase);
+            if (mprotect(h, bHi - bLo, uprot) != 0) {
+                PX5_LOGE(LogCategory::MEMORY,
+                         "mprotect failed for VA 0x%llx: %s",
+                         (unsigned long long)bLo, strerror(errno));
+                return false;
+            }
+            cur = bHi;
+        }
+        if (cur < vaHi) {
+            char* tail = static_cast<char*>(m_hostWindow) + (cur - m_guestBase);
+            if (mprotect(tail, vaHi - cur, prot) != 0) {
+                PX5_LOGE(LogCategory::MEMORY,
+                         "mprotect failed for VA 0x%llx: %s",
+                         (unsigned long long)cur, strerror(errno));
+                return false;
+            }
+        }
     }
 
     // MAP_FIXED-style replace, bookkeeping included: records are split at
