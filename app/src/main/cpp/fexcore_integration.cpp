@@ -661,15 +661,36 @@ FEXCore::HostFeatures CreateHostFeatures() {
     features.SupportsAES     = (hwcap & (1 << 3)) != 0;
     features.SupportsCRC     = (hwcap & (1 << 7)) != 0;
     features.SupportsAtomics = (hwcap & (1 << 8)) != 0;
+    // v1.70 — guest AVX is mandatory for ORBIS code. The PS5 CPU is Zen 2 and
+    // its shipped libc/compiler baseline legitimately emits VEX-encoded AVX.
+    // Device proof (v1.69 log, Dreaming Sarah PPSA02929, real eboot
+    // sha256=0e95ecd2): the guest ran _init_env -> atexit(NULL) ->
+    // atexit(func) and then died with signal=4 trapNo=0 si_code=0 at
+    // guest_rip=0x1402e3305 — which dissects (inner ELF, PT_LOAD rva
+    // 0x2e3305) to `c5 f8 57 c0` = vxorps %xmm0,%xmm0,%xmm0, the FIRST VEX
+    // instruction the game executed. With SupportsAVX=false,
+    // FEX-2608 Frontend.cpp selects NO VEX table (Frontend.cpp:82-87), so
+    // every VEX opcode raises a guest SIGILL — exactly the observed
+    // no-context SIGILL (si_code=0, raise()-style) that the trap router
+    // unwound as "stopped_by=hlt".
+    // SupportsAVX=true selects VEXTableOps_AVX128: guest VEX (128-bit and
+    // 256-bit ymm) is emulated with paired NEON registers, which every
+    // ARM64 host we target has. SVE stays off (no consumer SoC we support
+    // exposes SVE via AT_HWCAP) — the AVX128 split path is FEX's
+    // well-travelled default, and the field-proven SharpDroid v7 config on
+    // this very device class probes AVX=1 SVE128=0 SVE256=0 (FEX's own
+    // ARM64 probe sets SupportsAVX=true unconditionally:
+    // Source/Common/HostFeatures.cpp, pinned FEX-2608).
+    features.SupportsAVX     = true;
     features.SupportsSVE128  = false;
     features.SupportsSVE256  = false;
     features.HostType = FEXCore::HostFeatures::HostTypeEnum::Linux;
 
     PX5_LOGI(LogCategory::FEX,
-             "HostFeatures: DCache=%u ICache=%u AES=%d CRC=%d Atomics=%d hwcap=0x%lx",
+             "HostFeatures: DCache=%u ICache=%u AES=%d CRC=%d Atomics=%d AVX=%d hwcap=0x%lx",
              features.DCacheLineSize, features.ICacheLineSize,
              features.SupportsAES ? 1 : 0, features.SupportsCRC ? 1 : 0,
-             features.SupportsAtomics ? 1 : 0, hwcap);
+             features.SupportsAtomics ? 1 : 0, features.SupportsAVX ? 1 : 0, hwcap);
 
     return features;
 }
