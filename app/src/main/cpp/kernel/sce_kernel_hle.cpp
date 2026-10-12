@@ -2,6 +2,7 @@
 
 #include "libc_hle.h"
 #include "pthread_hle.h"
+#include "cxxabi_hle.h"
 #include "../fexcore_integration.h"
 
 #include "../audio/audio_out_hle.h"
@@ -151,6 +152,10 @@ void KernelHle::RegisterAll() {
     PthreadHle::Instance().SetGuestLauncher(
         &PX5::FexCoreIntegration::RunGuestThread);
     PthreadHle::Instance().CollectSymbols(&m_table);
+
+    // v1.67 — the C++ ABI runtime tranche (guards + exception registry)
+    // rides the same table + counters.
+    CxxAbiHle::Instance().CollectSymbols(&m_table);
 
     m_registered = true;
     // Seed the NID registry: guest images import these functions by their
@@ -646,6 +651,10 @@ uint64_t KernelHle::InvokeByImport(const std::string& symbol,
     // --- pthread tranche (v1.65) --------------------------------------------
     if (PthreadHle::Instance().HasSymbol(symbol))
         return PthreadHle::Instance().Invoke(symbol, call, xmmRetOut);
+
+    // --- C++ ABI runtime tranche (v1.67) ------------------------------------
+    if (CxxAbiHle::Instance().HasSymbol(symbol))
+        return CxxAbiHle::Instance().Invoke(symbol, call, xmmRetOut);
 
     return static_cast<uint64_t>(kErrInval);
 }
