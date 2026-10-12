@@ -65,27 +65,51 @@ int main() {
           "second acquire returns 0 (already done)");
 
     // ------------------------------------------------------------------
-    // guard: real contention — loser blocks, both threads survive, one init
+    // guard: REAL deterministic contention — the holder owns the guard
+    // first; three losers are released only after they all reported entry,
+    // so each MUST have blocked on the in-use guard (guardContended proves
+    // the wait happened, not just that the outcome was correct).
     // ------------------------------------------------------------------
-    std::printf("[cxxabi_hle_test] guard contention\n");
+    std::printf("[cxxabi_hle_test] guard contention (deterministic)\n");
     const uint64_t guard2 = guardVa + 0x40;
-    std::atomic<int> initRuns{0};
-    std::atomic<bool> startRace{false};
-    auto worker = [&](int id) {
-        while (!startRace.load()) std::this_thread::yield();
-        if (Call("__cxa_guard_acquire", {guard2}) == 1) {
-            initRuns.fetch_add(1);
-            std::this_thread::sleep_for(std::chrono::milliseconds(30));
-            Call("__cxa_guard_release", {guard2});
-        }
-        (void)id;
-    };
-    std::vector<std::thread> threads;
-    for (int i = 0; i < 4; ++i) threads.emplace_back(worker, i);
-    startRace = true;
-    for (auto& t : threads) t.join();
-    CHECK(initRuns.load() == 1, "exactly one initializer ran under contention");
-    CHECK(guardBytes[0x40] == 1, "guard2 committed done");
+    CHECK(Call("__cxa_guard_acquire", {guard2}) == 1, "holder acquires first");
+    CHECK(guardBytes[0x40] == 0 && guardBytes[0x41] == 1,
+          "guest bytes: done=0 in-use=1 while the holder initializes");
+    {
+        std::atomic<int> entered{0};
+        std::atomic<int> loserZeros{0};
+        std::atomic<bool> go{false};
+        auto loser = [&] {
+            while (!go.load()) std::this_thread::yield();
+            entered.fetch_add(1);
+            if (Call("__cxa_guard_acquire", {guard2}) == 0)
+                loserZeros.fetch_add(1);   // blocked, then saw done=1
+        };
+        std::vector<std::thread> losers;
+        for (int i = 0; i < 3; ++i) losers.emplace_back(loser);
+        go.store(true);
+        // time-based wait (a yield-count bound starves on a loaded machine)
+        const auto enterDeadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (entered.load() < 3 &&
+               std::chrono::steady_clock::now() < enterDeadline)
+            std::this_thread::yield();
+        CHECK(entered.load() == 3, "all three losers reached the acquire");
+        // release ONLY now: every loser was already inside the acquire and
+        // the guard is still in-use — blocking is forced, not timed
+        CHECK(Call("__cxa_guard_release", {guard2}) == 0, "holder releases");
+        for (auto& t : losers) t.join();
+        CHECK(loserZeros.load() == 3,
+              "all three losers observed done (none initialized)");
+        CHECK(guardBytes[0x40] == 1 && guardBytes[0x41] == 0,
+              "guard2 committed done=1 in-use=0");
+        auto st = CxxAbiHle::Instance().GetStats();
+        CHECK(st.guardContended >= 1,
+              "the blocked wait really happened (contended counter)");
+    }
+    // second acquire after commit -> 0 (double-init impossible)
+    CHECK(Call("__cxa_guard_acquire", {guard2}) == 0,
+          "post-commit acquire returns 0");
 
     // abort path: acquire (in-use) then abort reopens for a retry
     CHECK(Call("__cxa_guard_acquire", {guard2 + 0x40}) == 1, "guard3 acquire");
@@ -98,10 +122,23 @@ int main() {
 
     // ------------------------------------------------------------------
     // exception registry: allocate -> throw -> begin_catch -> end_catch
+    // v1.69 — the allocation goes through memalign(alignment, size): a
+    // non-power-of-two object size must yield a real 16-aligned window
+    // address (the reversed-argument bug returned the EINVAL code itself
+    // as the "object address").
     // ------------------------------------------------------------------
     std::printf("[cxxabi_hle_test] exception registry\n");
     const uint64_t excVa = Call("__cxa_allocate_exception", {64});
     CHECK(excVa != 0, "exception object allocated from the guest heap");
+    CHECK((excVa & 15) == 0, "exception object is 16-aligned");
+    CHECK(mm.IsValidAddress(excVa, 64), "exception object is window memory");
+    {
+        const uint64_t excOdd = Call("__cxa_allocate_exception", {120});
+        CHECK(excOdd != 0 && (excOdd & 15) == 0,
+              "120-byte object allocates aligned (memalign arg order fixed)");
+        CHECK(mm.IsValidAddress(excOdd, 120),
+              "120-byte object is window memory (not an error code)");
+    }
     {
         // heap truth: the allocated VA is writable window memory
         auto* p = mm.GetHostPointer(excVa);
@@ -138,6 +175,24 @@ int main() {
                 (unsigned long long)stats.exceptionsCaught);
     CHECK(stats.guardAcquires >= 2, "guard counter moved");
     CHECK(stats.exceptionsThrown >= 2, "throw counter moved");
+
+    // ------------------------------------------------------------------
+    // v1.69 — session reset voids stale pending exceptions: the generation
+    // bump makes the old thread_local record read as "none" instead of
+    // pointing into a dead guest window.
+    // ------------------------------------------------------------------
+    std::printf("[cxxabi_hle_test] reset voids stale pending exception\n");
+    CHECK(Call("__cxa_throw", {excVa, 0x140123000ull, 0}) == 0, "throw for reset");
+    CxxAbiHle::Instance().ResetForSession();
+    CHECK(Call("__cxa_get_exception_ptr", {0}) == 0,
+          "pending exception void after reset (generation bump)");
+    CHECK(Call("__cxa_begin_catch", {excVa}) == 0,
+          "begin_catch on a stale record returns none");
+    // a throw/catch round-trip works again in the new session
+    CHECK(Call("__cxa_throw", {excVa, 0x140123000ull, 0}) == 0, "fresh throw");
+    CHECK(Call("__cxa_begin_catch", {excVa}) == excVa,
+          "fresh session registry is live");
+    CHECK(Call("__cxa_end_catch", {0}) == 0, "fresh end_catch");
 
     if (g_failures == 0) {
         std::printf("[cxxabi_hle_test] ALL PASS\n");

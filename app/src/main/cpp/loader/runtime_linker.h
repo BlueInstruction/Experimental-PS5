@@ -325,7 +325,8 @@ public:
      * @return Guest-visible RAX (HLE result, or 0 on the ledger path)
      */
     uint64_t DispatchImportCall(uint64_t importIndex, const ImportCall& call,
-                                uint64_t* xmmRetOut = nullptr);
+                                uint64_t* xmmRetOut = nullptr,
+                                bool* xmmRetValidOut = nullptr);
 
     /**
      * Installs the import-route seam (v1.47): the two directions a
@@ -344,12 +345,15 @@ public:
         /// caller's preserved arguments; returns guest RAX.
         /// v1.66 — xmmRetOut (when non-null) receives a double-return in
         /// SysV XMM0 position (raw 64-bit halves) for functions whose
-        /// contract returns FP. Implementations that never return FP
-        /// leave it untouched; the bridge writes XMM0 only when the
-        /// implementation set it.
+        /// contract returns FP.
+        /// v1.69 — the FP-return channel is EXPLICIT: an implementation
+        /// sets *xmmRetValidOut = true iff it wrote xmmRetOut. Validity is
+        /// never inferred from the bits (a legitimate double return can be
+        /// 0.0); the bridge writes XMM0 only on a claimed return.
         std::function<uint64_t(const std::string& symbol,
                                const ImportCall& call,
-                               uint64_t* xmmRetOut)>
+                               uint64_t* xmmRetOut,
+                               bool* xmmRetValidOut)>
             invoke;
     };
     void SetImportRoute(ImportRoute route);

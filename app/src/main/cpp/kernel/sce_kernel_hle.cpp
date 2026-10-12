@@ -184,9 +184,11 @@ void KernelHle::RegisterAll() {
     };
     route.invoke = [](const std::string& symbol,
                       const ImportCall& call,
-                      uint64_t* xmmRetOut) -> uint64_t {
+                      uint64_t* xmmRetOut,
+                      bool* xmmRetValidOut) -> uint64_t {
         return KernelHle::GetInstance().InvokeByImport(symbol, call,
-                                                       xmmRetOut);
+                                                       xmmRetOut,
+                                                       xmmRetValidOut);
     };
     RuntimeLinker::GetInstance().SetImportRoute(std::move(route));
     PX5_LOGI(LogCategory::KERNEL,
@@ -489,7 +491,8 @@ uint64_t KernelHle::InvokeByName(const std::string& symbol,
 
 uint64_t KernelHle::InvokeByImport(const std::string& symbol,
                                    const ImportCall& call,
-                                   uint64_t* xmmRetOut) {
+                                   uint64_t* xmmRetOut,
+                                   bool* xmmRetValidOut) {
     RegisterAll();
     const uint64_t a0 = call.args[0];
     const uint64_t a1 = call.args[1];
@@ -649,9 +652,12 @@ uint64_t KernelHle::InvokeByImport(const std::string& symbol,
         return s32(videoOut.ConfigureOutput(static_cast<int32_t>(a0), a1,
                                             a2));
 
-    // --- libc/libc++ tranche (v1.62; XMM return channel v1.66) --------------
+    // --- libc/libc++ tranche (v1.62; XMM return channel v1.66/1.69) --------
+    // v1.69 — the libm functions claim the FP return through BOTH out-params:
+    // the bits and the validity flag. The flag is what the bridge acts on.
     if (LibcHle::Instance().HasSymbol(symbol))
-        return LibcHle::Instance().Invoke(symbol, call, xmmRetOut);
+        return LibcHle::Instance().Invoke(symbol, call, xmmRetOut,
+                                          xmmRetValidOut);
 
     // --- pthread tranche (v1.65) --------------------------------------------
     if (PthreadHle::Instance().HasSymbol(symbol))

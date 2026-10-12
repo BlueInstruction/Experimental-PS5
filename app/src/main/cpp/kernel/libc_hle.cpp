@@ -366,7 +366,7 @@ bool LibcHle::HasSymbol(const std::string& symbol) const {
 }
 
 uint64_t LibcHle::Invoke(const std::string& symbol, const ImportCall& call,
-                         uint64_t* xmmRetOut) {
+                         uint64_t* xmmRetOut, bool* xmmRetValidOut) {
     const uint64_t a0 = call.args[0];
     const uint64_t a1 = call.args[1];
     const uint64_t a2 = call.args[2];
@@ -379,6 +379,13 @@ uint64_t LibcHle::Invoke(const std::string& symbol, const ImportCall& call,
     // publishes through the bridge's double-return channel into XMM0.
     // A missing XMM snapshot (frame-less hosts) refuses named instead of
     // computing on garbage.
+    // v1.69 — the FP return is CLAIMED explicitly: publish() writes the
+    // bits AND raises the validity flag the bridge acts on. A legitimate
+    // 0.0 result must never be mistaken for "no FP return".
+    auto publish = [&](uint64_t bits) {
+        if (xmmRetOut) *xmmRetOut = bits;
+        if (xmmRetValidOut) *xmmRetValidOut = true;
+    };
     if (xmmRetOut) {
         if (!call.xmmValid) {
             // No live-frame snapshot (frame-less host): computing on a
@@ -401,28 +408,28 @@ uint64_t LibcHle::Invoke(const std::string& symbol, const ImportCall& call,
         auto d0 = [&]() { return call.ReadXmmDouble(0, &x); };
         auto d1 = [&]() { return call.ReadXmmDouble(1, &y); };
 
-        if (symbol == "sin")    { if (!d0()) return s32(-ENODATA); *xmmRetOut = fbits(std::sin(x));   return 0; }
-        if (symbol == "cos")    { if (!d0()) return s32(-ENODATA); *xmmRetOut = fbits(std::cos(x));   return 0; }
-        if (symbol == "tan")    { if (!d0()) return s32(-ENODATA); *xmmRetOut = fbits(std::tan(x));   return 0; }
-        if (symbol == "asin")   { if (!d0()) return s32(-ENODATA); *xmmRetOut = fbits(std::asin(x));  return 0; }
-        if (symbol == "acos")   { if (!d0()) return s32(-ENODATA); *xmmRetOut = fbits(std::acos(x));  return 0; }
-        if (symbol == "atan")   { if (!d0()) return s32(-ENODATA); *xmmRetOut = fbits(std::atan(x));  return 0; }
-        if (symbol == "atan2")  { if (!d0() || !d1()) return s32(-ENODATA); *xmmRetOut = fbits(std::atan2(x, y)); return 0; }
-        if (symbol == "exp")    { if (!d0()) return s32(-ENODATA); *xmmRetOut = fbits(std::exp(x));   return 0; }
-        if (symbol == "log")    { if (!d0()) return s32(-ENODATA); *xmmRetOut = fbits(std::log(x));   return 0; }
-        if (symbol == "log2")   { if (!d0()) return s32(-ENODATA); *xmmRetOut = fbits(std::log2(x));  return 0; }
-        if (symbol == "log10")  { if (!d0()) return s32(-ENODATA); *xmmRetOut = fbits(std::log10(x)); return 0; }
-        if (symbol == "pow")    { if (!d0() || !d1()) return s32(-ENODATA); *xmmRetOut = fbits(std::pow(x, y)); return 0; }
-        if (symbol == "fmod")   { if (!d0() || !d1()) return s32(-ENODATA); *xmmRetOut = fbits(std::fmod(x, y)); return 0; }
-        if (symbol == "round")  { if (!d0()) return s32(-ENODATA); *xmmRetOut = fbits(std::round(x)); return 0; }
+        if (symbol == "sin")    { if (!d0()) return s32(-ENODATA); publish(fbits(std::sin(x)));   return 0; }
+        if (symbol == "cos")    { if (!d0()) return s32(-ENODATA); publish(fbits(std::cos(x)));   return 0; }
+        if (symbol == "tan")    { if (!d0()) return s32(-ENODATA); publish(fbits(std::tan(x)));   return 0; }
+        if (symbol == "asin")   { if (!d0()) return s32(-ENODATA); publish(fbits(std::asin(x)));  return 0; }
+        if (symbol == "acos")   { if (!d0()) return s32(-ENODATA); publish(fbits(std::acos(x)));  return 0; }
+        if (symbol == "atan")   { if (!d0()) return s32(-ENODATA); publish(fbits(std::atan(x)));  return 0; }
+        if (symbol == "atan2")  { if (!d0() || !d1()) return s32(-ENODATA); publish(fbits(std::atan2(x, y))); return 0; }
+        if (symbol == "exp")    { if (!d0()) return s32(-ENODATA); publish(fbits(std::exp(x)));   return 0; }
+        if (symbol == "log")    { if (!d0()) return s32(-ENODATA); publish(fbits(std::log(x)));   return 0; }
+        if (symbol == "log2")   { if (!d0()) return s32(-ENODATA); publish(fbits(std::log2(x)));  return 0; }
+        if (symbol == "log10")  { if (!d0()) return s32(-ENODATA); publish(fbits(std::log10(x))); return 0; }
+        if (symbol == "pow")    { if (!d0() || !d1()) return s32(-ENODATA); publish(fbits(std::pow(x, y))); return 0; }
+        if (symbol == "fmod")   { if (!d0() || !d1()) return s32(-ENODATA); publish(fbits(std::fmod(x, y))); return 0; }
+        if (symbol == "round")  { if (!d0()) return s32(-ENODATA); publish(fbits(std::round(x))); return 0; }
         if (symbol == "sinf")   { if (!call.ReadXmmFloat(0, &xf)) return s32(-ENODATA);
                                   const float r = std::sin(xf); uint32_t fb = 0;
                                   std::memcpy(&fb, &r, sizeof fb);
-                                  *xmmRetOut = fb; return 0; }   // SysV: float ret = XMM0[31:0]
+                                  publish(fb); return 0; }   // SysV: float ret = XMM0[31:0]
         if (symbol == "cosf")   { if (!call.ReadXmmFloat(0, &xf)) return s32(-ENODATA);
                                   const float r = std::cos(xf); uint32_t fb = 0;
                                   std::memcpy(&fb, &r, sizeof fb);
-                                  *xmmRetOut = fb; return 0; }   // SysV: float ret = XMM0[31:0]
+                                  publish(fb); return 0; }   // SysV: float ret = XMM0[31:0]
     }
 
     // --- memory ------------------------------------------------------------

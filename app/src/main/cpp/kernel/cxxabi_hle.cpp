@@ -41,6 +41,8 @@ struct GuardEntry {
 
 std::mutex g_guardRegMutex;
 std::map<uint64_t, GuardEntry*> g_guards;
+// v1.69 — previous session's guard entries (see ResetForSession)
+std::map<uint64_t, GuardEntry*> g_guardsGraveyard;
 
 GuardEntry* GuardFor(uint64_t va) {
     std::lock_guard<std::mutex> lk(g_guardRegMutex);
@@ -74,14 +76,24 @@ std::atomic<uint64_t> g_thrown{0};
 std::atomic<uint64_t> g_caught{0};
 
 // ---------------------------------------------------------------------------
-// pending exceptions (per thread): throw records, catch consumes
+// pending exceptions (per thread): throw records, catch consumes.
+// v1.69 — each record carries the session generation it was thrown in; a
+// reset bumps the generation, so a stale pending exception from a previous
+// session reads as "none" instead of pointing into a dead guest window.
 // ---------------------------------------------------------------------------
+std::atomic<uint64_t> g_excSession{0};
 struct PendingException {
+    uint64_t session = 0;
     uint64_t objectVa = 0;
     uint64_t tinfoVa = 0;
     uint64_t destructorVa = 0;
 };
 thread_local PendingException t_pending;
+
+bool PendingIsLive() {
+    return t_pending.objectVa != 0 &&
+           t_pending.session == g_excSession.load(std::memory_order_relaxed);
+}
 
 // ---------------------------------------------------------------------------
 // handlers
@@ -115,9 +127,13 @@ uint64_t HGuardRelease(const ImportCall& c) {
     auto* e = GuardFor(va);
     {
         std::lock_guard<std::mutex> lk(e->m);
+        // v1.69 — the guest-byte write moves UNDER the guard mutex: a
+        // waiter re-reads done while holding this same mutex, so the old
+        // unlocked write could race a woken acquirer into re-arming the
+        // guard (done=1 overwritten back to 0) and double-initializing.
+        GuardWrite(va, 1, 0);                              // committed
         e->inUse = false;
     }
-    GuardWrite(va, 1, 0);                              // committed
     e->cv.notify_all();
     return 0;
 }
@@ -128,9 +144,9 @@ uint64_t HGuardAbort(const ImportCall& c) {
     auto* e = GuardFor(va);
     {
         std::lock_guard<std::mutex> lk(e->m);
+        GuardWrite(va, 0, 0);                              // failed: retryable
         e->inUse = false;
     }
-    GuardWrite(va, 0, 0);                              // failed: retryable
     e->cv.notify_all();
     return 0;
 }
@@ -140,10 +156,13 @@ uint64_t HAllocateException(const ImportCall& c) {
     if (size == 0 || size > (64ull << 20)) return Retc(kErrInval);
     // guest heap bump allocation (libc_hle owns the region; route through
     // its public symbol so both share one heap truth)
+    // v1.69 — memalign's ABI is (alignment, size): the old call passed
+    // (size, 16), so every non-power-of-two size failed EINVAL and the
+    // failure code was handed to the guest as an "object address".
     auto& libc = LibcHle::Instance();
     ImportCall heap{};
-    heap.args[0] = size;
-    heap.args[1] = 16;                                 // __cxa alignment
+    heap.args[0] = 16;                                 // __cxa alignment
+    heap.args[1] = size;
     const uint64_t va = libc.Invoke("memalign", heap);
     return va;                                         // 0 propagates as OOM
 }
@@ -156,7 +175,8 @@ uint64_t HFreeException(const ImportCall& c) {
 }
 
 uint64_t HThrow(const ImportCall& c) {
-    t_pending = PendingException{c.args[0], c.args[1], c.args[2]};
+    t_pending = PendingException{g_excSession.load(std::memory_order_relaxed),
+                                 c.args[0], c.args[1], c.args[2]};
     g_thrown.fetch_add(1, std::memory_order_relaxed);
     Evidence::AppendLedger(
         "hle __cxa_throw exc=0x%llx tinfo=0x%llx dtor=0x%llx (unwind "
@@ -173,8 +193,9 @@ uint64_t HThrow(const ImportCall& c) {
 
 uint64_t HBeginCatch(const ImportCall& c) {
     (void)c;
+    if (!PendingIsLive()) return 0;   // stale session record reads as none
     const uint64_t objectVa = t_pending.objectVa;
-    if (objectVa) g_caught.fetch_add(1, std::memory_order_relaxed);
+    g_caught.fetch_add(1, std::memory_order_relaxed);
     // the object leaves the pending slot on end_catch, not here (rethrow
     // must still see it)
     return objectVa;
@@ -189,7 +210,7 @@ uint64_t HEndCatch(const ImportCall& c) {
 uint64_t HRethrow(const ImportCall& c) {
     (void)c;
     // pending slot untouched: the object re-enters the throw path as-is
-    if (t_pending.objectVa) {
+    if (PendingIsLive()) {
         g_thrown.fetch_add(1, std::memory_order_relaxed);
         Evidence::AppendLedger("hle __cxa_rethrow exc=0x%llx",
                                (unsigned long long)t_pending.objectVa);
@@ -199,7 +220,7 @@ uint64_t HRethrow(const ImportCall& c) {
 
 uint64_t HGetExceptionPtr(const ImportCall& c) {
     (void)c;
-    return t_pending.objectVa;
+    return PendingIsLive() ? t_pending.objectVa : 0;
 }
 
 uint64_t HUnwindResume(const ImportCall& c) {
@@ -263,9 +284,24 @@ void CxxAbiHle::CollectSymbols(std::vector<SymbolEntry>* tableOut) {
 }
 
 void CxxAbiHle::ResetForSession() {
-    std::lock_guard<std::mutex> lk(g_guardRegMutex);
-    for (auto& kv : g_guards) delete kv.second;
-    g_guards.clear();
+    // v1.69 — one-generation graveyard for guard entries: a stuck body from
+    // the old session can still block on (or release) a guard it holds; its
+    // entry stays valid through the boundary. The PREVIOUS generation is
+    // reclaimed now — a full session boundary has passed.
+    {
+        std::map<uint64_t, GuardEntry*> dead;
+        {
+            std::lock_guard<std::mutex> lk(g_guardRegMutex);
+            g_guardsGraveyard.swap(dead);
+            g_guardsGraveyard.swap(g_guards);   // current entries sleep
+        }
+        for (auto& kv : dead) delete kv.second;
+    }
+    // pending exceptions from this session are void: the generation bump
+    // makes every thread's stale record read as "none" (TLS of other
+    // threads cannot be reached from here — the generation is the honest
+    // cross-thread reset).
+    g_excSession.fetch_add(1, std::memory_order_relaxed);
     g_guardAcquires.store(0, std::memory_order_relaxed);
     g_guardContended.store(0, std::memory_order_relaxed);
     g_thrown.store(0, std::memory_order_relaxed);

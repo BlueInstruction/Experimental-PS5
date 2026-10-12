@@ -13,6 +13,7 @@
 #include "kernel/libc_hle.h"
 #include "kernel/syscalls.h"
 #include "kernel/sce_kernel_hle.h"   // SymbolEntry
+#include "loader/runtime_linker.h"   // RuntimeLinker, ImportTrapEntry, range
 #include "memory/memory.h"
 
 #include <cmath>
@@ -205,6 +206,48 @@ int main() {
               "printf %%g formatted the XMM argument");
         CHECK(captured.find("<f>") == std::string::npos,
               "no <f> placeholder remains");
+    }
+
+    // ------------------------------------------------------------------
+    // v1.69 — the FULL device chain through the REAL dispatch path:
+    // entry snapshot -> GuestSyscalls::Dispatch (import-call range) ->
+    // RuntimeLinker::DispatchImportCall -> KernelHle -> libc libm ->
+    // explicit FP-return claim -> GuestBridge return channel -> what the
+    // syscall epilogue writes into the guest frame's XMM0.
+    // Before v1.69 the HLE wrote xmmRet and Dispatch DROPPED it —
+    // PublishXmmReturn had no call site and the epilogue channel was dead.
+    // ------------------------------------------------------------------
+    std::printf("[libm_bridge_test] full dispatch chain (pow via the bridge)\n");
+    {
+        using PX5::RuntimeLinker;
+        using PX5::ImportTrapEntry;
+        using PX5::GuestSyscalls;
+        namespace GB = PX5::GuestBridge;
+        // forces KernelHle::RegisterAll, which installs the production
+        // import route (the same seam the device loader resolves through)
+        CHECK(PX5::SceKernelHle::KernelHle::GetInstance().HasSymbol("pow"),
+              "production route registered (pow resolves)");
+        ImportTrapEntry e{};
+        e.name = "pow";
+        e.isPlt = true;
+        RuntimeLinker::GetInstance().SetImportTraps(
+            PX5::kPx5ImportCallBase, PX5::kPx5ImportCallEnd, {e});
+
+        // syscall entry: the handler publishes the caller's XMM0..7
+        GB::XmmArgs xa{};
+        xa.v[0][0] = Dbits(2.0);
+        xa.v[1][0] = Dbits(10.0);
+        GB::PublishXmmArgs(xa);
+
+        const uint64_t rax = GuestSyscalls::Dispatch(
+            PX5::kPx5ImportCallBase + 0, 0, 0, 0, 0, 0, 0, 0);
+        CHECK(rax == 0, "pow dispatch returns RAX=0 (result rides XMM0)");
+
+        uint64_t xmm[2] = {0, 0};
+        CHECK(GB::TakeXmmReturn(xmm),
+              "epilogue channel carries the FP return (was dead before v1.69)");
+        CHECK(BitsD(xmm[0]) == 1024.0,
+              "guest-visible XMM0 == pow(2,10) == 1024 (bit-exact)");
     }
 
     if (g_failures == 0) {

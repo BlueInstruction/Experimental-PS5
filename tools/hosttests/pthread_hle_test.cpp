@@ -252,21 +252,27 @@ int main() {
     CHECK(Call("scePthreadCondDestroy", {slot + 0x48}) == 0, "cond destroy ok");
 
     // ------------------------------------------------------------------
-    // cross-thread handoff: worker locks a mutex, main joins it, mutex
-    // state stays coherent (the synchronization is real, not scripted)
+    // cross-thread handoff: worker locks a mutex, main PROVES ownership
+    // without a single sleep — the worker signals "locked" through an
+    // atomic after Lock returns, main spins on that fact, and the worker
+    // only unlocks after main finished the ownership checks.
     // ------------------------------------------------------------------
-    std::printf("[pthread_hle_test] cross-thread handoff\n");
-    // worker body: lock slot+0x58, hold 20ms, unlock — expressed via a
-    // dedicated launcher invocation (re-point the seam)
-    static std::atomic<uint64_t> g_workMutex{0};
+    std::printf("[pthread_hle_test] cross-thread handoff (deterministic)\n");
+    static std::atomic<uint64_t> g_workSlot{0};
+    static std::atomic<bool> g_workLocked{false};
+    static std::atomic<bool> g_mainChecked{false};
     struct Seam {
         static bool Body(uint64_t, uint64_t, uint64_t, uint64_t,
                          uint64_t* raxOut) {
             ImportCall c{};
-            c.args[0] = g_workMutex.load();
+            // the slot VA (not the handle value): HLE read the handle from
+            // guest memory exactly like the real caller does
+            c.args[0] = g_workSlot.load();
             auto& inst = PthreadHle::Instance();
-            (void)inst.Invoke("scePthreadMutexLock", c);
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            CHECK(inst.Invoke("scePthreadMutexLock", c) == 0, "worker lock");
+            g_workLocked.store(true);          // the fact main waits on
+            while (!g_mainChecked.load())      // hold until main verified
+                std::this_thread::yield();
             (void)inst.Invoke("scePthreadMutexUnlock", c);
             *raxOut = 7;
             return true;
@@ -274,21 +280,70 @@ int main() {
     };
     PthreadHle::Instance().SetGuestLauncher(&Seam::Body);
     CHECK(Call("scePthreadMutexInit", {slot + 0x58, 0}) == 0, "work mutex init");
-    g_workMutex = slots[0x58 / 8];
+    g_workSlot = slot + 0x58;
     CHECK(Call("scePthreadCreate",
                {slot + 0x60, slot + 0x08, 0x140000000ull, 0, 0}) == 0,
           "worker create ok");
     const uint64_t thW = slots[0x60 / 8];
     // the mutex must appear locked while the worker holds it: try from main
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    for (int i = 0; i < 2000 && !g_workLocked.load(); ++i)
+        std::this_thread::yield();
+    CHECK(g_workLocked.load(), "worker signalled the lock (explicit sync)");
     CHECK(Call("scePthreadMutexUnlock", {slot + 0x58}) ==
               static_cast<uint64_t>(-1),
           "main cannot unlock the worker's mutex (EPERM — real ownership)");
+    g_mainChecked.store(true);                 // release the worker
     CHECK(Call("scePthreadJoin", {thW, slot + 0x68}) == 0, "worker join ok");
     CHECK(slots[0x68 / 8] == 7, "worker exit value carried back");
     CHECK(Call("scePthreadMutexLock", {slot + 0x58}) == 0,
           "mutex free after worker exit");
     CHECK(Call("scePthreadMutexUnlock", {slot + 0x58}) == 0, "work unlock");
+    PthreadHle::Instance().SetGuestLauncher(&HostLaunch);   // restore the seam
+
+    // ------------------------------------------------------------------
+    // v1.69 — self-join is EDEADLK, including the main thread joining its
+    // own lazily materialized handle (the review's join-self hang).
+    // ------------------------------------------------------------------
+    std::printf("[pthread_hle_test] self-join refuses\n");
+    CHECK(Call("scePthreadJoin", {selfMain, 0}) == static_cast<uint64_t>(-35),
+          "main joining itself -> EDEADLK (hang fixed)");
+
+    // ------------------------------------------------------------------
+    // v1.69 — detached threads are REAPED: exited+detached objects leave
+    // the live set once a subsequent Create drives the reaper. Before this
+    // fix their slot and object leaked until session teardown.
+    // ------------------------------------------------------------------
+    std::printf("[pthread_hle_test] detached-thread reaping\n");
+    {
+        CHECK(Call("scePthreadCreate",
+                   {slot + 0x70, slot + 0x38, 0x140001234ull, 9, 0}) == 0,
+              "second detached create ok");
+        const uint64_t thD2 = slots[0x70 / 8];
+        for (int i = 0; i < 200 && g_launch.runs.load() < 3; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        CHECK(g_launch.runs.load() == 3, "second detached thread ran");
+        CHECK(Call("scePthreadJoin", {thD2, 0}) == static_cast<uint64_t>(-22),
+              "join of detached thread -> EINVAL");
+        // a fresh Create drives ReapDetached; the exited detached object
+        // must leave the live set (bounded wait on a real condition).
+        // Baseline is taken RIGHT AFTER the create: the live set grew by
+        // the detached thread, and the reap must bring it back down.
+        CHECK(Call("scePthreadAttrInit", {slot + 0x78}) == 0, "attr4 init");
+        const auto livePeak = PthreadHle::Instance().GetStats().liveThreads;
+        CHECK(Call("scePthreadCreate",
+                   {slot + 0x80, slot + 0x78, 0x140001234ull, 3, 0}) == 0,
+              "driver create ok");
+        CHECK(Call("scePthreadJoin", {slots[0x80 / 8], 0}) == 0, "driver join");
+        bool reaped = false;
+        for (int i = 0; i < 400; ++i) {
+            if (PthreadHle::Instance().GetStats().liveThreads < livePeak) {
+                reaped = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        CHECK(reaped, "exited detached thread object reaped (live count dropped)");
+    }
 
     // ------------------------------------------------------------------
     PthreadHle::Instance().SetGuestLauncher(&HostLaunch);
@@ -303,6 +358,46 @@ int main() {
                 (unsigned long long)stats.liveThreads);
     CHECK(stats.threadsCreated >= 3, "created counter moved");
     CHECK(stats.threadsJoined >= 2, "joined counter moved");
+
+    // ------------------------------------------------------------------
+    // v1.69 — session reset with a LIVE thread: teardown must RETURN
+    // (bounded grace), park the stuck object in the named leak list, never
+    // delete under the running body, and never terminate the process.
+    // This is the review's use-after-free finding, locked as behaviour.
+    // ------------------------------------------------------------------
+    std::printf("[pthread_hle_test] session reset with a live thread\n");
+    {
+        static std::atomic<bool> g_blockRelease{false};
+        static std::atomic<bool> g_blockedDone{false};
+        struct BlockingSeam {
+            static bool Body(uint64_t, uint64_t, uint64_t, uint64_t,
+                             uint64_t* raxOut) {
+                while (!g_blockRelease.load()) std::this_thread::yield();
+                *raxOut = 1;
+                g_blockedDone.store(true);
+                return true;
+            }
+        };
+        PthreadHle::Instance().SetGuestLauncher(&BlockingSeam::Body);
+        CHECK(Call("scePthreadAttrInit", {slot + 0x88}) == 0, "reset attr");
+        CHECK(Call("scePthreadCreate",
+                   {slot + 0x90, slot + 0x88, 0x140000000ull, 0, 0}) == 0,
+              "stuck thread create ok");
+        // the body is now parked in its blocking loop; the reset must
+        // return within the bounded grace and park it — never hang, never
+        // delete under the running body
+        PthreadHle::Instance().ResetForSession();
+        g_blockRelease.store(true);                 // let the parked body end
+        for (int i = 0; i < 200 && !g_blockedDone.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        CHECK(g_blockedDone.load(),
+              "parked body finished naturally after reset released it");
+        // the process is alive and the surface is usable again
+        auto post = PthreadHle::Instance().GetStats();
+        CHECK(post.threadsCreated == 0, "counters cleared by the reset");
+        CHECK(Call("scePthreadSelf", {}) != 0, "surface alive after reset");
+        PthreadHle::Instance().SetGuestLauncher(&HostLaunch);
+    }
 
     if (g_failures == 0) {
         std::printf("[pthread_hle_test] ALL PASS\n");

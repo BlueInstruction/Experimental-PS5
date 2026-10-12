@@ -101,7 +101,8 @@ public:
      */
     uint64_t InvokeByImport(const std::string& symbol,
                             const ImportCall& call,
-                            uint64_t* xmmRetOut = nullptr);
+                            uint64_t* xmmRetOut = nullptr,
+                            bool* xmmRetValidOut = nullptr);
 
     /**
      * Returns human-readable summary of HLE state.

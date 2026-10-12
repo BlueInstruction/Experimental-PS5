@@ -460,9 +460,18 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
             memcpy(call.xmm, xargs.v, sizeof(call.xmm));
         }
         uint64_t xmmRet[2] = {0, 0};
+        bool xmmRetValid = false;
         const uint64_t ret = RuntimeLinker::GetInstance().DispatchImportCall(
-            static_cast<uint64_t>(nr - kPx5ImportCallBase), call, xmmRet);
-        (void)xmmRet;   // consumed by the epilogue via GuestBridge
+            static_cast<uint64_t>(nr - kPx5ImportCallBase), call, xmmRet,
+            &xmmRetValid);
+        // v1.69 — the return half of the bridge is CONNECTED: an HLE that
+        // claimed the FP return publishes it into the thread_local return
+        // channel, and the syscall epilogue (HandleSyscall) writes it into
+        // the guest frame's XMM0 before the guest resumes. This publish was
+        // the missing link — xmmRet used to be dropped on the floor.
+        if (xmmRetValid) {
+            GuestBridge::PublishXmmReturn(xmmRet);
+        }
         std::lock_guard<std::mutex> lk(g_stateMutex);
         g_stats.handledCalls++;
         return ret;
