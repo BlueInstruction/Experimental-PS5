@@ -76,6 +76,7 @@ echo "[hosttests] building nid_dispatch_test (M9 transparent import dispatch)"
     "$CPP/loader/runtime_linker.cpp" \
     "$CPP/kernel/sce_kernel_hle.cpp" \
     "$CPP/kernel/libc_hle.cpp" \
+    "$CPP/kernel/pthread_hle.cpp" \
     "$CPP/kernel/syscalls.cpp" \
     "$CPP/loader/guest_abi.cpp" \
     "$CPP/audio/audio_out_hle.cpp" \
@@ -114,6 +115,7 @@ echo "[hosttests] building videoout_hle_test (M10 T1 sceVideoOut HLE)"
     "$CPP/gpu/videoout_hle.cpp" \
     "$CPP/kernel/sce_kernel_hle.cpp" \
     "$CPP/kernel/libc_hle.cpp" \
+    "$CPP/kernel/pthread_hle.cpp" \
     "$CPP/kernel/syscalls.cpp" \
     "$CPP/loader/guest_abi.cpp" \
     "$CPP/loader/nid.cpp" \
@@ -374,4 +376,22 @@ echo "[hosttests] building pad_hle_test (scePad HLE)"
 echo "[hosttests] running pad_hle_test (scePad HLE)"
 "$OUT/pad_hle_test"
 
-echo "[hosttests] all host tests passed"
+
+echo "osttests] building pthread_hle_test (v1.65 pthread tranche)"
+# ORBIS pthread semantics: 27-symbol surface, errorcheck/recursive mutexes,
+# cond timedwait (usec contract), guest-thread lifecycle through the
+# launcher seam (host launcher; the FEXCore device half is shared with the
+# main dispatch path the device sessions prove).
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread \
+    -I"$SHIM" -I"$CPP" \
+    -o "$OUT/pthread_hle_test" \
+    "$ROOT/tools/hosttests/pthread_hle_test.cpp" \
+    "$CPP/kernel/pthread_hle.cpp" \
+    "$CPP/memory/memory.cpp" \
+    "$CPP/utils/logger.cpp" \
+    "$CPP/utils/diag_bridge.cpp"
+
+echo "osttests] running pthread_hle_test"
+"$OUT/pthread_hle_test"
+
+echo "osttests] all host tests passed"

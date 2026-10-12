@@ -3,6 +3,7 @@
 #include "memory/memory.h"
 #include "kernel/syscalls.h"
 #include "kernel/sce_kernel_hle.h"
+#include "kernel/pthread_hle.h"
 // Layer contract (gpu_ir.h guard): the GPU IR must never be compiled after
 // Vulkan headers. gnm_submit.h -> gpu_ir.h, so it comes FIRST; only then
 // the Vulkan-backed device header.
@@ -430,6 +431,10 @@ FexCoreIntegration::ExecResult Emulator::ExecuteLoadedGuest() {
         write64At(imageAligned + 40, kTlsGuestVa);  // dtv[1] = static block
         write64At(imageAligned + 48, 0);            // dtv[2] = terminator
         guestFsBase = tcbVa;
+        // v1.65 — per-thread TCBs (pthread tranche) clone this geometry.
+        ::PX5::SceKernelHle::PthreadHle::Instance().PublishImageTls(
+            m_image.tlsVa, m_image.tlsFilesz, m_image.tlsMemsz,
+            m_image.tlsAlign);
         PX5_LOGI(LogCategory::CORE,
                  "[GUEST] Guest TLS: fs_base=0x%llx tcb=0x%llx dtv=0x%llx "
                  "(PT_TLS %s: va=0x%llx filesz=%zu memsz=%zu)",

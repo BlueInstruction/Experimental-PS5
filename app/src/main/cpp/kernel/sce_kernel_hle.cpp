@@ -1,6 +1,8 @@
 #include "sce_kernel_hle.h"
 
 #include "libc_hle.h"
+#include "pthread_hle.h"
+#include "../fexcore_integration.h"
 
 #include "../audio/audio_out_hle.h"
 #include "../gpu/gnm/gnm_submit.h"
@@ -141,6 +143,14 @@ void KernelHle::RegisterAll() {
 
     // v1.62 — the libc/libc++ tranche rides the same table + counters.
     LibcHle::Instance().CollectSymbols(&m_table);
+
+    // v1.65 — the pthread tranche (27 imports from the decoded game list)
+    // rides the same table + counters; its guest threads dispatch through
+    // the FEXCore launcher seam installed here (device path only — host
+    // tests install their own launcher before creating threads).
+    PthreadHle::Instance().SetGuestLauncher(
+        &PX5::FexCoreIntegration::RunGuestThread);
+    PthreadHle::Instance().CollectSymbols(&m_table);
 
     m_registered = true;
     // Seed the NID registry: guest images import these functions by their
@@ -629,6 +639,10 @@ uint64_t KernelHle::InvokeByImport(const std::string& symbol,
     // --- libc/libc++ tranche (v1.62) ----------------------------------------
     if (LibcHle::Instance().HasSymbol(symbol))
         return LibcHle::Instance().Invoke(symbol, call);
+
+    // --- pthread tranche (v1.65) --------------------------------------------
+    if (PthreadHle::Instance().HasSymbol(symbol))
+        return PthreadHle::Instance().Invoke(symbol, call);
 
     return static_cast<uint64_t>(kErrInval);
 }
