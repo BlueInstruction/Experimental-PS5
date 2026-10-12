@@ -395,6 +395,21 @@ bool ImportCall::ReadStackArg(size_t k, uint64_t* out) const {
 #endif
 }
 
+bool ImportCall::ReadXmmDouble(size_t idx, double* out) const {
+    if (idx >= kXmmCount || !out) return false;
+    static_assert(sizeof(double) == sizeof(xmm[0][0]),
+                  "IEEE double must be 64-bit for the XMM bridge");
+    memcpy(out, &xmm[idx][0], sizeof(double));
+    return true;
+}
+
+bool ImportCall::ReadXmmFloat(size_t idx, float* out) const {
+    if (idx >= kXmmCount || !out) return false;
+    const uint32_t bits = static_cast<uint32_t>(xmm[idx][0] & 0xFFFFFFFFull);
+    memcpy(out, &bits, sizeof(float));
+    return true;
+}
+
 namespace {
 
 // Route resolution, run once per import under RuntimeLinker::m_mutex.
@@ -432,7 +447,8 @@ ImportTrapEntry::Route ResolveImportRoute(
 } // namespace
 
 uint64_t RuntimeLinker::DispatchImportCall(uint64_t importIndex,
-                                           const ImportCall& call) {
+                                           const ImportCall& call,
+                                           uint64_t* xmmRetOut) {
     std::string name;
     std::string symbol;
     ImportTrapEntry::Route route = ImportTrapEntry::Route::Unresolved;
@@ -505,7 +521,7 @@ uint64_t RuntimeLinker::DispatchImportCall(uint64_t importIndex,
     // Outside m_mutex: the HLE implementation may block (audio pacing,
     // pad polling) and no linker state below depends on it.
     const uint64_t result = m_importRoute.invoke
-        ? m_importRoute.invoke(symbol, call)
+        ? m_importRoute.invoke(symbol, call, xmmRetOut)
         : 0;
     {
         std::lock_guard<std::mutex> lk(m_mutex);

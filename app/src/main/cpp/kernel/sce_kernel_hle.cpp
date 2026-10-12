@@ -173,8 +173,10 @@ void KernelHle::RegisterAll() {
         return false;
     };
     route.invoke = [](const std::string& symbol,
-                      const ImportCall& call) -> uint64_t {
-        return KernelHle::GetInstance().InvokeByImport(symbol, call);
+                      const ImportCall& call,
+                      uint64_t* xmmRetOut) -> uint64_t {
+        return KernelHle::GetInstance().InvokeByImport(symbol, call,
+                                                       xmmRetOut);
     };
     RuntimeLinker::GetInstance().SetImportRoute(std::move(route));
     PX5_LOGI(LogCategory::KERNEL,
@@ -476,7 +478,8 @@ uint64_t KernelHle::InvokeByName(const std::string& symbol,
 }
 
 uint64_t KernelHle::InvokeByImport(const std::string& symbol,
-                                   const ImportCall& call) {
+                                   const ImportCall& call,
+                                   uint64_t* xmmRetOut) {
     RegisterAll();
     const uint64_t a0 = call.args[0];
     const uint64_t a1 = call.args[1];
@@ -636,13 +639,13 @@ uint64_t KernelHle::InvokeByImport(const std::string& symbol,
         return s32(videoOut.ConfigureOutput(static_cast<int32_t>(a0), a1,
                                             a2));
 
-    // --- libc/libc++ tranche (v1.62) ----------------------------------------
+    // --- libc/libc++ tranche (v1.62; XMM return channel v1.66) --------------
     if (LibcHle::Instance().HasSymbol(symbol))
-        return LibcHle::Instance().Invoke(symbol, call);
+        return LibcHle::Instance().Invoke(symbol, call, xmmRetOut);
 
     // --- pthread tranche (v1.65) --------------------------------------------
     if (PthreadHle::Instance().HasSymbol(symbol))
-        return PthreadHle::Instance().Invoke(symbol, call);
+        return PthreadHle::Instance().Invoke(symbol, call, xmmRetOut);
 
     return static_cast<uint64_t>(kErrInval);
 }

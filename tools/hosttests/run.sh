@@ -394,4 +394,13 @@ echo "osttests] building pthread_hle_test (v1.65 pthread tranche)"
 echo "osttests] running pthread_hle_test"
 "$OUT/pthread_hle_test"
 
+echo "osttests] building libm_bridge_test (v1.66 XMM bridge + libm)"
+# The two directions of the XMM spill at the HLE boundary: FP args read
+# from the snapshot, double/float returns published into the SysV XMM0
+# position, printf %%f consuming its own sequence.
+"$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread -DPX5_NO_SHADER_SERVICE     -I"$SHIM" -I"$CPP"     -o "$OUT/libm_bridge_test"     "$ROOT/tools/hosttests/libm_bridge_test.cpp"     "$CPP/kernel/libc_hle.cpp"     "$CPP/kernel/syscalls.cpp"     "$CPP/kernel/sce_kernel_hle.cpp"     "$CPP/kernel/pthread_hle.cpp"     "$CPP/loader/nid.cpp"     "$CPP/loader/runtime_linker.cpp"     "$CPP/loader/guest_abi.cpp"     "$CPP/memory/memory.cpp"     "$CPP/filesystem/vfs.cpp"     "$CPP/audio/audio_out_hle.cpp"     "$CPP/input/pad_hle.cpp"     "$CPP/input/controller.cpp"     "$CPP/gpu/gnm/gnm_submit.cpp"     "$CPP/gpu/ir/gpu_ir.cpp"     "$CPP/gpu/vulkan_backend.cpp"     "$CPP/gpu/videoout_hle.cpp"     "$CPP/gpu/gnm/pm4_decoder.cpp"     "$CPP/gpu/gnm/gnm_state.cpp"     "$CPP/utils/evidence.cpp"     "$CPP/utils/logger.cpp"     "$CPP/utils/diag_bridge.cpp"     "$SHIM/fexcore_state_stub.cpp"
+
+echo "osttests] running libm_bridge_test"
+"$OUT/libm_bridge_test"
+
 echo "osttests] all host tests passed"

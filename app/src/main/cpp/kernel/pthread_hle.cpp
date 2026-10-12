@@ -791,7 +791,9 @@ void PthreadHle::ResetForSession() {
     g_stats.condSignals.store(0, std::memory_order_relaxed);
 }
 
-uint64_t PthreadHle::Invoke(const std::string& symbol, const ImportCall& call) {
+uint64_t PthreadHle::Invoke(const std::string& symbol, const ImportCall& call,
+                            uint64_t* xmmRetOut) {
+    (void)xmmRetOut;   // pthread results are integral; nothing publishes
     if (symbol == "scePthreadMutexattrInit")     return HMutexattrInit(call);
     if (symbol == "scePthreadMutexattrSettype")  return HMutexattrSettype(call);
     if (symbol == "scePthreadMutexattrDestroy")  return HMutexattrDestroy(call);

@@ -440,17 +440,40 @@ public:
         // far did the guest actually get" with evidence, not narration.
         if (Frame) {
             GuestSyscalls::NoteGuestRip(Frame->State.rip);
+            // v1.66 — publish the caller's XMM0..7 for the import-call
+            // bridge. FEXCore spills the full guest register file to the
+            // frame around host calls, so this is the live FP argument
+            // state; the epilogue below writes an HLE double-return back
+            // into XMM0 the same way.
+            {
+                GuestBridge::XmmArgs xargs{};
+                for (size_t i = 0; i < 8; ++i) {
+                    xargs.v[i][0] = Frame->State.xmm.sse.data[i][0];
+                    xargs.v[i][1] = Frame->State.xmm.sse.data[i][1];
+                }
+                GuestBridge::PublishXmmArgs(xargs);
+            }
         }
         // v1.47 — the transparent import-call range reads 7th+ arguments
         // off the guest stack, which stands at the call site ([rsp] holds
         // the return address the stub will ret through).
         const uint64_t guestRsp =
             Frame ? Frame->State.gregs[FEXCore::X86State::REG_RSP] : 0;
-        return GuestSyscalls::Dispatch(
+        const uint64_t ret = GuestSyscalls::Dispatch(
             static_cast<uint32_t>(Args->Argument[0]),
             Args->Argument[1], Args->Argument[2], Args->Argument[3],
             Args->Argument[4], Args->Argument[5], Args->Argument[6],
             guestRsp);
+        // v1.66 — an HLE that returned FP publishes it here; XMM0 takes
+        // the SysV double-return position before the guest resumes.
+        if (Frame) {
+            uint64_t xmmRet[2] = {0, 0};
+            if (GuestBridge::TakeXmmReturn(xmmRet)) {
+                Frame->State.xmm.sse.data[0][0] = xmmRet[0];
+                Frame->State.xmm.sse.data[0][1] = xmmRet[1];
+            }
+        }
+        return ret;
     }
 
     std::optional<FEXCore::ExecutableFileSectionInfo> LookupExecutableFileSection(

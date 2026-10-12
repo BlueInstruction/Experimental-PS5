@@ -111,8 +111,11 @@ public:
 
     /**
      * Dispatches one import call. Returns the guest-visible RAX.
+     * xmmRetOut is the bridge's double-return channel (v1.66); the
+     * pthread surface never returns FP and ignores it.
      */
-    uint64_t Invoke(const std::string& symbol, const ImportCall& call);
+    uint64_t Invoke(const std::string& symbol, const ImportCall& call,
+                    uint64_t* xmmRetOut = nullptr);
 
     /**
      * Installs the guest-thread launcher (device: FEXCore dispatcher;
