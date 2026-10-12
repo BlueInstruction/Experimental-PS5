@@ -30,6 +30,8 @@
 
 #include "kernel/syscalls.h"
 #include "kernel/pthread_hle.h"
+#include "kernel/cxxabi_hle.h"
+#include "kernel/agc_hle.h"
 #include "memory/memory.h"
 #include "memory/page_size.h"
 #include "utils/breadcrumbs.h"
@@ -931,7 +933,7 @@ static bool PrepareThreadState(FEXCore::Core::InternalThreadState* thread,
     // RSI/RDX stay 0: _start saves RSI for its second call; if that call
     // dereferences it, the import-trap ledger will name the import instead
     // of a mystery fault.
-    frame->State.gregs[FEXCore::X86State::REG_RDI] = hostStackTop;
+    frame->State.gregs[FEXCore::X86State::REG_RDI] = entryArgRdi;
     frame->State.gregs[FEXCore::X86State::REG_RSI] = 0;
     frame->State.gregs[FEXCore::X86State::REG_RDX] = 0;
     PX5_LOGI(LogCategory::FEX,
@@ -1105,7 +1107,15 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
     // Release the callret shadow stack BEFORE DestroyThread: FEXCore's
     // DestroyThread only VirtualDontNeed()s the range (madvise), it never
     // munmaps — without this the 4 MiB reservation would leak per run.
-    munmap(callretAlloc, callretAllocSize);
+    // (v1.65: the allocation lives in PrepareThreadState; the thread
+    // record carries the base, guards flank it on both sides.)
+    if (thread->CallRetStackBase) {
+        munmap(reinterpret_cast<void*>(
+                   reinterpret_cast<uintptr_t>(thread->CallRetStackBase) -
+                   kPageSizeNow()),
+               FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE +
+                   2 * kPageSizeNow());
+    }
     g_context->DestroyThread(thread);
     return res;
 }
