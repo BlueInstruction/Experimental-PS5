@@ -391,7 +391,6 @@ echo "osttests] building pthread_hle_test (v1.65 pthread tranche)"
     -o "$OUT/pthread_hle_test" \
     "$ROOT/tools/hosttests/pthread_hle_test.cpp" \
     "$CPP/kernel/pthread_hle.cpp" \
-    "$CPP/kernel/cxxabi_hle.cpp" \
     "$CPP/kernel/agc_hle.cpp" \
     "$CPP/memory/memory.cpp" \
     "$CPP/utils/logger.cpp" \
