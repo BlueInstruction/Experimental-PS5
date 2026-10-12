@@ -78,6 +78,7 @@ echo "[hosttests] building nid_dispatch_test (M9 transparent import dispatch)"
     "$CPP/kernel/libc_hle.cpp" \
     "$CPP/kernel/pthread_hle.cpp" \
     "$CPP/kernel/cxxabi_hle.cpp" \
+    "$CPP/kernel/agc_hle.cpp" \
     "$CPP/kernel/syscalls.cpp" \
     "$CPP/loader/guest_abi.cpp" \
     "$CPP/audio/audio_out_hle.cpp" \
@@ -118,6 +119,7 @@ echo "[hosttests] building videoout_hle_test (M10 T1 sceVideoOut HLE)"
     "$CPP/kernel/libc_hle.cpp" \
     "$CPP/kernel/pthread_hle.cpp" \
     "$CPP/kernel/cxxabi_hle.cpp" \
+    "$CPP/kernel/agc_hle.cpp" \
     "$CPP/kernel/syscalls.cpp" \
     "$CPP/loader/guest_abi.cpp" \
     "$CPP/loader/nid.cpp" \
@@ -390,6 +392,7 @@ echo "osttests] building pthread_hle_test (v1.65 pthread tranche)"
     "$ROOT/tools/hosttests/pthread_hle_test.cpp" \
     "$CPP/kernel/pthread_hle.cpp" \
     "$CPP/kernel/cxxabi_hle.cpp" \
+    "$CPP/kernel/agc_hle.cpp" \
     "$CPP/memory/memory.cpp" \
     "$CPP/utils/logger.cpp" \
     "$CPP/utils/diag_bridge.cpp"

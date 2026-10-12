@@ -773,6 +773,8 @@ void Shutdown() {
     // context; they must not outlive it. (A thread still executing at
     // teardown detaches; the session run budget bounds that window.)
     ::PX5::SceKernelHle::PthreadHle::Instance().ResetForSession();
+    ::PX5::SceKernelHle::CxxAbiHle::Instance().ResetForSession();
+    ::PX5::SceKernelHle::AgcHle::Instance().ResetForSession();
     SmcManager::GetInstance().SetExecThread(nullptr);
     CrashHandler::SetFaultIntercept(nullptr);
     MemoryManager::GetInstance().SetCodeInvalidationNotify(nullptr);

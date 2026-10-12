@@ -3,6 +3,7 @@
 #include "libc_hle.h"
 #include "pthread_hle.h"
 #include "cxxabi_hle.h"
+#include "agc_hle.h"
 #include "../fexcore_integration.h"
 
 #include "../audio/audio_out_hle.h"
@@ -156,6 +157,10 @@ void KernelHle::RegisterAll() {
     // v1.67 — the C++ ABI runtime tranche (guards + exception registry)
     // rides the same table + counters.
     CxxAbiHle::Instance().CollectSymbols(&m_table);
+
+    // v1.68 — the sceAgc surface (189 imports) resolves through the same
+    // dispatch; the default handler's ledger is the tranche-2 worklist.
+    AgcHle::Instance().CollectSymbols(&m_table);
 
     m_registered = true;
     // Seed the NID registry: guest images import these functions by their
@@ -655,6 +660,10 @@ uint64_t KernelHle::InvokeByImport(const std::string& symbol,
     // --- C++ ABI runtime tranche (v1.67) ------------------------------------
     if (CxxAbiHle::Instance().HasSymbol(symbol))
         return CxxAbiHle::Instance().Invoke(symbol, call, xmmRetOut);
+
+    // --- sceAgc surface (v1.68) ----------------------------------------------
+    if (AgcHle::Instance().HasSymbol(symbol))
+        return AgcHle::Instance().Invoke(symbol, call, xmmRetOut);
 
     return static_cast<uint64_t>(kErrInval);
 }
