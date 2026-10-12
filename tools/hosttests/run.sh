@@ -315,7 +315,7 @@ echo "[hosttests] building dispatch_proof_contract_test (M8 T7 contract)"
 echo "[hosttests] running dispatch_proof_contract_test (M8 T7 contract)"
 "$OUT/dispatch_proof_contract_test"
 
-echo "osttests] building gnm_submit_gpu_path_test (submit-path wiring gate)"
+echo "[hosttests] building gnm_submit_gpu_path_test (submit-path wiring gate)"
 # The REAL submit TU (GnmSubmit - what sceGnmSubmitCommandBuffers serves)
 # walking the full chain per submission: PM4 decode -> GnmState -> M6 IR ->
 # M7 planner accounting -> M8 capture -> SPIR-V through the vendored
@@ -347,7 +347,7 @@ echo "osttests] building gnm_submit_gpu_path_test (submit-path wiring gate)"
     "$PORTABLE/px5_spirv_optimizer.cpp" \
     $(cat "$OUT/rec_sources.txt")
 
-echo "osttests] running gnm_submit_gpu_path_test (submit-path wiring gate)"
+echo "[hosttests] running gnm_submit_gpu_path_test (submit-path wiring gate)"
 "$OUT/gnm_submit_gpu_path_test"
 
 echo "[hosttests] building audio_out_hle_test (sceAudioOut HLE)"
@@ -381,7 +381,7 @@ echo "[hosttests] running pad_hle_test (scePad HLE)"
 "$OUT/pad_hle_test"
 
 
-echo "osttests] building pthread_hle_test (v1.65 pthread tranche)"
+echo "[hosttests] building pthread_hle_test (v1.65 pthread tranche)"
 # ORBIS pthread semantics: 27-symbol surface, errorcheck/recursive mutexes,
 # cond timedwait (usec contract), guest-thread lifecycle through the
 # launcher seam (host launcher; the FEXCore device half is shared with the
@@ -393,27 +393,28 @@ echo "osttests] building pthread_hle_test (v1.65 pthread tranche)"
     "$CPP/kernel/pthread_hle.cpp" \
     "$CPP/kernel/agc_hle.cpp" \
     "$CPP/memory/memory.cpp" \
+    "$CPP/utils/evidence.cpp" \
     "$CPP/utils/logger.cpp" \
     "$CPP/utils/diag_bridge.cpp"
 
-echo "osttests] running pthread_hle_test"
+echo "[hosttests] running pthread_hle_test"
 "$OUT/pthread_hle_test"
 
-echo "osttests] building libm_bridge_test (v1.66 XMM bridge + libm)"
+echo "[hosttests] building libm_bridge_test (v1.66 XMM bridge + libm)"
 # The two directions of the XMM spill at the HLE boundary: FP args read
 # from the snapshot, double/float returns published into the SysV XMM0
 # position, printf %%f consuming its own sequence.
 "$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread -DPX5_NO_SHADER_SERVICE     -I"$SHIM" -I"$CPP"     -o "$OUT/libm_bridge_test"     "$ROOT/tools/hosttests/libm_bridge_test.cpp"     "$CPP/kernel/libc_hle.cpp"     "$CPP/kernel/syscalls.cpp"     "$CPP/kernel/sce_kernel_hle.cpp"     "$CPP/kernel/pthread_hle.cpp"     "$CPP/kernel/cxxabi_hle.cpp"     "$CPP/kernel/agc_hle.cpp"     "$CPP/loader/nid.cpp"     "$CPP/loader/runtime_linker.cpp"     "$CPP/loader/guest_abi.cpp"     "$CPP/memory/memory.cpp"     "$CPP/filesystem/vfs.cpp"     "$CPP/audio/audio_out_hle.cpp"     "$CPP/input/pad_hle.cpp"     "$CPP/input/controller.cpp"     "$CPP/gpu/gnm/gnm_submit.cpp"     "$CPP/gpu/ir/gpu_ir.cpp"     "$CPP/gpu/vulkan_backend.cpp"     "$CPP/gpu/videoout_hle.cpp"     "$CPP/gpu/gnm/pm4_decoder.cpp"     "$CPP/gpu/gnm/gnm_state.cpp"     "$CPP/utils/evidence.cpp"     "$CPP/utils/logger.cpp"     "$CPP/utils/diag_bridge.cpp"     "$SHIM/fexcore_state_stub.cpp"
 
-echo "osttests] running libm_bridge_test"
+echo "[hosttests] running libm_bridge_test"
 "$OUT/libm_bridge_test"
 
-echo "osttests] building cxxabi_hle_test (v1.67 C++ ABI runtime)"
+echo "[hosttests] building cxxabi_hle_test (v1.67 C++ ABI runtime)"
 # Guard machinery with real contention (one initializer under a 4-thread
 # race), the exception registry round-trip, and the named fatal path.
 "$CXX" -std=c++20 -Wall -Wextra -Wno-unused-parameter -pthread -DPX5_NO_SHADER_SERVICE -I"$SHIM" -I"$CPP" -o "$OUT/cxxabi_hle_test" "$ROOT/tools/hosttests/cxxabi_hle_test.cpp" "$CPP/kernel/cxxabi_hle.cpp" "$CPP/kernel/agc_hle.cpp" "$CPP/kernel/libc_hle.cpp" "$CPP/kernel/syscalls.cpp" "$CPP/kernel/sce_kernel_hle.cpp" "$CPP/kernel/pthread_hle.cpp" "$CPP/loader/nid.cpp" "$CPP/loader/runtime_linker.cpp" "$CPP/loader/guest_abi.cpp" "$CPP/memory/memory.cpp" "$CPP/filesystem/vfs.cpp" "$CPP/audio/audio_out_hle.cpp" "$CPP/input/pad_hle.cpp" "$CPP/input/controller.cpp" "$CPP/gpu/gnm/gnm_submit.cpp" "$CPP/gpu/ir/gpu_ir.cpp" "$CPP/gpu/vulkan_backend.cpp" "$CPP/gpu/videoout_hle.cpp" "$CPP/gpu/gnm/pm4_decoder.cpp" "$CPP/gpu/gnm/gnm_state.cpp" "$CPP/utils/evidence.cpp" "$CPP/utils/logger.cpp" "$CPP/utils/diag_bridge.cpp" "$SHIM/fexcore_state_stub.cpp"
 
-echo "osttests] running cxxabi_hle_test"
+echo "[hosttests] running cxxabi_hle_test"
 "$OUT/cxxabi_hle_test"
 
-echo "osttests] all host tests passed"
+echo "[hosttests] all host tests passed"

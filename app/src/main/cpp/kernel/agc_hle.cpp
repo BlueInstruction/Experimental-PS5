@@ -4,10 +4,14 @@
 #include "sce_kernel_hle.h"   // SymbolEntry
 
 #include "../memory/memory.h"
+#include "../utils/evidence.h"
 #include "../utils/logger.h"
 
 #include <atomic>
 #include <cstring>
+#include <mutex>
+#include <set>
+#include <string>
 
 namespace PX5::SceKernelHle {
 
@@ -17,6 +21,11 @@ constexpr int64_t kErrInval = -22;
 constexpr uint64_t Retc(int64_t v) { return static_cast<uint64_t>(v); }
 
 const char* const kSymbols[] = {
+    // v1.69 — sceAgcInit IS part of the surface: its handler existed but the
+    // symbol was absent from this list, so HasSymbol() refused it and the
+    // route never resolved — the handler was dead code and the game's very
+    // first AGC call would have fallen to the ledger as unimplemented.
+    "sceAgcInit",
     "sceAgcAcbAcquireMem", "sceAgcAcbAcquireMemGetSize", "sceAgcAcbAtomicGdsGetSize",
     "sceAgcAcbAtomicMem", "sceAgcAcbAtomicMemGetSize", "sceAgcAcbCondExec",
     "sceAgcAcbCondExecGetSize", "sceAgcAcbCopyData", "sceAgcAcbCopyDataGetSize",
@@ -91,6 +100,12 @@ uint32_t g_agcVersion = 0;
 bool g_agcInitialized = false;
 std::atomic<uint64_t> g_defaultHits{0};
 
+// v1.69 — first-hit-per-symbol ledger: the device log names exactly which
+// AGC entry points the boot path touched. Tranche 2 encodes the real
+// worklist from this record instead of a guess.
+std::mutex g_defaultMutex;
+std::set<std::string> g_defaultNamed;
+
 } // namespace
 
 AgcHle& AgcHle::Instance() {
@@ -124,6 +139,25 @@ uint64_t AgcHle::Invoke(const std::string& symbol, const ImportCall& call,
     // its name; the counter says how much of the surface the boot path
     // actually touches. Returning 0 is honest "no-op", never success
     // theater — the GPU counters will show empty submissions.
+    //
+    // v1.69 — every unimplemented AGC entry point says so BY NAME, once:
+    // "reached the default handler" means the game called it and got a
+    // no-op. The *GetSize family deserves its own warning: a real AGC
+    // GetSize returns the DWORD COUNT the packet occupies in the command
+    // buffer; games size their command buffers from it. Returning 0 until
+    // the packet encoders land (tranche 2) means the guest sees zero-sized
+    // packets — the ledger is the proof of what must be encoded first.
+    {
+        std::lock_guard<std::mutex> lk(g_defaultMutex);
+        if (g_defaultNamed.insert(symbol).second) {
+            PX5_LOGW(LogCategory::GPU,
+                     "AGC: '%s' hit the default handler — UNIMPLEMENTED "
+                     "(packet encoders are tranche 2); returning 0",
+                     symbol.c_str());
+            Evidence::AppendLedger("agc default hit '%s' (unimplemented)",
+                                   symbol.c_str());
+        }
+    }
     g_defaultHits.fetch_add(1, std::memory_order_relaxed);
     return 0;
 }
@@ -143,6 +177,8 @@ void AgcHle::ResetForSession() {
     g_agcVersion = 0;
     g_agcInitialized = false;
     g_defaultHits.store(0, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk2(g_defaultMutex);
+    g_defaultNamed.clear();
 }
 
 } // namespace PX5::SceKernelHle

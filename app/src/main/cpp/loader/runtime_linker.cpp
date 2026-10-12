@@ -448,7 +448,8 @@ ImportTrapEntry::Route ResolveImportRoute(
 
 uint64_t RuntimeLinker::DispatchImportCall(uint64_t importIndex,
                                            const ImportCall& call,
-                                           uint64_t* xmmRetOut) {
+                                           uint64_t* xmmRetOut,
+                                           bool* xmmRetValidOut) {
     std::string name;
     std::string symbol;
     ImportTrapEntry::Route route = ImportTrapEntry::Route::Unresolved;
@@ -521,7 +522,7 @@ uint64_t RuntimeLinker::DispatchImportCall(uint64_t importIndex,
     // Outside m_mutex: the HLE implementation may block (audio pacing,
     // pad polling) and no linker state below depends on it.
     const uint64_t result = m_importRoute.invoke
-        ? m_importRoute.invoke(symbol, call, xmmRetOut)
+        ? m_importRoute.invoke(symbol, call, xmmRetOut, xmmRetValidOut)
         : 0;
     {
         std::lock_guard<std::mutex> lk(m_mutex);

@@ -62,10 +62,14 @@ public:
      * Runs the HLE implementation with the caller's preserved arguments.
      * xmmRetOut is the bridge's double-return channel (v1.66): the libm
      * functions the game imports return in XMM0 and publish there.
+     * v1.69 — xmmRetValidOut (when non-null) is set to true exactly when
+     * the implementation wrote xmmRetOut; validity is never inferred from
+     * the returned bits (a legitimate double return can be 0.0).
      * @return Guest-visible RAX
      */
     uint64_t Invoke(const std::string& symbol, const ImportCall& call,
-                    uint64_t* xmmRetOut = nullptr);
+                    uint64_t* xmmRetOut = nullptr,
+                    bool* xmmRetValidOut = nullptr);
 
 private:
     LibcHle() = default;

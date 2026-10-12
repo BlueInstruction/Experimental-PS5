@@ -25,6 +25,7 @@
 #include <map>
 #include <mutex>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 namespace PX5::SceKernelHle {
@@ -137,6 +138,11 @@ struct MutexPrivate {
 
 struct CondPrivate {
     std::string name;
+    // v1.69 — per-cond wait mutex. The old process-wide static serialized
+    // EVERY waiter in the process and let a signal on cond A spuriously
+    // wake a waiter on cond B; notify under the same mutex the waiter
+    // holds also closes the lost-wakeup window between check and wait.
+    std::mutex waitM;
     std::condition_variable cv;
     bool dead = false;
 };
@@ -159,13 +165,25 @@ struct GuestThread {
     bool exited = false;                 // Exit() recorded or host body done
     bool detached = false;
     bool joined = false;
+    bool sessionDead = false;            // reset woke abandoned joiners
     std::mutex m;
     std::condition_variable cv;
     std::thread host;
 
+    // v1.69 lifetime: the handle-validity registry holds the base reference;
+    // transient handle users (Join/Detach/AttrGet) hold a "use" for the
+    // duration of their access. Deletion happens exactly once (dead flag),
+    // only when the object is OUT of the registry, its body finished, and
+    // the last use released it. Nothing is ever deleted under a running
+    // body — the review's use-after-free class is closed by construction.
+    std::atomic<int> uses{0};
+    std::atomic<bool> bodyDone{false};   // the very last thing ThreadBody does
+    std::atomic<bool> zombieQueued{false}; // exited+detached; reaper owns it
+    std::atomic<bool> dead{false};       // deletion already claimed
+
     ~GuestThread() {
-        // A joinable std::thread's destructor terminates the process;
-        // teardown happens after dispatch ends, so detach is always safe.
+        // Last-resort for leaked-at-reset objects only: a joinable
+        // std::thread's destructor would terminate the process.
         if (host.joinable()) host.detach();
     }
 
@@ -190,6 +208,11 @@ uint64_t g_tlsAlign = 16;
 // ---------------------------------------------------------------------------
 std::mutex g_regMutex;
 std::vector<std::pair<void*, void (*)(void*)>> g_typed;
+// v1.69 — one-session graveyard: mutex/cond/attr objects of the PREVIOUS
+// session stay alive until the NEXT teardown. Stuck bodies from the old
+// session keep their objects valid through the boundary instead of reading
+// freed memory; new-session code can only hold new handles.
+std::vector<std::pair<void*, void (*)(void*)>> g_graveyard;
 
 template <typename T>
 void DeleteAs(void* p) { delete static_cast<T*>(p); }
@@ -208,6 +231,103 @@ GuestThread* g_mainThread = nullptr;        // lazy main-thread self
 GuestThreadLauncher g_launcher = nullptr;   // the seam
 
 uint64_t g_nextThreadId = 1;
+
+// ---------------------------------------------------------------------------
+// v1.69 thread lifetime: g_live is the handle-validity authority; g_zombies
+// holds exited threads whose objects the reaper joins and deletes; g_leaked
+// holds bodies that never stopped at session reset (named, never touched
+// again). Lock order: g_regMutex and g_zombieMutex are never held together;
+// a GuestThread's own mutex is never held across either registry mutex.
+// ---------------------------------------------------------------------------
+std::unordered_set<GuestThread*> g_live;
+std::mutex g_zombieMutex;
+std::vector<GuestThread*> g_zombies;
+std::vector<GuestThread*> g_leaked;
+std::atomic<bool> g_resetting{false};
+
+void FreeSlotLocked(uint64_t slotVa);   // defined with the slot machinery
+
+// Begins a validated handle use: nullptr when the handle is stale, reaped,
+// or garbage — the guest never dereferences handles, so a bad one is
+// refused (EINVAL) instead of dereferenced.
+GuestThread* UseBegin(uint64_t handle) {
+    auto* t = reinterpret_cast<GuestThread*>(handle);
+    if (!t) return nullptr;
+    std::lock_guard<std::mutex> lk(g_regMutex);
+    if (!g_live.count(t)) return nullptr;
+    t->uses.fetch_add(1, std::memory_order_relaxed);
+    return t;
+}
+
+void FinishDelete(GuestThread* t) {
+    // the body is done; join the (already finished) host thread, release the
+    // slot, delete. Never called for an object any thread can still reach.
+    if (t->host.joinable()) t->host.join();
+    if (t->slotVa) {
+        const uint64_t slotVa = t->slotVa;
+        t->slotVa = 0;
+        FreeSlotLocked(slotVa);
+    }
+    delete t;
+}
+
+// Ends a handle use. The LAST releaser deletes the object when it is out of
+// the registry, its body finished, and the reaper does not own it.
+void UseEnd(GuestThread* t) {
+    if (t->uses.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
+    if (t->zombieQueued.load(std::memory_order_acquire)) return;  // reaper owns
+    if (!t->bodyDone.load(std::memory_order_acquire)) return;
+    {
+        std::lock_guard<std::mutex> lk(g_regMutex);
+        if (g_live.count(t)) return;   // still a valid handle (e.g. main)
+    }
+    if (t->dead.exchange(true, std::memory_order_acq_rel)) return;
+    FinishDelete(t);
+}
+
+// Queue for the reaper. The g_resetting check under the queue mutex closes
+// the race with session teardown: either the push lands before the reset's
+// collection (the reset sees it), or the reset is already collecting and
+// owns the object — a late push must never leave a dangling entry behind.
+void QueueZombie(GuestThread* t) {
+    if (t->zombieQueued.exchange(true)) return;
+    std::lock_guard<std::mutex> lk(g_zombieMutex);
+    if (g_resetting.load(std::memory_order_acquire)) return;
+    g_zombies.push_back(t);
+}
+
+// Reclaims exited+detached threads: validate-out, join the finished body,
+// free the slot, delete. Called opportunistically from Create and at reset.
+void ReapDetached() {
+    std::vector<GuestThread*> batch;
+    {
+        std::lock_guard<std::mutex> lk(g_zombieMutex);
+        batch.swap(g_zombies);
+    }
+    if (batch.empty()) return;
+    std::vector<GuestThread*> keepBack;
+    for (auto* t : batch) {
+        bool deletable = false;
+        {
+            std::lock_guard<std::mutex> lk(g_regMutex);
+            g_live.erase(t);   // the handle becomes invalid (POSIX: detached
+                               // threads' handles are dead once reaped)
+            deletable = t->uses.load(std::memory_order_acquire) == 0 &&
+                        t->bodyDone.load(std::memory_order_acquire) &&
+                        !t->dead.exchange(true, std::memory_order_acq_rel);
+        }
+        if (deletable) {
+            FinishDelete(t);
+        } else {
+            keepBack.push_back(t);   // a user still holds it, or the body is
+                                     // microseconds from done — next reap
+        }
+    }
+    if (!keepBack.empty()) {
+        std::lock_guard<std::mutex> lk(g_zombieMutex);
+        g_zombies.insert(g_zombies.end(), keepBack.begin(), keepBack.end());
+    }
+}
 
 struct StatsCounters {
     std::atomic<uint64_t> threadsCreated{0};
@@ -237,6 +357,12 @@ bool AllocSlot(uint64_t* slotVaOut) {
             g_slotInUse.erase(idx);
             continue;
         }
+        // v1.69 — zero the slot on (re)use: a recycled slot must never hand
+        // the next thread a stack/TLS block carrying the previous tenant's
+        // bytes (the review's memory-reuse-without-clearing finding).
+        if (auto* p = WindowPtr(va, kSlotBytes)) {
+            std::memset(p, 0, kSlotBytes);
+        }
         g_slotHint = (idx + 1) % kMaxSlots;
         *slotVaOut = va;
         return true;
@@ -244,15 +370,19 @@ bool AllocSlot(uint64_t* slotVaOut) {
     return false;
 }
 
-void FreeSlot(uint64_t slotVa) {
+void FreeSlotLocked(uint64_t slotVa) {
     auto& mm = MemoryManager::GetInstance();
     const uint64_t base = mm.GetGuestBase();
     if (base == 0 || slotVa < base + kZoneOffsetInWindow) return;
     const uint64_t rel = slotVa - (base + kZoneOffsetInWindow);
     const uint64_t idx = rel / kSlotBytes;
     if (rel % kSlotBytes != 0 || idx >= kMaxSlots) return;
-    std::lock_guard<std::mutex> lk(g_regMutex);
     g_slotInUse.erase(idx);
+}
+
+void FreeSlot(uint64_t slotVa) {
+    std::lock_guard<std::mutex> lk(g_regMutex);
+    FreeSlotLocked(slotVa);
 }
 
 /**
@@ -322,6 +452,7 @@ void ThreadBody(GuestThread* self) {
                  "recorded as exited without running",
                  self->name.c_str());
     }
+    bool queueZombie = false;
     {
         std::lock_guard<std::mutex> lk(self->m);
         self->exitValue = rax;
@@ -329,8 +460,14 @@ void ThreadBody(GuestThread* self) {
         (void)ran;
         g_stats.threadsExited.fetch_add(1, std::memory_order_relaxed);
         self->cv.notify_all();
+        // detached-at-exit: the reaper owns the object from here (QueueZombie's
+        // CAS settles the race with a concurrent HDetach on the exited thread)
+        queueZombie = self->detached;
     }
+    if (queueZombie) QueueZombie(self);
     t_currentGuest = nullptr;
+    // bodyDone LAST: the reaper and the last UseEnd both gate deletion on it
+    self->bodyDone.store(true, std::memory_order_release);
 }
 
 GuestThread* CurrentGuestOrMain() {
@@ -342,6 +479,7 @@ GuestThread* CurrentGuestOrMain() {
         auto* t = new GuestThread();
         t->id = g_nextThreadId++;
         t->name = "MainThread";
+        g_live.insert(t);
         g_mainThread = t;
         g_stats.threadsCreated.fetch_add(1, std::memory_order_relaxed);
     }
@@ -432,6 +570,11 @@ uint64_t HMutexDestroy(const ImportCall& c) {
 
 uint64_t HCreate(const ImportCall& c) {
     if (!c.args[0]) return Retc(kErrInval);
+    if (g_resetting.load(std::memory_order_acquire)) {
+        PX5_LOGW(LogCategory::KERNEL,
+                 "PTHREAD: create refused — session teardown in progress");
+        return Retc(-12);                // -ENOMEM: no thread can start now
+    }
     if (!g_launcher) {
         PX5_LOGW(LogCategory::KERNEL,
                  "PTHREAD: create refused — no guest launcher installed "
@@ -462,7 +605,7 @@ uint64_t HCreate(const ImportCall& c) {
     stackBytes &= ~uint64_t{15};
     const uint64_t stackTop = slot + ScePthread::kTlsRegionBytes + stackBytes;
 
-    auto* t = NewTracked<GuestThread>();
+    auto* t = new GuestThread();
     t->id = g_nextThreadId++;
     t->entry = c.args[2];
     t->arg = c.args[3];
@@ -471,21 +614,39 @@ uint64_t HCreate(const ImportCall& c) {
     t->stackTop = stackTop;
     t->attr = attrCfg;
     t->detached = attrCfg.detachstate == ScePthread::kCreateDetached;
+    {
+        // handle validity comes up BEFORE the guest can observe the handle
+        std::lock_guard<std::mutex> lk(g_regMutex);
+        g_live.insert(t);
+    }
 
     t->tcbVa = BuildThreadTcb(slot, reinterpret_cast<uint64_t>(t));
     if (!t->tcbVa) {
+        {
+            std::lock_guard<std::mutex> lk(g_regMutex);
+            g_live.erase(t);
+        }
+        t->dead.store(true, std::memory_order_release);
         FreeSlot(slot);
-        t->slotVa = 0;
+        delete t;
         return Retc(-12);
     }
     if (!WriteSlotHandle(c.args[0], reinterpret_cast<uint64_t>(t))) {
+        {
+            std::lock_guard<std::mutex> lk(g_regMutex);
+            g_live.erase(t);
+        }
+        t->dead.store(true, std::memory_order_release);
         FreeSlot(slot);
-        t->slotVa = 0;
+        delete t;
         return Retc(kErrFault);
     }
     t->host = std::thread(ThreadBody, t);
-    if (t->detached) t->host.detach();
+    // v1.69 — detached guest threads keep their host std::thread joinable:
+    // the reaper joins it before reclaiming the object. Detaching here is
+    // exactly what made detached-thread objects unleapable before.
     g_stats.threadsCreated.fetch_add(1, std::memory_order_relaxed);
+    ReapDetached();   // opportunistic: reclaim exited detached threads
     PX5_LOGI(LogCategory::KERNEL,
              "PTHREAD: create id=%llu '%s' entry=0x%llx stack_top=0x%llx "
              "tcb=0x%llx detached=%d",
@@ -497,28 +658,58 @@ uint64_t HCreate(const ImportCall& c) {
 }
 
 uint64_t HJoin(const ImportCall& c) {
-    auto* t = reinterpret_cast<GuestThread*>(c.args[0]);
-    if (!t) return Retc(kErrInval);
-    if (t == t_currentGuest) return Retc(kErrDeadlk);
+    auto* t = UseBegin(c.args[0]);
+    if (!t) return Retc(kErrInval);   // stale/reaped/garbage handle
+    if (t == CurrentGuestOrMain()) {
+        // v1.69 — covers BOTH a guest thread joining itself AND the main
+        // thread joining its own lazily materialized handle (the review's
+        // join-self hang: the predicate could never become true).
+        UseEnd(t);
+        return Retc(kErrDeadlk);
+    }
     {
         std::unique_lock<std::mutex> lk(t->m);
-        if (t->joined) return Retc(kErrInval);   // already reaped handle
-        t->cv.wait(lk, [&] { return t->exited; });
-        if (t->detached) return Retc(kErrInval);
+        if (t->joined) {
+            UseEnd(t);
+            return Retc(kErrInval);   // already reaped handle
+        }
+        // session teardown wakes abandoned joiners through the per-object
+        // flag (a global flag could be cleared before the woken thread reads
+        // it — the object flag cannot)
+        t->cv.wait(lk, [&] { return t->exited || t->sessionDead; });
+        if (!t->exited) {
+            UseEnd(t);
+            return Retc(-3);          // -ESRCH: joiner abandoned at teardown
+        }
+        if (t->detached) {
+            UseEnd(t);
+            return Retc(kErrInval);
+        }
         t->joined = true;
+        if (c.args[1]) {
+            auto* out = static_cast<uint64_t*>(WindowPtr(c.args[1], 8));
+            if (!out) {
+                UseEnd(t);
+                return Retc(kErrFault);
+            }
+            *out = t->exitValue;
+        }
     }
+    // the host body recorded its exit; join it so bodyDone + the host thread
+    // end are both settled before validity drops
     if (t->host.joinable()) t->host.join();
-    if (c.args[1]) {
-        auto* out = static_cast<uint64_t*>(WindowPtr(c.args[1], 8));
-        if (!out) return Retc(kErrFault);
-        *out = t->exitValue;
+    {
+        std::lock_guard<std::mutex> lk(g_regMutex);
+        g_live.erase(t);              // the handle is consumed
     }
-    if (t->slotVa) { FreeSlot(t->slotVa); t->slotVa = 0; }
     g_stats.threadsJoined.fetch_add(1, std::memory_order_relaxed);
     PX5_LOGI(LogCategory::KERNEL,
              "PTHREAD: join id=%llu '%s' exit=0x%llx",
              (unsigned long long)t->id, t->name.c_str(),
              (unsigned long long)t->exitValue);
+    // last use: deletes the object exactly once (out of g_live, body done,
+    // not reaper-owned)
+    UseEnd(t);
     return 0;
 }
 
@@ -583,9 +774,12 @@ uint64_t HAttrSetstacksize(const ImportCall& c) {
 }
 
 uint64_t HAttrGet(const ImportCall& c) {
-    auto* t = reinterpret_cast<GuestThread*>(c.args[0]);
-    if (!t) return Retc(kErrInval);
-    if (!c.args[1]) return Retc(kErrInval);
+    auto* t = UseBegin(c.args[0]);
+    if (!t) return Retc(kErrInval);   // stale/reaped/garbage handle
+    if (!c.args[1]) {
+        UseEnd(t);
+        return Retc(kErrInval);
+    }
     auto* attr = NewTracked<AttrPrivate>();
     {
         std::lock_guard<std::mutex> lk(t->m);
@@ -593,8 +787,10 @@ uint64_t HAttrGet(const ImportCall& c) {
         attr->stacksize = t->attr.stacksize;
         attr->priority = t->attr.priority;
     }
-    if (!WriteSlotHandle(c.args[1], reinterpret_cast<uint64_t>(attr)))
-        return Retc(kErrFault);
+    const bool wrote = WriteSlotHandle(c.args[1],
+                                       reinterpret_cast<uint64_t>(attr));
+    UseEnd(t);
+    if (!wrote) return Retc(kErrFault);
     return 0;
 }
 
@@ -618,14 +814,23 @@ uint64_t HAttrGetstack(const ImportCall& c) {
 }
 
 uint64_t HDetach(const ImportCall& c) {
-    auto* t = reinterpret_cast<GuestThread*>(c.args[0]);
-    if (!t) return Retc(kErrInval);
+    auto* t = UseBegin(c.args[0]);
+    if (!t) return Retc(kErrInval);   // stale/reaped/garbage handle
+    bool queueZombie = false;
     {
         std::lock_guard<std::mutex> lk(t->m);
-        if (t->joined) return Retc(kErrInval);
+        if (t->joined) {
+            UseEnd(t);
+            return Retc(kErrInval);
+        }
         t->detached = true;
+        // detach of an already-exited thread: nobody will ever join it —
+        // the reaper owns the object now (v1.69: previously its slot and
+        // object leaked until session teardown)
+        queueZombie = t->exited;
     }
-    if (t->host.joinable()) t->host.detach();
+    if (queueZombie) QueueZombie(t);
+    UseEnd(t);
     return 0;
 }
 
@@ -692,12 +897,10 @@ uint64_t HCondTimedwait(const ImportCall& c) {
         std::chrono::system_clock::now() + std::chrono::microseconds(usec);
     std::cv_status st = std::cv_status::no_timeout;
     {
-        // The cond's cv needs a lock to wait on; the GUEST mutex is already
-        // released, so this internal lock plays no fairness role — it only
-        // makes the cv wait legal. Spurious wakeups are POSIX-legal; the
-        // caller's predicate loop rechecks.
-        static std::mutex waitM;         // process-wide: cv waits are rare
-        std::unique_lock<std::mutex> lk(waitM);
+        // v1.69 — wait on the cond's OWN mutex; signal/broadcast notify under
+        // the same one, so a notify can never slip between the waiter's
+        // predicate check and the wait itself.
+        std::unique_lock<std::mutex> lk(cv->waitM);
         st = cv->cv.wait_until(lk, deadline);
     }
     mu->Lock(tid);
@@ -709,7 +912,10 @@ uint64_t HCondSignal(const ImportCall& c) {
     if (!ReadSlotHandle(c.args[0], &ch)) return Retc(kErrFault);
     auto* cv = reinterpret_cast<CondPrivate*>(ch);
     if (!cv || cv->dead) return Retc(kErrInval);
-    cv->cv.notify_one();
+    {
+        std::lock_guard<std::mutex> lk(cv->waitM);
+        cv->cv.notify_one();
+    }
     g_stats.condSignals.fetch_add(1, std::memory_order_relaxed);
     return 0;
 }
@@ -719,7 +925,10 @@ uint64_t HCondBroadcast(const ImportCall& c) {
     if (!ReadSlotHandle(c.args[0], &ch)) return Retc(kErrFault);
     auto* cv = reinterpret_cast<CondPrivate*>(ch);
     if (!cv || cv->dead) return Retc(kErrInval);
-    cv->cv.notify_all();
+    {
+        std::lock_guard<std::mutex> lk(cv->waitM);
+        cv->cv.notify_all();
+    }
     g_stats.condSignals.fetch_add(1, std::memory_order_relaxed);
     return 0;
 }
@@ -772,16 +981,90 @@ void PthreadHle::SetGuestLauncher(GuestThreadLauncher launcher) {
 }
 
 void PthreadHle::ResetForSession() {
-    // Detach any host thread still registered as joinable: teardown happens
-    // after dispatch ends, and ~GuestThread detains a joinable std::thread
-    // would terminate the process (std::terminate) — detach instead.
-    // GuestThread's destructor detaches joinable host threads before the
-    // typed deleters run, so teardown can never std::terminate on a thread.
-    std::lock_guard<std::mutex> lk(g_regMutex);
-    for (auto it = g_typed.rbegin(); it != g_typed.rend(); ++it) it->second(it->first);
-    g_typed.clear();
-    g_slotInUse.clear();
-    g_slotHint = 0;
+    // v1.69 — teardown that can never delete state under a running thread
+    // (the review's use-after-free finding):
+    //   1. refuse new creates, wake abandoned joiners (per-object flag),
+    //   2. give live bodies a bounded grace to reach their end,
+    //   3. join + free + delete everything that stopped,
+    //   4. bodies STILL running move to the named leak list — their host
+    //      threads finish naturally and nothing touches those objects again.
+    g_resetting.store(true, std::memory_order_release);
+
+    std::vector<GuestThread*> all;
+    {
+        std::lock_guard<std::mutex> lk(g_zombieMutex);
+        for (auto* t : g_zombies) all.push_back(t);
+        g_zombies.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_regMutex);
+        for (auto* t : g_live) all.push_back(t);
+        g_live.clear();
+    }
+    GuestThread* mainPtr = g_mainThread;
+
+    for (auto* t : all) {
+        std::lock_guard<std::mutex> lk(t->m);
+        t->sessionDead = true;
+        t->cv.notify_all();
+    }
+
+    for (auto* t : all) {
+        // bodies record bodyDone as their very last action; stuck guest
+        // code is the only way to miss it (bounded grace, then leak)
+        for (int i = 0;
+             i < 200 && !t->bodyDone.load(std::memory_order_acquire); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+
+    std::vector<GuestThread*> leaked;
+    {
+        std::lock_guard<std::mutex> lk(g_regMutex);
+        for (auto* t : all) {
+            // main's "body" is the caller itself; its host std::thread is
+            // not joinable and it cannot still be referenced through TLS
+            const bool isMain = (t == mainPtr);
+            const bool deletable =
+                (isMain || t->bodyDone.load(std::memory_order_acquire)) &&
+                t->uses.load(std::memory_order_acquire) == 0 &&
+                !t->dead.exchange(true, std::memory_order_acq_rel);
+            if (!deletable) {
+                leaked.push_back(t);
+                continue;
+            }
+            if (!isMain && t->host.joinable()) t->host.join();
+            if (t->slotVa) {
+                FreeSlotLocked(t->slotVa);
+                t->slotVa = 0;
+            }
+            delete t;
+        }
+    }
+    if (!leaked.empty()) {
+        std::lock_guard<std::mutex> lk(g_regMutex);
+        g_leaked.insert(g_leaked.end(), leaked.begin(), leaked.end());
+        PX5_LOGW(LogCategory::KERNEL,
+                 "PTHREAD: session reset parked %zu thread object(s) whose "
+                 "bodies are still running — never touched again (bounded "
+                 "by the %zu-slot zone)",
+                 leaked.size(), kMaxSlots);
+    }
+
+    // v1.69 — one-generation graveyard for mutex/cond/attr objects: this
+    // session's objects stay alive for stuck old bodies; the PREVIOUS
+    // graveyard is reclaimed now (a full session boundary has passed).
+    {
+        std::vector<std::pair<void*, void (*)(void*)>> old;
+        {
+            std::lock_guard<std::mutex> lk(g_regMutex);
+            g_typed.swap(g_graveyard);   // current objects sleep; old ones out
+            old.swap(g_typed);
+            g_slotInUse.clear();
+            g_slotHint = 0;
+        }
+        for (auto it = old.rbegin(); it != old.rend(); ++it) it->second(it->first);
+    }
     g_mainThread = nullptr;
     g_nextThreadId = 1;
     g_stats.threadsCreated.store(0, std::memory_order_relaxed);
@@ -789,6 +1072,7 @@ void PthreadHle::ResetForSession() {
     g_stats.threadsExited.store(0, std::memory_order_relaxed);
     g_stats.mutexLocks.store(0, std::memory_order_relaxed);
     g_stats.condSignals.store(0, std::memory_order_relaxed);
+    g_resetting.store(false, std::memory_order_release);
 }
 
 uint64_t PthreadHle::Invoke(const std::string& symbol, const ImportCall& call,
@@ -842,7 +1126,8 @@ PthreadHle::Stats PthreadHle::GetStats() const {
     s.mutexLocks = g_stats.mutexLocks.load(std::memory_order_relaxed);
     s.condSignals = g_stats.condSignals.load(std::memory_order_relaxed);
     std::lock_guard<std::mutex> lk(g_regMutex);
-    s.liveThreads = g_typed.size();
+    s.liveThreads = g_live.size();   // v1.69: threads only (was: every
+                                     // tracked object incl. mutexes/conds)
     return s;
 }
 
