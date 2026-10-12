@@ -65,12 +65,10 @@ int main() {
           "second acquire returns 0 (already done)");
 
     // ------------------------------------------------------------------
-    // guard: REAL deterministic contention — the holder owns the guard
-    // first; three losers are released only after they all reported entry,
-    // so each MUST have blocked on the in-use guard (guardContended proves
-    // the wait happened, not just that the outcome was correct).
+    // guard: REAL contention — three losers race one in-use guard; the
+    // outcome (no double-init) is asserted deterministically.
     // ------------------------------------------------------------------
-    std::printf("[cxxabi_hle_test] guard contention (deterministic)\n");
+    std::printf("[cxxabi_hle_test] guard contention (outcome)\n");
     const uint64_t guard2 = guardVa + 0x40;
     CHECK(Call("__cxa_guard_acquire", {guard2}) == 1, "holder acquires first");
     CHECK(guardBytes[0x40] == 0 && guardBytes[0x41] == 1,
@@ -88,28 +86,73 @@ int main() {
         std::vector<std::thread> losers;
         for (int i = 0; i < 3; ++i) losers.emplace_back(loser);
         go.store(true);
-        // time-based wait (a yield-count bound starves on a loaded machine)
         const auto enterDeadline =
             std::chrono::steady_clock::now() + std::chrono::seconds(2);
         while (entered.load() < 3 &&
                std::chrono::steady_clock::now() < enterDeadline)
             std::this_thread::yield();
         CHECK(entered.load() == 3, "all three losers reached the acquire");
-        // release ONLY now: every loser was already inside the acquire and
-        // the guard is still in-use — blocking is forced, not timed
         CHECK(Call("__cxa_guard_release", {guard2}) == 0, "holder releases");
         for (auto& t : losers) t.join();
         CHECK(loserZeros.load() == 3,
               "all three losers observed done (none initialized)");
         CHECK(guardBytes[0x40] == 1 && guardBytes[0x41] == 0,
               "guard2 committed done=1 in-use=0");
-        auto st = CxxAbiHle::Instance().GetStats();
-        CHECK(st.guardContended >= 1,
-              "the blocked wait really happened (contended counter)");
     }
     // second acquire after commit -> 0 (double-init impossible)
     CHECK(Call("__cxa_guard_acquire", {guard2}) == 0,
           "post-commit acquire returns 0");
+
+    // ------------------------------------------------------------------
+    // v1.69 — the BLOCKED WAIT is proven deterministically: a worker holds
+    // the guard, MAIN blocks on it, and a gate thread opens the release
+    // only after the parked-waiter counter shows main is blocked (the
+    // counter increments the moment the wait begins). No sleep-based
+    // window: the release cannot happen before the wait is observable.
+    // ------------------------------------------------------------------
+    std::printf("[cxxabi_hle_test] guard blocking (deterministic)\n");
+    {
+        const uint64_t guardB = guardVa + 0xC0;
+        std::memset(guardBytes + 0xC0, 0, 16);
+        std::atomic<bool> holderHolds{false};
+        std::atomic<bool> mayRelease{false};
+        std::atomic<bool> parked{false};
+        const auto contendedBefore =
+            CxxAbiHle::Instance().GetStats().guardContended;
+        std::thread holder([&] {
+            CHECK(Call("__cxa_guard_acquire", {guardB}) == 1,
+                  "holder worker acquires");
+            holderHolds.store(true);
+            while (!mayRelease.load()) std::this_thread::yield();
+            CHECK(Call("__cxa_guard_release", {guardB}) == 0,
+                  "holder worker releases");
+        });
+        for (int i = 0;
+             i < 4000 && !holderHolds.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        CHECK(holderHolds.load(), "holder owns the guard");
+        std::thread gate([&] {
+            // opens the release gate ONLY once main's park is observable —
+            // bounded, so a semantics bug fails the check instead of hanging
+            const auto dl =
+                std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (CxxAbiHle::Instance().GetStats().guardContended <=
+                       contendedBefore &&
+                   std::chrono::steady_clock::now() < dl)
+                std::this_thread::yield();
+            parked.store(CxxAbiHle::Instance().GetStats().guardContended >
+                         contendedBefore);
+            mayRelease.store(true);
+        });
+        const auto rc = Call("__cxa_guard_acquire", {guardB});   // BLOCKS
+        gate.join();
+        holder.join();
+        CHECK(parked.load(),
+              "main parked on the in-use guard (observed pre-release)");
+        CHECK(rc == 0, "blocked acquire returns 0 after the holder commits");
+        CHECK(guardBytes[0xC0] == 1 && guardBytes[0xC1] == 0,
+              "guardB committed done=1 in-use=0");
+    }
 
     // abort path: acquire (in-use) then abort reopens for a retry
     CHECK(Call("__cxa_guard_acquire", {guard2 + 0x40}) == 1, "guard3 acquire");

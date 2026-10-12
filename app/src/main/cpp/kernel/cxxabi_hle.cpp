@@ -107,13 +107,14 @@ uint64_t HGuardAcquire(const ImportCall& c) {
     auto* e = GuardFor(va);
     g_guardAcquires.fetch_add(1, std::memory_order_relaxed);
     std::unique_lock<std::mutex> lk(e->m);
-    bool contended = false;
     while (e->inUse) {
-        // another thread is initializing: block until it resolves
+        // v1.69 — counted the MOMENT the wait begins, not after waking: an
+        // observer can then prove a waiter exists while it is still parked
+        // (the count-after-wake version let the parked window close before
+        // anyone looked on a 2-core runner).
+        g_guardContended.fetch_add(1, std::memory_order_relaxed);
         e->cv.wait(lk);
-        contended = true;
     }
-    if (contended) g_guardContended.fetch_add(1, std::memory_order_relaxed);
     if (!GuardReadDone(va, &done)) return Retc(-14);
     if (done) return 0;                                // raced to completion
     e->inUse = true;
