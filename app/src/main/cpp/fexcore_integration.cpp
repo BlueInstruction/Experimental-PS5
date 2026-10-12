@@ -29,6 +29,9 @@
 #include <unistd.h>
 
 #include "kernel/syscalls.h"
+#include "kernel/pthread_hle.h"
+#include "kernel/cxxabi_hle.h"
+#include "kernel/agc_hle.h"
 #include "memory/memory.h"
 #include "memory/page_size.h"
 #include "utils/breadcrumbs.h"
@@ -97,6 +100,19 @@ bool SetConfigKey(const std::string& key, const std::string& value) {
 // v1.39: atomic so the syscall bridge and the crash handler can read it
 // without taking g_mutex (ExecuteAtHostRip holds g_mutex for the whole run).
 std::atomic<FEXCore::Core::InternalThreadState*> g_execThread{nullptr};
+
+// v1.65 — per-thread execution identity. Guest threads spawned through the
+// pthread HLE surface run on their own host threads with their own
+// InternalThreadState; every fault-path / compile-path / segment-base read
+// must name the CURRENT thread, not the main one. t_execThread is set for
+// the lifetime of a dispatch on that host thread (main and spawned alike);
+// the global stays the main-thread anchor for non-guest callers.
+thread_local FEXCore::Core::InternalThreadState* t_execThread{nullptr};
+
+FEXCore::Core::InternalThreadState* CurrentExecThread() {
+    if (FEXCore::Core::InternalThreadState* t = t_execThread) return t;
+    return g_execThread.load(std::memory_order_acquire);
+}
 
 // ---------------------------------------------------------------------------
 // SmcManager — the host-layer half of FEXCore's mtrack contract.
@@ -315,14 +331,14 @@ private:
         // Drop stale translations for the page and hand the page back to the
         // guest's requested protection (writable again), all under the
         // invalidation lock — the same order FEX's own frontend uses.
-        InvalidateGuestCodeRange(m_execThread, page, kPageSizeNow());
+        InvalidateGuestCodeRange(CurrentExecThread(), page, kPageSizeNow());
         m_faultCount.fetch_add(1, std::memory_order_relaxed);
 
         // Self-rewrite-inside-current-block: resuming the interrupted
         // instruction inside the block it just modified would run on into a
         // translation that was just dropped. Mirror FEX's frontend: re-enter
         // the dispatcher for a one-instruction block.
-        FEXCore::Core::InternalThreadState* thread = m_execThread;
+        FEXCore::Core::InternalThreadState* thread = CurrentExecThread();
         if (thread) {
             const uint64_t pc = uctx->uc_mcontext.pc;
             if (m_ctx->IsAddressInCodeBuffer(thread, pc) &&
@@ -342,7 +358,7 @@ private:
         // fast aligned form and expects the first wrong access to fault, be
         // repaired and backpatched. FEXCore's public helper does the repair;
         // the safety gate (PC inside a code buffer) is ours.
-        FEXCore::Core::InternalThreadState* thread = m_execThread;
+        FEXCore::Core::InternalThreadState* thread = CurrentExecThread();
         if (!thread) return false;
 
         const uint64_t pc = uctx->uc_mcontext.pc;
@@ -426,17 +442,40 @@ public:
         // far did the guest actually get" with evidence, not narration.
         if (Frame) {
             GuestSyscalls::NoteGuestRip(Frame->State.rip);
+            // v1.66 — publish the caller's XMM0..7 for the import-call
+            // bridge. FEXCore spills the full guest register file to the
+            // frame around host calls, so this is the live FP argument
+            // state; the epilogue below writes an HLE double-return back
+            // into XMM0 the same way.
+            {
+                GuestBridge::XmmArgs xargs{};
+                for (size_t i = 0; i < 8; ++i) {
+                    xargs.v[i][0] = Frame->State.xmm.sse.data[i][0];
+                    xargs.v[i][1] = Frame->State.xmm.sse.data[i][1];
+                }
+                GuestBridge::PublishXmmArgs(xargs);
+            }
         }
         // v1.47 — the transparent import-call range reads 7th+ arguments
         // off the guest stack, which stands at the call site ([rsp] holds
         // the return address the stub will ret through).
         const uint64_t guestRsp =
             Frame ? Frame->State.gregs[FEXCore::X86State::REG_RSP] : 0;
-        return GuestSyscalls::Dispatch(
+        const uint64_t ret = GuestSyscalls::Dispatch(
             static_cast<uint32_t>(Args->Argument[0]),
             Args->Argument[1], Args->Argument[2], Args->Argument[3],
             Args->Argument[4], Args->Argument[5], Args->Argument[6],
             guestRsp);
+        // v1.66 — an HLE that returned FP publishes it here; XMM0 takes
+        // the SysV double-return position before the guest resumes.
+        if (Frame) {
+            uint64_t xmmRet[2] = {0, 0};
+            if (GuestBridge::TakeXmmReturn(xmmRet)) {
+                Frame->State.xmm.sse.data[0][0] = xmmRet[0];
+                Frame->State.xmm.sse.data[0][1] = xmmRet[1];
+            }
+        }
+        return ret;
     }
 
     std::optional<FEXCore::ExecutableFileSectionInfo> LookupExecutableFileSection(
@@ -478,7 +517,7 @@ RealSyscallHandler g_syscallHandler;
 // mutex held, so taking the invalidation mutex here is safe.
 void OnMemoryCodeInvalidated(uint64_t base, size_t size) {
     SmcManager::GetInstance().InvalidateGuestCodeRange(
-        g_execThread.load(std::memory_order_acquire), base, size);
+        CurrentExecThread(), base, size);
 }
 
 // CrashHandler fault intercept — the sharpdroid/FEX question order:
@@ -526,7 +565,7 @@ bool GuestTrapRouter(int sig, void* siginfoVoid, void* uctxVoid) {
     auto* uctx = static_cast<ucontext_t*>(uctxVoid);
     if (!uctx) return false;
 
-    auto* thread = g_execThread.load(std::memory_order_acquire);
+    auto* thread = CurrentExecThread();
     if (!thread || !thread->CurrentFrame) return false;
     auto* frame = thread->CurrentFrame;
 
@@ -732,6 +771,12 @@ bool Initialize() {
 
 void Shutdown() {
     std::lock_guard<std::mutex> lock(g_mutex);
+    // v1.65 — guest-thread objects hold host threads that dispatch into the
+    // context; they must not outlive it. (A thread still executing at
+    // teardown detaches; the session run budget bounds that window.)
+    ::PX5::SceKernelHle::PthreadHle::Instance().ResetForSession();
+    ::PX5::SceKernelHle::CxxAbiHle::Instance().ResetForSession();
+    ::PX5::SceKernelHle::AgcHle::Instance().ResetForSession();
     SmcManager::GetInstance().SetExecThread(nullptr);
     CrashHandler::SetFaultIntercept(nullptr);
     MemoryManager::GetInstance().SetCodeInvalidationNotify(nullptr);
@@ -750,7 +795,7 @@ bool IsInitialized() {
 
 bool GetLiveGuestState(uint64_t* rip, uint64_t* rsp,
                        uint64_t* fsBase, uint64_t* gsBase) {
-    auto* t = g_execThread.load(std::memory_order_acquire);
+    auto* t = CurrentExecThread();
     if (!t || !t->CurrentFrame) return false;
     const auto& st = t->CurrentFrame->State;
     if (rip)    *rip    = st.rip;
@@ -761,7 +806,7 @@ bool GetLiveGuestState(uint64_t* rip, uint64_t* rsp,
 }
 
 bool SetLiveGuestSegmentBase(bool isFs, uint64_t base) {
-    auto* t = g_execThread.load(std::memory_order_acquire);
+    auto* t = CurrentExecThread();
     if (!t || !t->CurrentFrame) return false;
     auto& st = t->CurrentFrame->State;
     if (isFs) st.fs_cached = base; else st.gs_cached = base;
@@ -770,67 +815,17 @@ bool SetLiveGuestSegmentBase(bool isFs, uint64_t base) {
     return true;
 }
 
-ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
-                            uint64_t initialFsBase) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    ExecResult res{};
-    if (!g_context) {
-        res.error = "FEXCore context not initialized";
-        PX5_LOGE(LogCategory::FEX, "%s", res.error.c_str());
-        return res;
-    }
-    // The window must exist before CreateThread maps guest stacks.
-    if (!MemoryManager::GetInstance().Initialize()) {
-        res.error = "guest window reservation failed before guest thread start";
-        PX5_LOGE(LogCategory::FEX, "%s (errno=%d %s)", res.error.c_str(),
-                 errno, strerror(errno));
-        return res;
-    }
-    if (hostRip == 0 || hostStackTop == 0) {
-        res.error = "host RIP or stack top is null";
-        return res;
-    }
 
-    GuestSyscalls::ResetRun();
-
-    PX5::Breadcrumb::Set("exec: create_thread rip=0x%llx sp=0x%llx",
-                         (unsigned long long)hostRip,
-                         (unsigned long long)hostStackTop);
-    auto* thread = g_context->CreateThread(hostRip, hostStackTop, nullptr);
-    if (!thread) {
-        res.error = "FEXCore CreateThread returned null";
-        PX5_LOGE(LogCategory::FEX, "%s", res.error.c_str());
-        return res;
-    }
-
-    // v1.57 — THE REAL-GUEST CALL FIX: initialize the call/return shadow stack.
-    //
-    // On-device proof (v1.56, vc57, Vivo Y51 SD665, 2026-09-22 02:20:32):
-    //   SIGSEGV si_addr=0xfffffffffffff0, pc=<JIT block, anon exec>, x25=0.
-    //   Faulting instruction (capstone): stp x20, x0, [x25, #-0x10]!
-    //   with x20=0x140000089 = the guest return RIP of the game entry's
-    //   FIRST `call` (push rbp; mov rbp,rsp; ...; lea rdi,[rdi+8]; call),
-    //   x0 = the host return-trampoline address. FEX's JIT pushes
-    //   <GuestRIP, HostRet> pairs onto a per-thread shadow stack through
-    //   REG_CALLRET_SP = x25 (ArchHelpers/Arm64Emitter.h:48) on every guest
-    //   CALL (JIT/BranchOps.cpp:168). State.callret_sp is zero-initialized
-    //   (CoreState.h:109) and FEXCore NEVER assigns it — every FEX frontend
-    //   does: FEXLoader's LinuxSyscalls/ThreadManager.cpp:196 and the
-    //   Windows frontend (Windows/Common/CallRetStack.h:36). PX5 embeds
-    //   FEXCore without FEXLoader and never did -> the first guest CALL of
-    //   any real binary deterministically faulted through the null pointer.
-    //   The synthetic suite never executes a guest CALL, which is why every
-    //   conformance/syscall/NID test passed on the same device while the
-    //   real eboot died at its entry. Same bug family as v1.24's
-    //   segment_arrays: "FEXCore expects the HOST to install X after
-    //   CreateThread; every FEX host does this; PX5 never did."
-    //
-    // Mirror FEXLoader's ThreadManager exactly: PROT_NONE reservation with
-    // a guard page on EACH side, RW middle, CallRetStackBase = base+page
-    // (FEXCore itself DontNeed()s exactly that range on invalidation), and
-    // callret_sp = base + SIZE/4 — 1 MiB of push headroom below and 3 MiB
-    // above; an unbalanced-call under/overflow hits a guard page and
-    // reports honestly instead of silently corrupting adjacent mappings.
+// ---------------------------------------------------------------------------
+// PrepareThreadState — the per-thread host duties every FEX host performs
+// after CreateThread, shared by the main dispatch and spawned guest threads
+// (v1.65 pthread tranche). Mirror order of FEXLoader's ThreadManager:
+// callret shadow stack, GDT/LDT arrays, FSBASE (ORBIS TLS contract), and
+// the entry ABI registers.
+// ---------------------------------------------------------------------------
+static bool PrepareThreadState(FEXCore::Core::InternalThreadState* thread,
+                               uint64_t entryArgRdi, uint64_t initialFsBase,
+                               std::string* errorOut) {
     const size_t callretSize =
         FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;  // 0x400000
     // Guards are HOST pages: FEX_PAGE_SIZE is a hardcoded 4096, and on a
@@ -844,21 +839,19 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
     void* callretAlloc = mmap(nullptr, callretAllocSize, PROT_NONE,
                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (callretAlloc == MAP_FAILED) {
-        res.error = "callret shadow stack mmap failed";
-        PX5_LOGE(LogCategory::FEX, "%s (errno=%d %s)", res.error.c_str(),
+        *errorOut = "callret shadow stack mmap failed";
+        PX5_LOGE(LogCategory::FEX, "%s (errno=%d %s)", errorOut->c_str(),
                  errno, strerror(errno));
-        g_context->DestroyThread(thread);
-        return res;
+        return false;
     }
     auto* callretBase =
         static_cast<uint8_t*>(callretAlloc) + callretGuard;
     if (mprotect(callretBase, callretSize, PROT_READ | PROT_WRITE) != 0) {
-        res.error = "callret shadow stack mprotect failed";
-        PX5_LOGE(LogCategory::FEX, "%s (errno=%d %s)", res.error.c_str(),
+        *errorOut = "callret shadow stack mprotect failed";
+        PX5_LOGE(LogCategory::FEX, "%s (errno=%d %s)", errorOut->c_str(),
                  errno, strerror(errno));
         munmap(callretAlloc, callretAllocSize);
-        g_context->DestroyThread(thread);
-        return res;
+        return false;
     }
     thread->CallRetStackBase = callretBase;
     thread->CurrentFrame->State.callret_sp =
@@ -940,14 +933,84 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
     // RSI/RDX stay 0: _start saves RSI for its second call; if that call
     // dereferences it, the import-trap ledger will name the import instead
     // of a mystery fault.
-    frame->State.gregs[FEXCore::X86State::REG_RDI] = hostStackTop;
+    frame->State.gregs[FEXCore::X86State::REG_RDI] = entryArgRdi;
     frame->State.gregs[FEXCore::X86State::REG_RSI] = 0;
     frame->State.gregs[FEXCore::X86State::REG_RDX] = 0;
     PX5_LOGI(LogCategory::FEX,
              "ORBIS entry ABI set: rdi=0x%llx (argc block at initial SP) "
              "rsi=0 rdx=0 (v1.46 — mov r14d,[rdi] null-load eliminated)",
-             (unsigned long long)hostStackTop);
+             (unsigned long long)entryArgRdi);
+    return true;
+}
 
+ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
+                            uint64_t initialFsBase) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    ExecResult res{};
+    if (!g_context) {
+        res.error = "FEXCore context not initialized";
+        PX5_LOGE(LogCategory::FEX, "%s", res.error.c_str());
+        return res;
+    }
+    // The window must exist before CreateThread maps guest stacks.
+    if (!MemoryManager::GetInstance().Initialize()) {
+        res.error = "guest window reservation failed before guest thread start";
+        PX5_LOGE(LogCategory::FEX, "%s (errno=%d %s)", res.error.c_str(),
+                 errno, strerror(errno));
+        return res;
+    }
+    if (hostRip == 0 || hostStackTop == 0) {
+        res.error = "host RIP or stack top is null";
+        return res;
+    }
+
+    GuestSyscalls::ResetRun();
+
+    PX5::Breadcrumb::Set("exec: create_thread rip=0x%llx sp=0x%llx",
+                         (unsigned long long)hostRip,
+                         (unsigned long long)hostStackTop);
+    auto* thread = g_context->CreateThread(hostRip, hostStackTop, nullptr);
+    if (!thread) {
+        res.error = "FEXCore CreateThread returned null";
+        PX5_LOGE(LogCategory::FEX, "%s", res.error.c_str());
+        return res;
+    }
+
+    // v1.57 — THE REAL-GUEST CALL FIX: initialize the call/return shadow stack.
+    //
+    // On-device proof (v1.56, vc57, Vivo Y51 SD665, 2026-09-22 02:20:32):
+    //   SIGSEGV si_addr=0xfffffffffffff0, pc=<JIT block, anon exec>, x25=0.
+    //   Faulting instruction (capstone): stp x20, x0, [x25, #-0x10]!
+    //   with x20=0x140000089 = the guest return RIP of the game entry's
+    //   FIRST `call` (push rbp; mov rbp,rsp; ...; lea rdi,[rdi+8]; call),
+    //   x0 = the host return-trampoline address. FEX's JIT pushes
+    //   <GuestRIP, HostRet> pairs onto a per-thread shadow stack through
+    //   REG_CALLRET_SP = x25 (ArchHelpers/Arm64Emitter.h:48) on every guest
+    //   CALL (JIT/BranchOps.cpp:168). State.callret_sp is zero-initialized
+    //   (CoreState.h:109) and FEXCore NEVER assigns it — every FEX frontend
+    //   does: FEXLoader's LinuxSyscalls/ThreadManager.cpp:196 and the
+    //   Windows frontend (Windows/Common/CallRetStack.h:36). PX5 embeds
+    //   FEXCore without FEXLoader and never did -> the first guest CALL of
+    //   any real binary deterministically faulted through the null pointer.
+    //   The synthetic suite never executes a guest CALL, which is why every
+    //   conformance/syscall/NID test passed on the same device while the
+    //   real eboot died at its entry. Same bug family as v1.24's
+    //   segment_arrays: "FEXCore expects the HOST to install X after
+    //   CreateThread; every FEX host does this; PX5 never did."
+    //
+    // Mirror FEXLoader's ThreadManager exactly: PROT_NONE reservation with
+    // a guard page on EACH side, RW middle, CallRetStackBase = base+page
+    // (FEXCore itself DontNeed()s exactly that range on invalidation), and
+    // callret_sp = base + SIZE/4 — 1 MiB of push headroom below and 3 MiB
+    // above; an unbalanced-call under/overflow hits a guard page and
+    // reports honestly instead of silently corrupting adjacent mappings.
+    // Per-thread host duties (callret stack, GDT, FSBASE, entry ABI) —
+    // shared with spawned guest threads since the v1.65 pthread tranche;
+    // the long-form evidence comments live on PrepareThreadState above.
+    if (!PrepareThreadState(thread, hostStackTop, initialFsBase, &res.error)) {
+        g_context->DestroyThread(thread);
+        return res;
+    }
     g_execThread = thread;
     SmcManager::GetInstance().SetExecThread(thread);
     // Clear any previous run's synchronous-fault record BEFORE execution so
@@ -962,7 +1025,9 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
 
     const auto t0 = std::chrono::steady_clock::now();
     PX5::Breadcrumb::Set("exec: execute enter (dispatch)");
+    t_execThread = thread;
     g_context->ExecuteThread(thread);
+    t_execThread = nullptr;
     PX5::Breadcrumb::Set("exec: execute returned");
     const auto t1 = std::chrono::steady_clock::now();
 
@@ -1042,9 +1107,72 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
     // Release the callret shadow stack BEFORE DestroyThread: FEXCore's
     // DestroyThread only VirtualDontNeed()s the range (madvise), it never
     // munmaps — without this the 4 MiB reservation would leak per run.
-    munmap(callretAlloc, callretAllocSize);
+    // (v1.65: the allocation lives in PrepareThreadState; the thread
+    // record carries the base, guards flank it on both sides.)
+    if (thread->CallRetStackBase) {
+        munmap(reinterpret_cast<void*>(
+                   reinterpret_cast<uintptr_t>(thread->CallRetStackBase) -
+                   kPageSizeNow()),
+               FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE +
+                   2 * kPageSizeNow());
+    }
     g_context->DestroyThread(thread);
     return res;
+}
+
+// ---------------------------------------------------------------------------
+// RunGuestThread — the pthread launcher seam's device half (v1.65).
+// Runs on the host std::thread the HLE spawned: builds a real
+// InternalThreadState for the guest entry (shared per-thread prep),
+// dispatches, and reports RAX at the stop. FSBASE comes pre-built from the
+// pthread layer's per-thread TCB (FreeBSD variant II). The callret shadow
+// stack lives INSIDE PrepareThreadState's mmap; DestroyThread only
+// DontNeed()s it, so it is munmapped here through the thread record.
+// ---------------------------------------------------------------------------
+bool RunGuestThread(uint64_t entryRip, uint64_t arg, uint64_t stackTopVa,
+                    uint64_t fsBaseVa, uint64_t* raxOut) {
+    if (!g_context) return false;
+    if (entryRip == 0 || stackTopVa == 0) return false;
+
+    auto* thread = g_context->CreateThread(entryRip, stackTopVa, nullptr);
+    if (!thread) {
+        PX5_LOGE(LogCategory::FEX,
+                 "guest-thread spawn: FEXCore CreateThread returned null");
+        return false;
+    }
+    std::string err;
+    if (!PrepareThreadState(thread, arg, fsBaseVa, &err)) {
+        PX5_LOGE(LogCategory::FEX,
+                 "guest-thread spawn: per-thread prep failed: %s", err.c_str());
+        g_context->DestroyThread(thread);
+        return false;
+    }
+    PX5_LOGI(LogCategory::FEX,
+             "guest-thread spawn: entry=0x%llx sp=0x%llx fs=0x%llx",
+             (unsigned long long)entryRip, (unsigned long long)stackTopVa,
+             (unsigned long long)fsBaseVa);
+    t_execThread = thread;
+    g_context->ExecuteThread(thread);
+    t_execThread = nullptr;
+    if (raxOut) {
+        *raxOut = thread->CurrentFrame->State.gregs[FEXCore::X86State::REG_RAX];
+    }
+    const uint64_t guestRip = thread->CurrentFrame->State.rip;
+    PX5_LOGI(LogCategory::FEX,
+             "guest-thread spawn returned: rip=0x%llx rax=0x%llx",
+             (unsigned long long)guestRip,
+             (unsigned long long)(raxOut ? *raxOut : 0));
+    // The callret reservation was installed on this thread's record; release
+    // it the same way the main path does (DestroyThread never munmaps).
+    if (thread->CallRetStackBase) {
+        munmap(reinterpret_cast<void*>(
+                   reinterpret_cast<uintptr_t>(thread->CallRetStackBase) -
+                   kPageSizeNow()),
+               FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE +
+                   2 * kPageSizeNow());
+    }
+    g_context->DestroyThread(thread);
+    return true;
 }
 
 bool RunConformanceTest() {

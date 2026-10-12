@@ -1,6 +1,10 @@
 #include "sce_kernel_hle.h"
 
 #include "libc_hle.h"
+#include "pthread_hle.h"
+#include "cxxabi_hle.h"
+#include "agc_hle.h"
+#include "../fexcore_integration.h"
 
 #include "../audio/audio_out_hle.h"
 #include "../gpu/gnm/gnm_submit.h"
@@ -142,6 +146,22 @@ void KernelHle::RegisterAll() {
     // v1.62 — the libc/libc++ tranche rides the same table + counters.
     LibcHle::Instance().CollectSymbols(&m_table);
 
+    // v1.65 — the pthread tranche (27 imports from the decoded game list)
+    // rides the same table + counters; its guest threads dispatch through
+    // the FEXCore launcher seam installed here (device path only — host
+    // tests install their own launcher before creating threads).
+    PthreadHle::Instance().SetGuestLauncher(
+        &PX5::FexCoreIntegration::RunGuestThread);
+    PthreadHle::Instance().CollectSymbols(&m_table);
+
+    // v1.67 — the C++ ABI runtime tranche (guards + exception registry)
+    // rides the same table + counters.
+    CxxAbiHle::Instance().CollectSymbols(&m_table);
+
+    // v1.68 — the sceAgc surface (189 imports) resolves through the same
+    // dispatch; the default handler's ledger is the tranche-2 worklist.
+    AgcHle::Instance().CollectSymbols(&m_table);
+
     m_registered = true;
     // Seed the NID registry: guest images import these functions by their
     // 11-char NID strings; the transparent import dispatch resolves those
@@ -163,8 +183,10 @@ void KernelHle::RegisterAll() {
         return false;
     };
     route.invoke = [](const std::string& symbol,
-                      const ImportCall& call) -> uint64_t {
-        return KernelHle::GetInstance().InvokeByImport(symbol, call);
+                      const ImportCall& call,
+                      uint64_t* xmmRetOut) -> uint64_t {
+        return KernelHle::GetInstance().InvokeByImport(symbol, call,
+                                                       xmmRetOut);
     };
     RuntimeLinker::GetInstance().SetImportRoute(std::move(route));
     PX5_LOGI(LogCategory::KERNEL,
@@ -466,7 +488,8 @@ uint64_t KernelHle::InvokeByName(const std::string& symbol,
 }
 
 uint64_t KernelHle::InvokeByImport(const std::string& symbol,
-                                   const ImportCall& call) {
+                                   const ImportCall& call,
+                                   uint64_t* xmmRetOut) {
     RegisterAll();
     const uint64_t a0 = call.args[0];
     const uint64_t a1 = call.args[1];
@@ -626,9 +649,21 @@ uint64_t KernelHle::InvokeByImport(const std::string& symbol,
         return s32(videoOut.ConfigureOutput(static_cast<int32_t>(a0), a1,
                                             a2));
 
-    // --- libc/libc++ tranche (v1.62) ----------------------------------------
+    // --- libc/libc++ tranche (v1.62; XMM return channel v1.66) --------------
     if (LibcHle::Instance().HasSymbol(symbol))
-        return LibcHle::Instance().Invoke(symbol, call);
+        return LibcHle::Instance().Invoke(symbol, call, xmmRetOut);
+
+    // --- pthread tranche (v1.65) --------------------------------------------
+    if (PthreadHle::Instance().HasSymbol(symbol))
+        return PthreadHle::Instance().Invoke(symbol, call, xmmRetOut);
+
+    // --- C++ ABI runtime tranche (v1.67) ------------------------------------
+    if (CxxAbiHle::Instance().HasSymbol(symbol))
+        return CxxAbiHle::Instance().Invoke(symbol, call, xmmRetOut);
+
+    // --- sceAgc surface (v1.68) ----------------------------------------------
+    if (AgcHle::Instance().HasSymbol(symbol))
+        return AgcHle::Instance().Invoke(symbol, call, xmmRetOut);
 
     return static_cast<uint64_t>(kErrInval);
 }

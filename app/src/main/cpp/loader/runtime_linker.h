@@ -98,7 +98,16 @@ constexpr uint32_t kPx5AbiStubEnd       = kPx5AbiStubBase + kPx5AbiStubSlots;
  */
 struct ImportCall {
     static constexpr size_t kRegArgCount = 6;
+    static constexpr size_t kXmmCount   = 8;   // SysV: xmm0..xmm7 carry FP args
     uint64_t args[kRegArgCount] = {};  ///< a1..a6 = rdi,rsi,rdx,rcx,r8,r9
+    /// v1.66 — the caller's XMM0..7 as raw 64-bit halves (never interpreted
+    /// here). Zeroed when the bridge had no live frame (host tests without
+    /// FEXCore); HLE float readers must refuse rather than guess.
+    uint64_t xmm[kXmmCount][2] = {};
+    /// v1.66 — true when the bridge published a live-frame snapshot into
+    /// xmm[]; false on frame-less hosts. FP-arg readers must check this
+    /// before trusting the values (zeroed registers are NOT "missing").
+    bool xmmValid = false;
     uint64_t guestRsp = 0;             ///< guest rsp at stub entry
 
     /**
@@ -107,6 +116,19 @@ struct ImportCall {
      * translate the address — callers must refuse, not guess.
      */
     bool ReadStackArg(size_t k, uint64_t* out) const;
+
+    /**
+     * v1.66 — reads XMM register idx as a double (low 64 bits, IEEE).
+     * False when idx >= kXmmCount. The caller decides what a missing
+     * register means for its ABI contract.
+     */
+    bool ReadXmmDouble(size_t idx, double* out) const;
+
+    /**
+     * v1.66 — reads XMM register idx as a float (low 32 bits of the low
+     * half, IEEE). False when idx >= kXmmCount.
+     */
+    bool ReadXmmFloat(size_t idx, float* out) const;
 };
 
 /**
@@ -302,7 +324,8 @@ public:
      * @param call Preserved guest call arguments (see ImportCall)
      * @return Guest-visible RAX (HLE result, or 0 on the ledger path)
      */
-    uint64_t DispatchImportCall(uint64_t importIndex, const ImportCall& call);
+    uint64_t DispatchImportCall(uint64_t importIndex, const ImportCall& call,
+                                uint64_t* xmmRetOut = nullptr);
 
     /**
      * Installs the import-route seam (v1.47): the two directions a
@@ -319,8 +342,14 @@ public:
             resolve;
         /// Runs the HLE implementation of a resolved symbol with the
         /// caller's preserved arguments; returns guest RAX.
+        /// v1.66 — xmmRetOut (when non-null) receives a double-return in
+        /// SysV XMM0 position (raw 64-bit halves) for functions whose
+        /// contract returns FP. Implementations that never return FP
+        /// leave it untouched; the bridge writes XMM0 only when the
+        /// implementation set it.
         std::function<uint64_t(const std::string& symbol,
-                               const ImportCall& call)>
+                               const ImportCall& call,
+                               uint64_t* xmmRetOut)>
             invoke;
     };
     void SetImportRoute(ImportRoute route);

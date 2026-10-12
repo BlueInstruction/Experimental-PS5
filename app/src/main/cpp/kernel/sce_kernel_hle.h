@@ -100,7 +100,8 @@ public:
      * is a named refusal, never a guessed zero.
      */
     uint64_t InvokeByImport(const std::string& symbol,
-                            const ImportCall& call);
+                            const ImportCall& call,
+                            uint64_t* xmmRetOut = nullptr);
 
     /**
      * Returns human-readable summary of HLE state.

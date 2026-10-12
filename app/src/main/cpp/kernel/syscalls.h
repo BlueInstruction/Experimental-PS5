@@ -70,6 +70,31 @@ public:
 /**
  * Guest syscall bridge dispatching Linux x86-64 syscalls to host.
  */
+// ---------------------------------------------------------------------------
+// GuestBridge — the XMM argument/return channels of the import-call bridge
+// (v1.66). The syscall entry has the live guest frame (with XMM0..7); the
+// import dispatch does not. One thread_local snapshot per direction carries
+// the state across the boundary; on hosts without a live frame (tests) the
+// take returns false and the HLE readers refuse, never guess.
+// ---------------------------------------------------------------------------
+namespace GuestBridge {
+struct XmmArgs {
+    uint64_t v[8][2] = {};   ///< XMM0..7 low/high halves
+};
+
+/// Called at syscall entry (device path) with the caller's XMM registers.
+void PublishXmmArgs(const XmmArgs& args);
+
+/// Consumed once per import call; false when no frame published.
+bool TakeXmmArgs(XmmArgs* out);
+
+/// HLE publishes a double-return here (SysV XMM0 position).
+void PublishXmmReturn(const uint64_t v[2]);
+
+/// The syscall epilogue consumes the return (false = HLE returned none).
+bool TakeXmmReturn(uint64_t out[2]);
+} // namespace GuestBridge
+
 class GuestSyscalls {
 public:
     /**

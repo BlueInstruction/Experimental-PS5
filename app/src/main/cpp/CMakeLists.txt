@@ -214,6 +214,9 @@ add_library(
         kernel/syscalls.cpp
         kernel/sce_kernel_hle.cpp
         kernel/libc_hle.cpp
+        kernel/pthread_hle.cpp
+        kernel/cxxabi_hle.cpp
+        kernel/agc_hle.cpp
         loader/elf_loader.cpp
         loader/guest_abi.cpp
         loader/self_loader.cpp

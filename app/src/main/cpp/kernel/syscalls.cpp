@@ -129,6 +129,45 @@ void GuestPcRing::Format(char* out, size_t outCap) {
     if (o < outCap) snprintf(out + o, outCap - o, "]");
 }
 
+// ---------------------------------------------------------------------------
+// GuestBridge (v1.66) — thread_local XMM channels; see syscalls.h.
+// ---------------------------------------------------------------------------
+namespace GuestBridge {
+namespace {
+thread_local XmmArgs t_xmmArgs;
+thread_local bool     t_xmmValid = false;
+thread_local uint64_t t_xmmRet[2] = {0, 0};
+thread_local bool     t_xmmRetValid = false;
+} // namespace
+
+void PublishXmmArgs(const XmmArgs& args) {
+    t_xmmArgs = args;
+    t_xmmValid = true;
+}
+
+bool TakeXmmArgs(XmmArgs* out) {
+    if (!t_xmmValid || !out) return false;
+    *out = t_xmmArgs;
+    // one-shot: a nested import call must not read a stale snapshot
+    t_xmmValid = false;
+    return true;
+}
+
+void PublishXmmReturn(const uint64_t v[2]) {
+    t_xmmRet[0] = v[0];
+    t_xmmRet[1] = v[1];
+    t_xmmRetValid = true;
+}
+
+bool TakeXmmReturn(uint64_t out[2]) {
+    if (!t_xmmRetValid || !out) return false;
+    out[0] = t_xmmRet[0];
+    out[1] = t_xmmRet[1];
+    t_xmmRetValid = false;
+    return true;
+}
+} // namespace GuestBridge
+
 uint64_t GuestSyscalls::Dispatch(uint32_t nr,
                                  uint64_t a0, uint64_t a1, uint64_t a2,
                                  uint64_t a3, uint64_t a4, uint64_t a5,
@@ -413,8 +452,17 @@ uint64_t GuestSyscalls::Dispatch(uint32_t nr,
         call.args[4] = a4;
         call.args[5] = a5;
         call.guestRsp = guestRsp;
+        // v1.66 — the caller's XMM0..7 ride the bridge snapshot the syscall
+        // entry published (absent on frame-less hosts: readers refuse).
+        GuestBridge::XmmArgs xargs;
+        call.xmmValid = GuestBridge::TakeXmmArgs(&xargs);
+        if (call.xmmValid) {
+            memcpy(call.xmm, xargs.v, sizeof(call.xmm));
+        }
+        uint64_t xmmRet[2] = {0, 0};
         const uint64_t ret = RuntimeLinker::GetInstance().DispatchImportCall(
-            static_cast<uint64_t>(nr - kPx5ImportCallBase), call);
+            static_cast<uint64_t>(nr - kPx5ImportCallBase), call, xmmRet);
+        (void)xmmRet;   // consumed by the epilogue via GuestBridge
         std::lock_guard<std::mutex> lk(g_stateMutex);
         g_stats.handledCalls++;
         return ret;

@@ -92,6 +92,21 @@ ExecResult ExecuteAtHostRip(uint64_t hostRip, uint64_t hostStackTop,
                             uint64_t initialFsBase = 0);
 
 /**
+ * Runs ONE spawned guest thread on the CALLING host thread (v1.65 pthread
+ * launcher seam, device half). Builds the per-thread FEXCore state with the
+ * shared PrepareThreadState duties (callret stack, GDT, FSBASE, entry ABI:
+ * RDI = arg) and dispatches until the thread's HLT/exit.
+ * @param entryRip Guest RIP of the thread entry
+ * @param arg Guest argument passed in RDI
+ * @param stackTopVa Guest SP (top of the thread's stack, grows down)
+ * @param fsBaseVa Guest FSBASE (the pthread layer's per-thread TCB)
+ * @param raxOut Receives guest RAX at the stop (the entry's return value)
+ * @return true when the thread ran and returned
+ */
+bool RunGuestThread(uint64_t entryRip, uint64_t arg, uint64_t stackTopVa,
+                    uint64_t fsBaseVa, uint64_t* raxOut);
+
+/**
  * Runs classic arithmetic conformance test (mov eax,40; add eax,2; hlt).
  * @return true if guest blob executed correctly, false otherwise
  */

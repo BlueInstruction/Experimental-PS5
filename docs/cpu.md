@@ -98,3 +98,76 @@ consumption from guest streams, HLE behaviour tests) may claim
 device truth until then — with the sole exception of M5-M7 GPU
 work, which is deliberately host-side and progresses independently
 (see docs/gpu.md).
+
+## How FEXCore really works, and what a PS5 game expects (v1.65 model)
+
+This section is the durable answer to three questions the device
+sessions kept forcing: how does an x86-64 game run on an ARM64 host,
+why is no modified glibc/bionic needed, and what exactly is "the CPU"
+for a PS5 guest.
+
+### The translation model
+
+A PS5 game binary is x86-64 machine code (AMD Jaguar) written against
+the SysV ABI plus ORBIS conventions. FEXCore is a dynamic binary
+translator, not a hardware emulator and not an interpreter:
+
+```
+guest block (x86-64) → decode → FEX IR → ARM64 JIT code → host executes
+```
+
+The guest's register file IS a data structure in our process
+(`FEXCore::Core::CPUState`: gregs[16], xmm[16], rip, flags...). The JIT
+keeps hot registers in ARM64 registers and spills the full state around
+host calls. Nothing "pretends to be a CPU" at runtime; each guest
+instruction never executes as itself — it contributes to generated
+ARM64 code. This is why every FEX host must install per-thread host
+duties FEXCore does not do itself (callret shadow stack, segment
+arrays, FSBASE): they are ABI state, not CPU state.
+
+### What the game expects from "the CPU" and "the OS"
+
+The game believes:
+
+1. It runs on a x86-64 Linux-like kernel (ORBIS libkernel semantics,
+   FreeBSD-derived). Its syscalls are NOT Linux numbers — PS5 libkernel
+   exports are reached through imports (NIDs), which is why the import
+   surface (not a libc rebuild) is the compatibility surface.
+2. Its threads are pthreads with a TCB at FSBASE (FreeBSD variant II:
+   self pointer at +0, dtv at +8, pthread at +16).
+3. Its C++ runtime objects (typeinfo vtables, exception chain, statics)
+   live in memory at link-time-relocated addresses.
+
+None of this needs glibc or modified bionic:
+
+* **bionic** is only the HOST libc that builds libpx5.so. It hosts the
+  emulator; the guest never sees it.
+* **glibc** never enters the picture for NID-HLE guests: the game's
+  libc calls are imports (memcpy, malloc, printf...) which the HLE
+  floor implements directly against guest memory. SharpDroid ships
+  real x86-64 guest libraries because it targets Windows games through
+  Winlator-style environments; a PS5 image brings its own crt and needs
+  the kernel surface, not a second libc.
+* FEXCore translates instructions only. It does NOT translate Linux
+  APIs into Android APIs — that routing is our syscall bridge
+  (kernel/syscalls.cpp) and HLE floor, exactly the boundary this file's
+  header block describes.
+
+### Guest threads (v1.65)
+
+scePthreadCreate spawns a host std::thread whose body builds a real
+FEXCore InternalThreadState through the shared PrepareThreadState
+(callret stack, GDT, FSBASE, entry ABI) and dispatches the guest
+entry. Fault routing, SMC compile paths and arch_prctl read the
+CURRENT dispatching thread (thread_local), not a global anchor. The
+per-thread TCB carries the image's PT_TLS image and the thread handle
+at fs:[16], matching scePthreadSelf's contract.
+
+### Why "load" is fast, and why that is not a feature
+
+Mapping a SELF is cheap (memcpy of segments + relocations); the real
+load time of a PS5 game lives in its main() (engine init, asset
+reads, shader warmup). Sessions that stop at the crt bootstrap end in
+milliseconds because nothing after _init_env has run yet. Fast load =
+early stop, read off the ledger's dispatch-result line — never claim
+it as progress.
